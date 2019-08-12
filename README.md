@@ -12,4 +12,4 @@ This is the source code of the compiler for the **xtab** computer programming la
 Download the `/source/` folder to your windows machine. The `/source/.bin/` folder contains compiled x64 binaries. The current release of `xtac` is `/source/.bin/xtac.exe`.
 
 ### Building
-Run the file `/source/.bin/xtac.exe`. This generates the file `/source/.bin/xtad.exe`. After resolving **all** issues, rename `xtad.exe` to `xtac.exe` (deleting the existing `xtac.exe` in the process) to have a new release of the `xtac` compiler.
+Run the file `/source/.bin/xtac.exe`. This compiles `*.xtab` in the `/source/` folder (and sub-folders) and generates `/source/.bin/xtad.exe`. After resolving **all** issues, rename `xtad.exe` to `xtac.exe` (deleting the existing `xtac.exe` in the process) to have a new release of the `xtac` compiler.
