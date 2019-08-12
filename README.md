@@ -1,7 +1,7 @@
 # xtac
 This is the source code of the compiler for the **xtab** computer programming language. It contains the compiler source and the standard library.
 
-xtab is a low-level compiled programming language that used to create efficient software applications. 
+**xtab** is a low-level general-purpose compiled programming language that is a joy to work in. 
 
 ## Compiling xtac
 
