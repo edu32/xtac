@@ -1,5 +1,5 @@
 # xtac
-This is the source code of the compiler for the xtab computer programming language. It contains the compiler source, the standard library and a test application that runs a local http web server.
+This is the source code of the compiler for the **xtab** computer programming language. It contains the compiler source and the standard library.
 
 xtab is an open source low-level computer programming language that is used to create efficient software applications using 
 
