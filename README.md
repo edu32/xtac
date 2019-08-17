@@ -6,7 +6,7 @@ This is the source code of the compiler for the **xtab** computer programming la
 ## Compiling `xtac`
 
 ### Platform dependencies
-`xtac` compiles **xtab** source files into x64 binaries on windows. On windows, `xtac` has no external dependencies other than the Windows APIs and the C runtime library. `xtac` contains (and emits) AVX instructions.
+`xtac` compiles **xtab** source files into x64 binaries on windows. On windows, `xtac` has no external dependencies other than the Windows API and the C runtime library. `xtac` contains (and emits) AVX instructions.
 
 ### Downloading
 Download the `/source/` folder to your windows machine. The `/source/.bin/` folder contains compiled x64 binaries and the `/source/compiler/` folder contains the compiler source. The current release of `xtac` is `/xtac.exe` and is in the same folder as `/source/`.
