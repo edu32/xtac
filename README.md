@@ -38,14 +38,14 @@ add("Hello ", "world") // Output: Hello world
 
 Generate and print the first `n` numbers of the fibonacci sequence
 
-```rust
+```javascript
 /* Assume n >= 2 */
 fn fibonacci(n) {
   yield 0 /* The first number of the fibonacci series is 0. */
   yield 1 /* The second number of the fibonacci series is 1. */  
-  let last = 0, next = 1
+  var last = 0, next = 1
   for let i = 2; i < n; ++i {
-    fib = last + next
+    const fib = last + next
     yield fib
     last = next
     next = fib
