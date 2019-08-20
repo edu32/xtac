@@ -17,7 +17,7 @@ Run the file `xtac.exe`. This compiles all non-empty `*.xtab` files in the `/sou
 
 ## Code snippets
 
-Factorial of first `n` integers
+Factorial of first `n` natural numbers (ℕ)
 
 ```rust
 fn factorial(n) {
