@@ -47,7 +47,9 @@ fn fibonacci(n) {
   for let i = 2; i < n; ++i {
     fib = last + next
     yield fib
-    (last, next) = (next, fib)
+    last = next
+    next = fib
+    // You can replace the previous two lines with (last, next) = (next, fib)
   }
 }
 
