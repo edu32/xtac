@@ -37,12 +37,12 @@ add(1, 2.5) // Output: 3.5
 add("Hello ", "world") // Output: Hello world
 ```
 
-Generate and print the first `n` fibonacci
+Generate and print the first `n` numbers of the fibonacci sequence
 
 ```rust
 fn fibonacci(n) {
   yield 0 /* The first number of the fibonacci series is 0. */
-  yield 1 /* The second number of the fibonacci series is 1. */
+  yield 1 /* The second number of the fibonacci series is 1. */  
   let last = 0, next = 1
   for let i = 2; i < n; ++i {
     fib = last + next
@@ -52,8 +52,8 @@ fn fibonacci(n) {
   }
 }
 
-// Prints 0, 1, 1, 2, 3, 5, 8, 13, 21, 34 and 55.
 each number in auto fibonacci(10) {
   println(number)
 }
+// Output: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34 and 55.
 ```
