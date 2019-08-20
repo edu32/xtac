@@ -6,7 +6,7 @@ This is the source code of the compiler for the **xtab** computer programming la
 ## Compiling xtac
 
 ### Dependencies
-`xtac` compiles **xtab** source files into x64 binaries on Windows.\
+`xtac` compiles **xtab** source files to x64 binaries on a 64-bit processor running 64-bit Windows.\
 `xtac` has no external dependencies other than the Windows API and the C runtime library strictly through dynamic linking. `xtac` contains (and emits) Intel 64/AMD64 128-bit and 256-bit AVX instructions. `xtac` is multi-threaded and requires upto 1 GB of RAM to compile itself.
 
 ### Downloading
@@ -14,3 +14,46 @@ Download the `/source/` folder to your Windows machine. The `/source/.bin/` fold
 
 ### Building
 Run the file `xtac.exe`. This compiles all non-empty `*.xtab` files in the `/source/` folder (and sub-folders) and generates `/source/.bin/xtac.exe`. After resolving **all** issues, copy `/source/.bin/xtac.exe` to `/xtac.exe` (deleting the existing `xtac.exe` in the process) to have a new release of the `xtac` compiler.
+
+## Code snippets
+
+Factorial of first `n` integers
+
+```rust
+fn factorial(n) {
+    if n > 0 {
+      return n * factorial(n - 1)
+    }
+    return 1
+}
+```
+
+Generically add two numbers (or invoke overloaded `+` for non-numeric types)
+
+```rust
+fn add(a, b) = a + b
+
+add(1, 2.5) // Output: 3.5
+add("Hello ", "world") // Output: Hello world
+```
+
+Generate and print the first `n` fibonacci
+
+```rust
+fn fibonacci(n) {
+  yield 0 /* The first number of the fibonacci series is 0. */
+  yield 1 /* The second number of the fibonacci series is 1. */
+  let last = 0, next = 1
+  for let i = 2; i < n; ++i {
+    fib = last + next
+    yield fib
+    last = next
+    next = fib
+  }
+}
+
+// Prints 0, 1, 1, 2, 3, 5, 8, 13, 21, 34 and 55.
+each number in auto fibonacci(10) {
+  println(number)
+}
+```
