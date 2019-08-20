@@ -41,8 +41,8 @@ Generate and print the first `n` numbers of the fibonacci sequence
 ```javascript
 /* Assume n >= 2 */
 fn fibonacci(n) {
-  yield 0 /* The first number of the fibonacci series is 0. */
-  yield 1 /* The second number of the fibonacci series is 1. */  
+  yield 0 /* The first number of the fibonacci sequence is 0. */
+  yield 1 /* The second number of the fibonacci sequence is 1. */  
   var last = 0, next = 1
   for let i = 2; i < n; ++i {
     const fib = last + next
