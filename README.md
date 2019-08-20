@@ -3,9 +3,9 @@ This is the source code of the compiler for the **xtab** computer programming la
 
 **xtab** is a self-hosted low-level compiled programming language.
 
-## Compiling `xtac`
+## Compiling xtac
 
-### Platform dependencies
+### Dependencies
 `xtac` compiles **xtab** source files into x64 binaries on Windows.\
 `xtac` has no external dependencies other than the Windows API and the C runtime library strictly through dynamic linking. `xtac` contains (and emits) Intel 64/AMD64 128-bit and 256-bit AVX instructions. `xtac` is multi-threaded and requires upto 1 GB of RAM to compile itself.
 
