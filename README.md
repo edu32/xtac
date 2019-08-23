@@ -73,10 +73,12 @@ fn printNameOfDay(nameOfDay, lengthToPrint) {
         default assert with "Invalid lengthToPrint: #{lengthToPrint} (nameof(lengthToPrint)) for #{name}"
     }
 }
+const    namesOfDays = countof(NameOfDay)
+const lengthsToPrint = countof(LengthToPrint)
 var j = 0
-for var i = 0; i < 7 /* MAX_NAMEOFDAY = 7 */; ++i {
+for var i = 0; i < namesOfDays; ++i {
     printNameOfDay(i as NameOfDay, j as LengthToPrint)
-    if ++j > 3 { /* MAX_LENGTHTOPRINT = 4 */
+    if ++j >= lengthsToPrint {
         j = 0
     }
 }
