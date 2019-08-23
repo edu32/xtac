@@ -80,5 +80,5 @@ for var i = 0; i < 7 /* MAX_NAMEOFDAY = 7 */; ++i {
         j = 0
     }
 }
-// Output: S, Mo, Tue, W, Th, Fri, S
+// Output: S, Mo, Tue, Wedsneday, T, Fr, Sat
 ```
