@@ -64,12 +64,13 @@ Print substrings of the names of the days of the week
 enum NameOfDay { Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday }
 enum LengthToPrint { OneLetter, TwoLetters, ThreeLetters, WholeName }
 fn printNameOfDay(nameOfDay, lengthToPrint) {
+    const name = nameof(nameOfDay)
     switch lengthToPrint {
-        case LengthToPrint.OneLetter    println(nameof(nameOfDay)[0])
-        case LengthToPrint.TwoLetters   println(string{ text = nameof(nameOfDay).text, length = 2 })
-        case LengthToPrint.ThreeLetters println(string{ text = nameof(nameOfDay).text, length = 3 })
-        case LengthToPrint.WholeName    println(nameof(nameOfDay))
-        default assert with "Invalid lengthToPrint: #{lengthToPrint} (nameof(lengthToPrint))"
+        case LengthToPrint.OneLetter    println(name[0])
+        case LengthToPrint.TwoLetters   println(string{ text = name.text, length = 2 })
+        case LengthToPrint.ThreeLetters println(string{ text = name.text, length = 3 })
+        case LengthToPrint.WholeName    println(name)
+        default assert with "Invalid lengthToPrint: #{lengthToPrint} (nameof(lengthToPrint)) for #{name}"
     }
 }
 var j = 0
@@ -79,4 +80,5 @@ for var i = 0; i < 7 /* MAX_NAMEOFDAY */; ++i {
         j = 0
     }
 }
+// Output: S, Mo, Tue, W, Th, Fri, S
 ```
