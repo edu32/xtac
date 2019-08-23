@@ -6,7 +6,7 @@ This is the source code of the compiler for the **xtab** computer programming la
 ## Compiling xtac
 
 ### Dependencies
-`xtac` is a 64-bit compiler for **xtab** source files and emits x64 binaries. It has no external dependencies other than the Windows API and the C runtime library strictly through dynamic linking. `xtac` contains (and emits) 128-bit and 256-bit AVX instructions. `xtac` is multi-threaded and requires upto 1 GB of RAM to compile itself.
+`xtac` is a 64-bit compiler for **xtab** source files and emits x64 binaries. It has no external dependencies other than the Windows API and the C runtime library strictly through dynamic linking. `xtac` contains (and emits) 128-bit and 256-bit AVX instructions for IvyBridge or higher. `xtac` is multi-threaded and requires upto 1 GB of RAM to compile itself.
 
 ### Downloading
 Download the `/source/` folder to your Windows machine. The `/source/.bin/` folder contains compiled x64 binaries and the `/source/compiler/` folder contains the compiler source. The current release of `xtac` is `/xtac.exe` and is in the same folder as `/source/`.
