@@ -74,9 +74,9 @@ fn printNameOfDay(nameOfDay, lengthToPrint) {
     }
 }
 var j = 0
-for var i = 0; i < 7 /* MAX_NAMEOFDAY */; ++i {
+for var i = 0; i < 7 /* MAX_NAMEOFDAY = 7 */; ++i {
     printNameOfDay(i as NameOfDay, j as LengthToPrint)
-    if ++j > 4 { /* MAX_LENGTHTOPRINT */
+    if ++j > 3 { /* MAX_LENGTHTOPRINT = 4 */
         j = 0
     }
 }
