@@ -33,7 +33,6 @@ Generically add two numbers (or invoke overloaded `+` for non-numeric types)
 fn add(a, b) = a + b
 
 add(1, 2.5) // Output: 3.5
-add("Hello ", "world") // Output: Hello world
 ```
 
 Generate and print the first `n` numbers of the fibonacci sequence
@@ -57,4 +56,27 @@ each number in auto fibonacci(10) {
   println(number)
 }
 // Output: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34 and 55.
+```
+
+Print substrings of the names of the days of the week
+
+```javascript
+enum NameOfDay { Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday }
+enum LengthToPrint { OneLetter, TwoLetters, ThreeLetters, WholeName }
+fn printNameOfDay(nameOfDay, lengthToPrint) {
+    switch lengthToPrint {
+        case LengthToPrint.OneLetter    println(nameof(nameOfDay)[0])
+        case LengthToPrint.TwoLetters   println(string{ text = nameof(nameOfDay).text, length = 2 })
+        case LengthToPrint.ThreeLetters println(string{ text = nameof(nameOfDay).text, length = 3 })
+        case LengthToPrint.WholeName    println(nameof(nameOfDay))
+        default assert with "Invalid lengthToPrint: #{lengthToPrint} (nameof(lengthToPrint))"
+    }
+}
+var j = 0
+for var i = 0; i < 7 /* MAX_NAMEOFDAY */; ++i {
+    printNameOfDay(i as NameOfDay, j as LengthToPrint)
+    if ++j > 4 { /* MAX_LENGTHTOPRINT */
+        j = 0
+    }
+}
 ```
