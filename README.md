@@ -82,5 +82,5 @@ for var i = 0; i < namesOfDays; ++i {
         j = 0
     }
 }
-// Output: S, Mo, Tue, Wedsneday, T, Fr, Sat
+// Output: S, Mo, Tue, Wednesday, T, Fr, Sat
 ```
