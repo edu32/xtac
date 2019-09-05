@@ -1,0 +1,85 @@
+import Queue from std.collections
+
+struct Object(T) {
+  var qnext = Object(T)*{}, qprev = Object(T)*{}
+  readonly handle = T*{}
+  readonly resumable = Resumable*{}
+  readonly advanceOnClose = false
+
+  fn dispose(this) {
+    assert this.resumable && this.resumable.stopped && this.resumable.dispose && this.handle
+    delete this.resumable
+    this.handle = null
+    this.advanceOnClose = false
+  }
+
+  fn open(this, resumable, handle, advanceOnClose) {
+    assert !this.resumable && !this.handle && !this.advanceOnClose
+    this.resumable = resumable
+    this.handle = handle
+    this.advanceOnClose = advanceOnClose
+  }
+
+  fn close(this) {
+    assert this.resumable && this.handle
+    if !this.resumable.stopped {
+      this.handle.close()
+      if this.advanceOnClose {
+        this.resumable.next()
+      }
+    }
+  }
+
+  fn isFree(this) = !this.resumable && !this.handle
+  fn isBusy(this) = this.resumable && !this.resumable.stopped
+}
+
+struct ObjectList(T) {
+  readonly list = Queue(Object(T)){}
+  readonly srw = atomic.ExclusiveLock{}
+
+  fn dispose(this) {
+    delete this.list with fn(x) = delete x
+  }
+
+  synchronized fn close(this, freeList) {
+    for {
+      var busy = 0
+      each object in this.list.reverseIterator() {
+        if object.isBusy() {
+          object.close()
+          ++busy
+        } else if freeList {
+          this.list.remove(object)
+          freeList.add(object)
+        }
+      }
+      break if !busy
+    }
+    assert this.list.isEmpty()
+  }
+
+  synchronized fn add(this, service) {
+    this.list.append(service)
+  }
+
+  synchronized fn remove(this, service) {
+    this.list.remove(service)
+  }
+
+  synchronized fn get(this) {
+    each service in this.list.iterator() {
+      if service.isFree() {
+        this.list.remove(service)
+        return service
+      } if !service.isBusy() {
+        service.dispose()
+        this.list.remove(service)
+        return service
+      }
+    }
+    return null
+  }
+
+  fn isEmpty(this) = this.list.isEmpty()
+}

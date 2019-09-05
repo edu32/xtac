@@ -1,0 +1,739 @@
+struct Modifiers {
+  var            pos = Pos{}
+  var       isStatic = false
+  var        isConst = false
+  var     isReadOnly = false
+  var         isAuto = false
+  var          isVar = false
+  var isSynchronized = false
+  var        isAsync = false
+  var     isAbstract = false
+
+  fn hasAny(this) = *(&this.isStatic as UInt64*) != 0
+
+  fn isNotValidForVariable(this) {
+    return this.isSynchronized || this.isAsync || this.isAbstract
+  }
+
+  fn isNotValidForUnionField(this) {
+    return this.isStatic || this.isAuto
+  }
+
+  fn isNotValidForStruct(this) {
+    return this.isSynchronized || this.isAsync
+  }
+
+  fn isNotValidForUnion(this) {
+    return this.isAuto || this.isSynchronized || this.isAsync || this.isAbstract
+  }
+
+  fn isNotValidForEnum(this) {
+    return this.isAuto || this.isSynchronized || this.isAsync || this.isAbstract
+  }
+
+  fn isNotValidForFunction(this) {
+    return this.isStatic || this.isConst || this.isReadOnly
+  }
+
+  fn combinationIsNotValid(this) {
+    return (this.isConst && this.isReadOnly) ||
+           (this.isAsync && this.isAbstract) ||
+           (this.isAuto && (this.isConst || this.isReadOnly))
+  }
+}
+
+
+abstract struct  Node {
+  var pos = Pos{}
+
+  fn dispose(this) {
+
+  }
+
+  fn isaTypeNode(this): TypeNode* {
+    switch this {
+      case Struct   return this
+      case Union    return this
+      case Enum     return this
+      case Function return this
+    }
+    return null
+  }
+  fn isNotATypeNode(this) = !this.isaTypeNode()
+}
+
+
+struct Folder :  Node {
+  const    parent = Folder*{}
+  const      path = Identifier*{}
+  const      name = Identifier*{}
+  const slashName = Identifier*{}
+  const   folders = Dict(Folder*){}
+  const     files = Dict(File*){}
+  var    initFile = File*{}
+
+  fn dispose(this): this {
+    delete this.folders with fn(x) = delete x
+    delete this.files with fn(x) = delete x
+    super.dispose()
+  }
+
+
+  fn isRoot(this) = this.parent == null
+}
+
+
+struct File :  Node {
+  const    parent = Folder*{}
+  var      source = String*{}
+  const      path = Identifier*{}
+  const      name = Identifier*{}
+  const slashName = Identifier*{}
+  var       block = Block*{}
+  const        id = 0
+
+  fn dispose(this) {
+    this.block = ndispose(this.block)
+    super.dispose()
+  }
+}
+
+
+struct Block : Node {
+  const    owner = Node*{}
+  const children = List(Node*){}
+  var closeCurly = Pos{}
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+}
+
+
+struct If : Node {
+  var condition = Node*{}
+  var    iftrue = Block*{}
+  var    ifalse = Node*{}
+
+  fn dispose(this) {
+    this.condition = ndispose(this.condition)
+    this.iftrue = ndispose(this.iftrue)
+    this.ifalse = ndispose(this.ifalse)
+    super.dispose()
+  }
+}
+
+
+struct For : Node {
+  var initializer = Node*{}
+  var   condition = Node*{}
+  var   increment = Node*{}
+  var       block = Block*{}
+
+  fn dispose(this) {
+    this.initializer = ndispose(this.initializer)
+    this.condition = ndispose(this.condition)
+    this.increment = ndispose(this.increment)
+    this.block = ndispose(this.block)
+    super.dispose()
+  }
+}
+
+
+struct ForIn : Node {
+  var   lhs = Node*{}
+  var   rhs = Node*{}
+  var block = Block*{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    this.rhs = ndispose(this.rhs)
+    this.block = ndispose(this.block)
+    super.dispose()
+  }
+}
+
+
+struct Each : Node {
+  var   lhs = Node*{}
+  var   rhs = Node*{}
+  var block = Block*{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    this.rhs = ndispose(this.rhs)
+    this.block = ndispose(this.block)
+    super.dispose()
+  }
+}
+
+
+struct Switch : Node {
+  var condition = Node*{}
+  var     block = Block*{}
+
+  fn dispose(this) {
+    this.condition = ndispose(this.condition)
+    this.block = ndispose(this.block)
+    super.dispose()
+  }
+}
+
+
+struct Case : Node {
+  var condition = Node*{}
+  var     block = Block*{}
+
+  fn dispose(this) {
+    this.condition = ndispose(this.condition)
+    this.block = ndispose(this.block)
+    super.dispose()
+  }
+}
+
+
+struct FlowControl : Node {
+  var   value = Node*{}
+  var keyword = Tok{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+
+struct Assert : Node {
+  var       condition = Node*{}
+  var        withPart = Node*{}
+  var isAutoCondition = false
+
+  fn dispose(this) {
+    this.condition = ndispose(this.condition)
+    this.withPart = ndispose(this.withPart)
+    super.dispose()
+  }
+}
+
+
+struct Import : Node {
+  var      name = Node*{}
+  var     alias = Node*{}
+  var    source = Node*{}
+  const keyword = Tok{}
+
+  fn dispose(this) {
+    this.name = ndispose(this.name)
+    this.alias = ndispose(this.alias)
+    this.source = ndispose(this.source)
+    super.dispose()
+  }
+}
+
+
+struct Variable : Node {
+  const modifiers = Modifiers{}
+  var        name = Node*{}
+  var         rhs = Node*{}
+  var  isEllipsis = false
+
+  fn dispose(this) {
+    this.name = ndispose(this.name)
+    this.rhs = ndispose(this.rhs)
+    super.dispose()
+  }
+}
+
+
+struct TypeNode : Node {
+  const modifiers = Modifiers{}
+  var       block = Block*{}
+  var        name = Identifier*{}
+  var  parameters = Tuple*{}
+  const   keyword = Tok{}
+
+  fn dispose(this) {
+    this.block = ndispose(this.block)
+    this.parameters = ndispose(this.parameters)
+    super.dispose()
+  }
+}
+
+
+struct Structure : TypeNode {
+  var alignment = 0
+}
+
+
+struct Struct : Structure {
+  var supers = Node*{}
+
+  fn dispose(this) {
+    this.supers = ndispose(this.supers)
+    super.dispose()
+  }
+}
+
+
+struct Union : Structure {
+
+  fn dispose(this) {    
+    super.dispose()
+  }
+}
+
+
+struct Enum : TypeNode {
+  var valueType = Node*{}
+
+  fn dispose(this) {
+    this.valueType = ndispose(this.valueType)
+    super.dispose()
+  }
+}
+
+
+struct Function : TypeNode {
+  var urlHandlerMethod = Identifier*{}
+  var         fnreturn = Node*{}
+  var seen = {
+    returns = 0,
+    yields  = 0,
+    awaits  = 0
+  }
+
+  fn dispose(this) {
+    this.fnreturn = ndispose(this.fnreturn)
+    super.dispose()
+  }
+}
+
+
+struct CommaList : Node {
+  var children = List(Node*){}
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+}
+
+
+struct Parenthesized : Node {
+  var      value = Node*{}
+  var closeParen = Pos{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+
+struct IfExpr : Node {
+  var    iftrue = Node*{}
+  var condition = Node*{}
+  var    ifalse = Node*{}
+
+  fn dispose(this) {
+    this.iftrue = ndispose(this.iftrue)
+    this.condition = ndispose(this.condition)
+    this.ifalse = ndispose(this.ifalse)
+    super.dispose()
+  }
+}
+
+
+struct Auto : Node {
+  var value = Node*{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+
+struct Binary : Node {
+  var lhs = Node*{}
+  var rhs = Node*{}
+  var  op = Pos{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    this.rhs = ndispose(this.rhs)
+    super.dispose()
+  }
+}
+
+
+struct UnaryPrefix : Node {
+  var      rhs = Node*{}
+  var withPart = Node*{}
+  var       op = Pos{}
+
+  fn dispose(this) {
+    this.rhs = ndispose(this.rhs)
+    this.withPart = ndispose(this.withPart)
+    super.dispose()
+  }  
+}
+
+
+struct UnarySuffix : Node {
+  var lhs = Node*{}
+  var  op = Pos{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    super.dispose()
+  }  
+}
+
+
+struct MemberName : Node {
+  var lhs = Node*{}
+  var rhs = Node*{}
+  var dot = Pos{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    this.rhs = ndispose(this.rhs)
+    super.dispose()
+  }
+}
+
+
+struct Initializer : Node {
+  var      name = Node*{}
+  var arguments = Object*{}
+
+  fn dispose(this) {
+    this.name = ndispose(this.name)
+    this.arguments = ndispose(this.arguments)
+    super.dispose()
+  }
+}
+
+
+struct Call : Node {
+  var      name = Node*{}
+  var arguments = Tuple*{}
+
+  fn dispose(this) {
+    this.name = ndispose(this.name)
+    this.arguments = ndispose(this.arguments)
+    super.dispose()
+  }
+}
+
+
+struct ArrayIndex : Node {
+  var      name = Node*{}
+  var arguments = Array*{}
+
+  fn dispose(this) {
+    this.name = ndispose(this.name)
+    this.arguments = ndispose(this.arguments)
+    super.dispose()
+  }
+}
+
+
+struct Tuple : Node {
+  var   children = List(Node*){}
+  var closeParen = Pos{}
+  var  tupleKind = Tok.OpenParen
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+}
+
+
+struct Array : Node {
+  var     children = List(Node*){}
+  var closeBracket = Pos{}
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+}
+
+
+struct Object : Node {
+  var   children = Dict(NameValue*){}
+  var closeCurly = Pos{}
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+}
+
+
+struct NameValue : Node {
+  var      name = Identifier*{}
+  var     value = Node*{}
+  const keyword = Tok{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+
+struct Name : Node {
+  var     value = Identifier*{}
+  const keyword = Tok{}
+}
+
+
+struct InterpolationItem : Node {
+  var          value = Node*{}
+  var            fmt = Identifier*{}
+  const closeBracket = Pos{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+
+struct Interpolation : Node {
+  const children = List(Node*){}
+  var closeQuote = Pos{}
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+}
+
+
+struct Text : Node {
+  const   value = Identifier*{}
+  const isWChar = false
+}
+
+
+struct Quoted : Node {
+  var      value = Identifier*{}
+  var closeQuote = Pos{}
+  const  isWChar = false
+}
+
+
+struct Character : Node {
+  const    value = ''
+  var closeQuote = Pos{}
+  const  isWChar = false
+}
+
+
+struct Constant : Node {
+  enum Kind {
+    None, Null, Void,
+          Bool, WChar, UInt8, UInt16, UInt32, UInt64,
+          Char,         Int8,  Int16,  Int32,  Int64,
+          Float, Double
+  }
+  const value = union {
+    var bool = false
+    var u8   = 0u8
+    var u16  = 0u16
+    var u32  = 0u32
+    var u64  = 0u64
+    var char = ''
+    var i8   = 0i8
+    var i16  = 0i16
+    var i32  = 0i32
+    var i64  = 0i64
+    var f32  = 0f32
+    var f64  = 0f64
+  }
+  readonly kind = Kind{}
+}
+
+
+fn ldispose(list): void {
+  delete list with fn(x) = ndispose(x)
+}
+
+
+fn ndispose(node): typeof(node) {
+  return node if !node
+  switch node {
+    case Node         node.dispose()
+    case Folder       node.dispose()
+    case File         node.dispose()
+    case Block        node.dispose()
+    case If           node.dispose()
+    case For          node.dispose()
+    case ForIn        node.dispose()
+    case Each         node.dispose()
+    case Switch       node.dispose()
+    case Case         node.dispose()
+    case FlowControl  node.dispose()
+    case Assert       node.dispose()
+
+    case Import       node.dispose()
+    case Variable     node.dispose()
+    case Struct       node.dispose()
+    case Union        node.dispose()
+    case Enum         node.dispose()
+    case Function     node.dispose()
+
+    case CommaList    node.dispose()
+    case Parenthesized node.dispose()
+    case IfExpr       node.dispose()
+    case Auto         node.dispose()
+    case Binary       node.dispose()
+    case UnaryPrefix  node.dispose()
+    case UnarySuffix  node.dispose()
+    case MemberName   node.dispose()
+    case Initializer  node.dispose()
+    case Call         node.dispose()
+    case ArrayIndex   node.dispose()
+    case Tuple        node.dispose()
+    case Array        node.dispose()
+    case Object       node.dispose()
+    case NameValue    node.dispose()
+    case Name         node.dispose()
+    case InterpolationItem  node.dispose()
+    case Interpolation      node.dispose()
+    case Text         node.dispose()
+    case Quoted       node.dispose()
+    case Character    node.dispose()
+    case Constant    node.dispose()
+    default assert with "#{nameof(node)}"
+  }
+  import mfree from std.memory
+  mfree(node)
+  return null
+}
+
+fn nlastpos(node) {
+  return Pos{} if !node
+  switch node {
+    case Node {}
+    case Folder
+      return nlastpos(node.initFile) if node.initFile
+        else nlastpos(node.files.first()) if node.files.isNotEmpty()
+    case File
+      return nlastpos(node.block)
+    case Block
+      return node.closeCurly if node.closeCurly.isValid()
+    case If
+      return nlastpos(node.ifalse) if node.ifalse
+        else nlastpos(node.iftrue)
+    case For
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.increment) if node.increment
+        else nlastpos(node.condition) if node.condition
+        else nlastpos(node.initializer) if node.initializer
+    case ForIn
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.rhs) if node.rhs
+        else nlastpos(node.lhs) if node.lhs
+    case Each
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.rhs) if node.rhs
+        else nlastpos(node.lhs) if node.lhs        
+    case Switch
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.condition) if node.condition
+    case Case
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.condition) if node.condition
+    case FlowControl
+      return nlastpos(node.value) if node.value
+    case Assert
+      return nlastpos(node.withPart) if node.withPart
+        else nlastpos(node.condition) if node.condition
+
+    case Import
+      return nlastpos(node.source) if node.source
+        else nlastpos(node.alias) if node.alias
+        else nlastpos(node.name) if node.name
+    case Variable
+      return nlastpos(node.rhs) if node.rhs
+        else nlastpos(node.name) if node.name
+    case Struct
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.parameters) if node.parameters
+    case Union
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.parameters) if node.parameters
+    case Enum
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.parameters) if node.parameters
+    case Function
+      return nlastpos(node.block) if node.block
+        else nlastpos(node.fnreturn) if node.fnreturn
+        else nlastpos(node.parameters) if node.parameters
+
+    case CommaList
+      return nlastpos(node.children.last() as Node*) if node.children.isNotEmpty()
+    case Parenthesized
+      return node.closeParen if node.closeParen.isValid()
+        else nlastpos(node.value) if node.value
+    case IfExpr
+      return nlastpos(node.ifalse) if node.ifalse
+        else nlastpos(node.condition) if node.condition
+        else nlastpos(node.iftrue) if node.iftrue
+    case Auto
+      return nlastpos(node.value) if node.value
+    case Binary
+      return nlastpos(node.rhs) if node.rhs
+        else node.op if node.op.isValid()
+        else nlastpos(node.lhs) if node.lhs
+    case UnaryPrefix
+      return nlastpos(node.rhs)
+    case UnarySuffix
+      return node.op if node.op.isValid()
+    case MemberName
+      return nlastpos(node.rhs) if node.rhs 
+        else node.dot if node.dot.isValid()
+    case Initializer
+      return nlastpos(node.arguments) if node.arguments
+        else nlastpos(node.name) if node.name
+    case Call
+      return nlastpos(node.arguments) if node.arguments
+        else nlastpos(node.name) if node.name
+    case ArrayIndex
+      return nlastpos(node.arguments) if node.arguments
+        else nlastpos(node.name) if node.name
+    case Tuple
+      return node.closeParen if node.closeParen.isValid()
+        else nlastpos(node.children.last() as Node*) if node.children.isNotEmpty()
+    case Array
+      return node.closeBracket if node.closeBracket.isValid()
+        else nlastpos(node.children.last() as Node*) if node.children.isNotEmpty()
+    case Object
+      return node.closeCurly if node.closeCurly.isValid()
+        else nlastpos(node.children.last() as Node*) if node.children.isNotEmpty()
+    case NameValue
+      return nlastpos(node.value) if node.value
+    case Name{}
+    case InterpolationItem
+      return node.closeBracket if node.closeBracket.isValid()
+        else nlastpos(node.value) if node.value
+    case Interpolation
+      return node.closeQuote if node.closeQuote.isValid()
+        else nlastpos(node.children.first() as Node*) if node.children.isNotEmpty()
+    case Text{}
+    case Quoted
+      return node.closeQuote if node.closeQuote.isValid()
+    case Character
+      return node.closeQuote if node.closeQuote.isValid()
+    case Constant{}
+    default assert with "#{nameof(node)}"
+  } 
+  return node.pos
+}

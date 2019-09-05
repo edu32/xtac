@@ -1,0 +1,102 @@
+fn test() {
+  fn fibonacci(n) {
+    yield 0 /* The first number of the fibonacci series is 0. */
+    yield 1 /* The second number of the fibonacci series is 1. */
+    var last = 0, nextn = 1
+    for var i = 1; i < n; ++i {
+      const fib = last + nextn
+      yield fib
+      (last, nextn) = (nextn, fib)
+      //nextn = fib
+    }
+  }
+
+  // Create generator object and 
+  each number in auto fibonacci(10) {
+    println(number)
+  }
+}
+
+fn run() {
+  var cmd = ""
+  //for cmd != "q" {
+    import aio
+    import mleaks from std.memory
+    import cls, readln from std.console
+    cls()
+    //test()
+    //mleaks()
+    for var i = 0; i < 1000; ++i {
+      import compiler
+      compiler.compile(i)
+      mleaks()
+    }
+    cmd = readln()
+    //aio.startup()
+    //import app 
+    //app.run()
+    //aio.shutdown()
+    //mleaks()
+    //cmd = readln()
+  //}
+}
+
+run()
+
+fn enumValues(list, indent): void {
+  import std.console.write
+  each name, value in list {
+    for var i = 0; i < indent; ++i {
+      write("  ")
+    }
+    println("› #{name} = #{value}")
+  }
+}
+
+
+fn enumSubKeys(list, indent): void {
+  import std.console.write
+  import winreg from std
+  each key, name in list {
+    for var i = 0; i < indent; ++i {
+      write("  ")
+    }
+    println("» #{name}")
+    each subKeys, values in auto winreg.enumerate(key) {
+      if values {
+        enumValues(values, indent + 1)
+      } if subKeys {
+        enumSubKeys(subKeys, indent + 1)
+      }
+    }
+  }
+}
+
+
+fn enumFolder(folder, indent): void {
+  import std.console.write
+  import fs from std
+  each entry in auto fs.enumerate(folder.path)  {
+    for var i = 0; i < indent; ++i {
+      write("  ")
+    } if entry.isaFile {
+      println("› #{entry.name} (#{entry.size}#[%y])")
+    } else {
+      println("» #{entry.path}")
+      enumFolder(entry, indent + 1)
+    }
+  }
+}
+
+
+async fn runSleep() {
+  import sleep from aio
+  import time from std
+  auto sleeper = sleep(self, 128)
+  for {
+    const x = time.now()
+    await sleeper
+    const diff = time.now() - x
+    println("==================================================================================slept for #{diff.milliseconds()}")
+  }
+}

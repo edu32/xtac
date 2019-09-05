@@ -1,0 +1,149 @@
+readonly allocs   = 0u64,
+         reallocs = 0u64,
+         frees    = 0u64,
+         used     = 0i64,
+         maxUsed  = 0i64
+
+struct Block {
+  var file     = Char*{},
+      id       = 0u64,
+      line     = 0,
+      size     = 0
+}
+
+//readonly blocks = Block*[ 0x1000000 ]
+
+fn malloc(pointer, sizeInBytes, file = __file__, line = __line__) {
+  return pointer if sizeInBytes == 0
+  if sizeInBytes < 0 {
+    assert
+  }
+  const totalSize = sizeInBytes + sizeof(Block)
+  var block = Block*{}
+  if pointer {
+    block = Block*{ Byte*{pointer} - sizeof(Block) }
+    atomic.subtract(&used, block.size)
+    block = os.HeapReAlloc(os.GetProcessHeap(), os.HEAP_ZERO_MEMORY, block, totalSize)
+    atomic.increment(&reallocs)
+  } else {
+    block = os.HeapAlloc(os.GetProcessHeap(), os.HEAP_ZERO_MEMORY, totalSize)
+    block.id = atomic.increment(&allocs)
+    block.file = file.text
+    block.line = line
+  }
+  block.size = sizeInBytes
+  const newUsed = atomic.add(&used, block.size)
+  if newUsed > maxUsed {
+    maxUsed = newUsed
+  }
+  //putBlock(block)
+  pointer = Void*{ Byte*{block} + sizeof(Block) }
+  return pointer
+}
+
+fn mfree(pointer) {
+  if pointer {
+    const block = Block*{ Byte*{pointer} - sizeof(Block) }
+    //removeBlock(block)
+    atomic.subtract(&used, block.size)
+    os.HeapFree(os.GetProcessHeap(), 0, block)
+    atomic.increment(&frees)
+    pointer = Void*{}
+  }
+  return pointer
+}
+
+fn mleaks(): Void {
+  const allocsB4   = allocs,
+        reallocsB4 = reallocs,
+        freesB4    = frees,
+        usedB4     = used,
+        maxUsedB4  = maxUsed
+  if allocs == frees {
+    assert !used
+    println("No memory leaks. All blocks are free.\r\n\t\
+             allocs   = #{allocsB4}#[%,]\r\n\t\
+             reallocs = #{reallocsB4}#[%,]\r\n\t\
+             maxUsed  = #{maxUsedB4}#[%,] B (#{maxUsedB4}#[%y])")
+  } else {
+    assert used
+    assert with "MEMORY LEAKS:\r\n\t\
+                 allocs   = #{allocsB4}#[%,]\r\n\t\
+                 reallocs = #{reallocsB4}#[%,]\r\n\t\
+                 frees    = #{freesB4}#[%,]\r\n\r\t\
+                 inuse    = #{allocsB4 - freesB4}#[%,] blocks\r\n\r\t\
+                 inuse    = #{usedB4}#[%,] B (#{usedB4}#[%y])"
+    /*for var i = 0; i <= allocsB4; ++i {
+      const block = blocks[i]
+      continue if !block
+      assert i == block.id with "#{i} == #{block.id}"
+      const file = string.fromText(block.file)
+      const    s = string.fromText(Char*{ block } + sizeof(Block))
+      assert with "LEAKING BLOCK:\r\n\t\
+                    block.id   = #{block.id}\r\n\t\
+                    block.line = #{block.line}\r\n\t\
+                    block.size = #{block.size}\r\n\t\
+                    file       = #{file}\r\n\t\
+                    text       = #{s}"
+    }*/
+  }
+  //  Reset globals
+    allocs = 0
+  reallocs = 0
+     frees = 0
+      used = 0
+   maxUsed = 0
+}
+
+fn mblock(pointer) {
+  return Block*{ Byte*{pointer} - sizeof(Block) } if pointer
+    else null
+}
+
+fn mcopy(destination, source, sizeInBytes) {
+  assert sizeInBytes > 0
+  return os.memcpy(destination, source, sizeInBytes)
+}
+
+fn mmove(destination, source, sizeInBytes) {
+  assert sizeInBytes > 0
+  return os.memmove(destination, source, sizeInBytes)
+}
+
+fn mformat() {
+  return struct {
+    fn format(this, stream, fmt = "") {
+      const info = os.PROCESS_MEMORY_COUNTERS_EX{
+        cb = sizeof(os.PROCESS_MEMORY_COUNTERS_EX)
+      }
+      assert os.GetProcessMemoryInfo(os.GetCurrentProcess(), info, sizeof(os.PROCESS_MEMORY_COUNTERS_EX))
+      stream.append("app: { inUse: ")
+      used.format(stream, "%y")
+      stream.append(" in ")
+      (allocs - frees).format(stream, "%,")
+      stream.append(" blocks, maxUsed: ")
+      maxUsed.format(stream, "%y")
+      //stream.append(", reallocs: ")
+      //reallocs.format(stream, "%,")
+      stream.append(" }")
+
+      stream.append(", os: { private: ")
+      info.PrivateUsage.format(stream, "%y")
+      stream.append(", workingSet: ")
+      info.WorkingSetSize.format(stream, "%y")
+      stream.append(", peakWorkingSet: ")
+      info.PeakWorkingSetSize.format(stream, "%y")
+      stream.append("}")
+    }
+ }
+}
+
+fn putBlock(block) {
+  assert block.id > 0 && block.id < blocks.length
+  blocks[block.id] = block
+}
+
+fn removeBlock(block) {
+  assert block.id > 0 && block.id < blocks.length
+  blocks[block.id] = null
+}

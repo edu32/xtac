@@ -1,0 +1,431 @@
+define SOCKADDR_STORAGE_SIZE      128
+define MAX_ADDRESS_STRING_LENGTH  128
+
+import mcopy from std.memory
+
+//readonly anyIPv4 = Address{}
+//readonly anyIPv6 = Address{}
+
+struct Address {
+  readonly data = Byte[ SOCKADDR_STORAGE_SIZE ]
+
+  fn format(this, stream, fmt = "") {
+    const text = Char[ MAX_ADDRESS_STRING_LENGTH ]
+    const length = text.length
+    const hResult = os.WSAAddressToStringA(this.data, this.data.length, null, text, &length) 
+    if hResult == os.SOCKET_ERROR {
+      println("os.WSAAddressToString failed with #{os.WSAGetLastError()}")
+      stream.append("'BadAddress'")
+    } else {
+      assert length > 0 && length < text.length
+      stream.append(string.fromArrayAndLength(text, length - 1))
+    }
+  }
+
+  fn family(this) {
+    const bytes = UInt16*{ &this.data[0] }
+    const addressFamily = *bytes
+    assert addressFamily == os.AF_UNSPEC || addressFamily == os.AF_INET || addressFamily == os.AF_INET6
+      with "addressFamily = #{addressFamily}"
+    return UInt32(addressFamily)
+  }
+
+  fn setFamily(this, addressFamily) {
+    assert addressFamily == os.AF_UNSPEC || addressFamily == os.AF_INET || addressFamily == os.AF_INET6
+    var bytes = UInt16*{ &this.data[0] }
+    *bytes = UInt16(addressFamily)
+  }
+
+  fn port(this) {
+    const bytes = UInt16*{ &this.data[0] }
+    const networkOrderPortNumber = bytes[1]
+    const port = os.ntohs(networkOrderPortNumber)
+    assert port >= 0 && port <= os.MAX_PORT_NUMBER with "Port = #{port}"
+    return port
+  }
+
+  fn setPort(this, hostOrderPortNumber) {
+    assert hostOrderPortNumber >= 0 && hostOrderPortNumber <= os.MAX_PORT_NUMBER with "hostOrderPortNumber = #{hostOrderPortNumber}"
+    const port = os.htons(hostOrderPortNumber)
+    const bytes = UInt16*{ &this.data[0] }
+    bytes[1] = port
+  }
+}
+
+struct AdapterAddress {
+  readonly value = os.IP_ADAPTER_ADDRESSES*{}
+
+  fn isDDNSEnabled(this)              = (this.value.Flags & 0x0001) != 0
+  fn isDHCPEnabled(this)              = (this.value.Flags & 0x0004) != 0
+  fn isReceiveOnly(this)              = (this.value.Flags & 0x0008) != 0
+  fn isNotMulticastRecipient(this)    = (this.value.Flags & 0x0010) != 0
+  fn hasOtherIPv6Config(this)         = (this.value.Flags & 0x0020) != 0
+  fn hasNetBIOSOverTCP(this)          = (this.value.Flags & 0x0040) != 0
+  fn isIPv4Enabled(this)              = (this.value.Flags & 0x0080) != 0
+  fn isIPv6Enabled(this)              = (this.value.Flags & 0x0100) != 0
+  fn hasIPv6MangedAddressConfig(this) = (this.value.Flags & 0x0200) != 0
+
+  fn isOtherInterface(this)           = this.value.IfType == 1
+  fn isEthernetInterface(this)        = this.value.IfType == 6
+  fn isTokenRingInterface(this)       = this.value.IfType == 9
+  fn isPPPInterface(this)             = this.value.IfType == 23
+  fn isLoopbackInterface(this)        = this.value.IfType == 24
+  fn isATMInterface(this)             = this.value.IfType == 37
+  fn isIEEE80211Interface(this)       = this.value.IfType == 71
+  fn isTunnelInterface(this)          = this.value.IfType == 131
+  fn isIEEE1394Interface(this)        = this.value.IfType == 144
+
+  fn interfaceName(this) {
+    if this.isOtherInterface() {
+      return "Some other type of network interface"
+    } if this.isEthernetInterface() {
+      return "Ethernet network interface"
+    } if this.isTokenRingInterface() {
+      return "Token ring network interface"
+    } if this.isPPPInterface() {
+      return "PPP network interface"
+    } if this.isLoopbackInterface() {
+      return "Software loopback network interface"
+    } if this.isATMInterface() {
+      return "ATM network interface"
+    } if this.isIEEE80211Interface() {
+      return "IEEE 802.11 wireless network interface"
+    } if this.isTunnelInterface() {
+      return "Tunnel type encapsulation network interface"
+    } if this.isIEEE1394Interface() {
+      return "IEEE 1394 (Firewire) high performance serial bus network interface"
+    }
+    return "Unknown interface"
+  }
+
+  fn isUpStatus(this)             = this.value.OperStatus == 1
+  fn isDownStatus(this)           = this.value.OperStatus == 2
+  fn isTestingStatus(this)        = this.value.OperStatus == 3
+  fn isUnknownStatus(this)        = this.value.OperStatus == 4
+  fn isDormantStatus(this)        = this.value.OperStatus == 5
+  fn isNotPresentStatus(this)     = this.value.OperStatus == 6
+  fn isLowerLayerDownStatus(this) = this.value.OperStatus == 7
+
+  fn statusName(this) {
+    if this.isUpStatus() {
+      return "Up"
+    } if this.isDownStatus() {
+      return "Down"
+    } if this.isTestingStatus() {
+      return "Testing"
+    } if this.isUnknownStatus() {
+      return "Unknown"
+    } if this.isDormantStatus() {
+      return "Dormant"
+    } if this.isNotPresentStatus() {
+      return "Not present"
+    } if this.isLowerLayerDownStatus() {
+      return "Lower-layer down"
+    }
+    return "Unknown status"
+  }
+
+  fn unicastAddresses(this) {
+    if this.value && this.value.FirstUnicastAddress {
+      const address = Address{}
+      for var UnicastAddress = this.value.FirstUnicastAddress; UnicastAddress; UnicastAddress = UnicastAddress.Next {
+        if UnicastAddress.Address.iSockaddrLength > 0 && UnicastAddress.Address.iSockaddrLength <= sizeof( Address ) {
+          mcopy(address.data, Byte*{ UnicastAddress.Address.lpSockaddr }, UnicastAddress.Address.iSockaddrLength)
+          yield &address
+        } else {
+          assert 0
+        }
+      }
+    }
+  }
+
+  fn anycastAddresses(this) {
+    if this.value && this.value.FirstAnycastAddress {
+      const address = Address{}
+      for var AnycastAddress = this.value.FirstAnycastAddress; AnycastAddress; AnycastAddress = AnycastAddress.Next {
+        if AnycastAddress.Address.iSockaddrLength > 0 && AnycastAddress.Address.iSockaddrLength <= sizeof( Address ) {
+          mcopy(address.data, Byte*{ AnycastAddress.Address.lpSockaddr }, AnycastAddress.Address.iSockaddrLength)
+          yield &address
+        } else {
+          assert 0
+        }
+      }
+    }
+  }
+
+  fn multicastAddresses(this) {
+    if this.value && this.value.FirstMulticastAddress {
+      const address = Address{}
+      for var MulticastAddress = this.value.FirstMulticastAddress; MulticastAddress; MulticastAddress = MulticastAddress.Next {
+        if MulticastAddress.Address.iSockaddrLength > 0 && MulticastAddress.Address.iSockaddrLength <= sizeof( Address ) {
+          mcopy(address.data, Byte*{ MulticastAddress.Address.lpSockaddr }, MulticastAddress.Address.iSockaddrLength)
+          yield &address
+        } else {
+          assert 0
+        }
+      }
+    }
+  }
+
+  fn dnsServerAddresses(this) {
+    if this.value && this.value.FirstDnsServerAddress {
+      const address = Address{}
+      for var DnsServerAddress = this.value.FirstDnsServerAddress; DnsServerAddress; DnsServerAddress = DnsServerAddress.Next {
+        if DnsServerAddress.Address.iSockaddrLength > 0 && DnsServerAddress.Address.iSockaddrLength <= sizeof( Address ) {
+          mcopy(address.data, Byte*{ DnsServerAddress.Address.lpSockaddr }, DnsServerAddress.Address.iSockaddrLength)
+          yield &address
+        } else {
+          assert 0
+        }
+      }
+    }
+  }
+
+  fn format(this, stream, fmt = "") {
+    return if !this.value
+    const address = Address{}
+    var AdapterName = string.fromText(this.value.AdapterName)
+    stream.append("AdapterName = ").append(AdapterName)
+    if this.isOtherInterface() {
+      stream.append(" (Some other type of network interface)")
+    } else if this.isEthernetInterface() {
+      stream.append(" (Ethernet network interface)")
+    } else if this.isTokenRingInterface() {
+      stream.append(" (Token ring network interface)")
+    } else if this.isPPPInterface() {
+      stream.append(" (PPP network interface)")
+    } else if this.isLoopbackInterface() {
+      stream.append(" (Software loopback network interface)")
+    } else if this.isATMInterface() {
+      stream.append(" (ATM network interface)")
+    } else if this.isIEEE80211Interface() {
+      stream.append(" (IEEE 802.11 wireless network interface)")
+    } else if this.isTunnelInterface() {
+      stream.append(" (Tunnel type encapsulation network interface)")
+    } else if this.isIEEE1394Interface() {
+      stream.append(" (IEEE 1394 (Firewire) high performance serial bus network interface)")
+    } else {
+      stream.append(" (Unknown interface)")
+    }
+
+    auto s = String{}
+
+    s.clear().decodeUtf16(this.value.DnsSuffix, os.wcslen(this.value.DnsSuffix))
+    stream.append("\r\n\tDnsSuffix = ").append(s)
+
+    s.clear().decodeUtf16(this.value.Description, os.wcslen(this.value.Description))
+    stream.append("\r\n\tDescription = ").append(s)
+
+    s.clear().decodeUtf16(this.value.FriendlyName, os.wcslen(this.value.FriendlyName))
+    stream.append("\r\n\tFriendlyName = ").append(s)
+
+    stream.append("\r\n\tIfIndex = #{this.value.IfIndex}")
+
+    s.clear().encodeBase16(&this.value.PhysicalAddress[0], this.value.PhysicalAddressLength)
+    stream.append("\r\n\tPhysicalAddress = ").append(s)
+
+    stream.append("\r\n\tIP_ADAPTER_DDNS_ENABLED = #{this.isDDNSEnabled()}")
+    stream.append("\r\n\tIP_ADAPTER_DHCP_ENABLED = #{this.isDHCPEnabled()}")
+    stream.append("\r\n\tIP_ADAPTER_RECEIVE_ONLY = #{this.isReceiveOnly()}")
+    stream.append("\r\n\tIP_ADAPTER_NO_MULTICAST = #{this.isNotMulticastRecipient()}")
+    stream.append("\r\n\tIP_ADAPTER_IPV6_OTHER_STATEFUL_CONFIG = #{this.hasOtherIPv6Config()}")
+    stream.append("\r\n\tIP_ADAPTER_NETBIOS_OVER_TCPIP_ENABLED = #{this.hasNetBIOSOverTCP()}")
+    stream.append("\r\n\tIP_ADAPTER_IPV4_ENABLED = #{this.isIPv4Enabled()}")
+    stream.append("\r\n\tIP_ADAPTER_IPV6_ENABLED = #{this.isIPv6Enabled()}")
+    stream.append("\r\n\tIP_ADAPTER_IPV6_MANAGE_ADDRESS_CONFIG = #{this.hasIPv6MangedAddressConfig()}")
+
+    stream.append("\r\n\tMtu = #{this.value.Mtu}")
+
+    if this.value.FirstUnicastAddress {
+      stream.append("\r\n\tUnicast addresseses")
+      for var UnicastAddress = this.value.FirstUnicastAddress; UnicastAddress; UnicastAddress = UnicastAddress.Next {
+        if UnicastAddress.Address.iSockaddrLength > 0 && UnicastAddress.Address.iSockaddrLength <= sizeof( Address ) {
+          mcopy(address.data, Byte*{ UnicastAddress.Address.lpSockaddr }, UnicastAddress.Address.iSockaddrLength)
+          stream.append("\r\n\t\t")
+          address.format(stream)
+        } else {
+          assert 0
+        }
+      }
+    }
+    if this.value.FirstAnycastAddress {
+      stream.append("\r\n\tAnycast addresseses")
+      for var AnycastAddress = this.value.FirstAnycastAddress; AnycastAddress; AnycastAddress = AnycastAddress.Next {
+        if AnycastAddress.Address.iSockaddrLength > 0 && AnycastAddress.Address.iSockaddrLength <= sizeof( Address ) {
+          mcopy(address.data, Byte*{ AnycastAddress.Address.lpSockaddr }, AnycastAddress.Address.iSockaddrLength)
+          stream.append("\r\n\t\t")
+          address.format(stream)
+        } else {
+          assert 0
+        }
+      }
+    }
+    if this.value.FirstMulticastAddress {
+      stream.append("\r\n\tMulticast addresseses")
+      for var MulticastAddress = this.value.FirstMulticastAddress; MulticastAddress; MulticastAddress = MulticastAddress.Next {
+        if MulticastAddress.Address.iSockaddrLength > 0 && MulticastAddress.Address.iSockaddrLength <= sizeof( Address ) {
+          mcopy(address.data, Byte*{ MulticastAddress.Address.lpSockaddr }, MulticastAddress.Address.iSockaddrLength)
+          stream.append("\r\n\t\t")
+          address.format(stream)
+        } else {
+          assert 0
+        }
+      }
+    }
+  }
+}
+
+fn enumerateAdapterAddresses() {
+  const flags = os.GAA_FLAG_INCLUDE_PREFIX   | os.GAA_FLAG_INCLUDE_WINS_INFO      |
+                os.GAA_FLAG_INCLUDE_GATEWAYS | os.GAA_FLAG_INCLUDE_ALL_INTERFACES |
+                os.GAA_FLAG_INCLUDE_ALL_COMPARTMENTS | os.GAA_FLAG_INCLUDE_TUNNEL_BINDINGORDER
+  var size = 0
+  auto adapterAddresses = os.IP_ADAPTER_ADDRESSES*{}
+  var hResult = os.GetAdaptersAddresses(0, flags, null, adapterAddresses, &size)
+  assert hResult
+  if hResult == os.ERROR_BUFFER_OVERFLOW {
+    assert size > 0
+    import malloc from std.memory
+    adapterAddresses = malloc(adapterAddresses, size * sizeof( os.IP_ADAPTER_ADDRESSES ))
+    hResult = os.GetAdaptersAddresses(0, flags, null, adapterAddresses, &size)
+    if hResult {
+      println("os.GetAdaptersAddresses failed with #{os.GetLastError()}")
+    } else {
+      var adapterAdress = adapterAddresses
+      for ; adapterAdress; adapterAdress = adapterAdress.Next {
+        yield AdapterAddress{ value = adapterAdress }
+      }
+    }
+  } else {
+    println("os.GetAdaptersAddresses failed with #{os.GetLastError()}")
+  }
+}
+
+fn getAddrInfo(hostName, portNumber, timeout = 10000 /* milliseconds */ ) {
+  var address = Address{}
+  auto portName = String{}
+  if portNumber {
+    portNumber.format(portName)
+  }
+  var pAddrInfo = os.ADDRINFOA*{}
+  defer os.freeaddrinfo(pAddrInfo) if pAddrInfo
+  const hResult =
+    os.getaddrinfo(/* pNodeName   = */ hostName.text, /* pServiceName  = */ portName.text, 
+                   /* pHints      = */ null,          /* ppResult      = */ &pAddrInfo)
+ if hResult {
+    println("os.getaddrinfo failed with #{os.WSAGetLastError()} for '#{hostName}' @ '#{portName}' with a timeout of '#{timeout}' milliseconds")
+    return
+  } else {
+    for var addrInfo = pAddrInfo; addrInfo; addrInfo = addrInfo.ai_next {
+      import mcopy from std.memory
+      if addrInfo.ai_addrlen > 0 && addrInfo.ai_addrlen <= sizeof( Address ) {
+        mcopy(address.data, addrInfo.ai_addr, addrInfo.ai_addrlen)        
+        yield &address
+      } else {
+        assert 0
+      }
+    }
+  }
+}
+
+//-------------------------------------------------------------------------------
+// Starts {this} module.
+fn startup() {
+  println("Starting up #{__file__}")
+  WSAStartup()
+}
+
+//-------------------------------------------------------------------------------
+// Shuts down {this} module.
+fn shutdown() {
+  println("Shutting down #{__file__}")
+  WSACleanup()
+}
+
+fn WSAStartup() {
+  const wsa = os.WSAData{}
+  const hResult = os.WSAStartup(0x202, &wsa)
+  assert !hResult with "os.WSAStartup failed with #{hResult}"
+  const description = string.fromArray(wsa.szDescription)
+  println("\tWinSock Version = #{wsa.wVersion}#[%0x0], HighVersion = #{wsa.wHighVersion}#[%0x0], Description = #{description}, MaxSockets = #{wsa.iMaxSockets}, MaxUpdDg = #{wsa.iMaxUdpDg}")
+  mswsockStartup()
+}
+
+fn WSACleanup() {
+  assert os.WSACleanup() != os.SOCKET_ERROR with "os.WSACleanup failed with #{os.WSAGetLastError()}"
+}
+
+
+//  This is how mswsock.dll works.
+/*    Windows requires that functions from mswsock.dll be loaded using WSAIocl as pointers.
+      In the .data section of the binary, the compiler creates space the __MSWSOCK_FUNCTION_TABLE__.
+      mswsockStartup() fills the table with the function pointers.
+      Then the compiler routes all os.* calls to mswsock.dll functions to the pointers in this table.
+*/
+const __MSWSOCK_FUNCTION_TABLE__ = struct {
+  var     AcceptEx = null
+  var    ConnectEx = null
+  var DisconnectEx = null
+  var TransmitFile = null
+}
+
+fn mswsockStartup() {
+  const mswsockFunctionTable = &__MSWSOCK_FUNCTION_TABLE__
+  println("\tInitializing mswsock.dll function pointers")
+  const s = os.socket(os.AF_INET, os.SOCK_STREAM, os.IPPROTO_TCP)
+  assert s != os.INVALID_SOCKET with "os.socket failed with #{os.WSAGetLastError()}"
+
+  var guid = os.GUID{
+    Data1 = 0xb5367df1,
+    Data2 = 0xcbac,
+    Data3 = 0x11cf,
+    Data4 = [0x95,0xca,0x00,0x80,0x5f,0x48,0xa1,0x92]
+  }
+  var function = null
+  var bytesWritten = 0
+  var result = os.WSAIoctl(s, os.SIO_GET_EXTENSION_FUNCTION_POINTER, guid, sizeof(guid), &function,
+                           sizeof(function), &bytesWritten, null, null)
+  assert result != os.SOCKET_ERROR with "os.WSAIoctl failed with #{os.WSAGetLastError()} while getting AcceptEx from mswsock.dll"
+  mswsockFunctionTable.AcceptEx = function
+
+  guid = os.GUID{
+    Data1 = 0x25a207b9,
+    Data2 = 0xddf3,
+    Data3 = 0x4660,
+    Data4 = [0x8e,0xe9,0x76,0xe5,0x8c,0x74,0x06,0x3e]
+  }
+  function = null
+  bytesWritten = 0
+  result = os.WSAIoctl(s, os.SIO_GET_EXTENSION_FUNCTION_POINTER, guid, sizeof(guid), &function,
+                       sizeof(function), &bytesWritten, null, null)
+  assert result != os.SOCKET_ERROR with "os.WSAIoctl failed with #{os.WSAGetLastError()} while getting ConnectEx from mswsock.dll"
+  mswsockFunctionTable.ConnectEx = function
+
+  guid = os.GUID{
+    Data1 = 0xb5367df0,
+    Data2 = 0xcbac,
+    Data3 = 0x11cf,
+    Data4 = [0x95,0xca,0x00,0x80,0x5f,0x48,0xa1,0x92]
+  }
+  function = null
+  bytesWritten = 0
+  result = os.WSAIoctl(s, os.SIO_GET_EXTENSION_FUNCTION_POINTER, guid, sizeof(guid), &function,
+                       sizeof(function), &bytesWritten, null, null)
+  assert result != os.SOCKET_ERROR with "os.WSAIoctl failed with #{os.WSAGetLastError()} while getting TransmitFile from mswsock.dll"
+  mswsockFunctionTable.TransmitFile = function
+
+  guid = os.GUID{
+    Data1 = 0x7fda2e11,
+    Data2 = 0x8630,
+    Data3 = 0x436f,
+    Data4 = [0xa0,0x31,0xf5,0x36,0xa6,0xee,0xc1,0x57]
+  }
+  function = null
+  bytesWritten = 0
+  result = os.WSAIoctl(s, os.SIO_GET_EXTENSION_FUNCTION_POINTER, guid, sizeof(guid), &function,
+                       sizeof(function), &bytesWritten, null, null)
+  assert result != os.SOCKET_ERROR with "os.WSAIoctl failed with #{os.WSAGetLastError()} while getting DisconnectEx from mswsock.dll"
+  mswsockFunctionTable.DisconnectEx = function
+
+  os.closesocket(s)
+}

@@ -1,0 +1,334 @@
+import completionPort as iocp from iocp
+
+define DEFAULT_RECV_BUFFER_SIZE 0x1000
+
+//-------------------------------------------------------------------------------
+readonly socketIndices = 0u64
+
+readonly dummyAcceptBuffer = Byte[ 0x100 ]
+
+//-------------------------------------------------------------------------------
+// {this} module's lifetime.
+fn startup {
+  println("Starting #{__file__}")
+  socketIndices = 0
+}
+
+fn shutdown {
+  println("Stopping #{__file__}")
+  socketIndices = 0
+}
+
+//-------------------------------------------------------------------------------
+struct Socket {
+  readonly handle = os.INVALID_SOCKET     // The OS handle
+  readonly index = 0u64                   // Some {index} for println et al.
+  var qnext = Socket*{}, qprev = Socket*{}
+  readonly status = os.STATUS_OPEN        // Open/closed status.
+
+  fn dispose(this) {
+    assert this.handle == os.INVALID_SOCKET && this.isClosed() 
+      with "socket = #{this}, open = #{this.status}"
+  }
+
+  fn isOpen(this)   = this.status == os.STATUS_OPEN
+  fn isClosed(this) = this.status == os.STATUS_CLOSED
+
+  fn open(addressFamily = os.AF_INET, protocolType = os.IPPROTO_TCP) {
+    const socket = new Socket{ index = atomic.increment(&socketIndices) }
+    var socketType = 0
+    assert addressFamily == os.AF_INET6 || addressFamily == os.AF_INET 
+      with "addressFamily = #{addressFamily}"
+    if protocolType == os.IPPROTO_TCP {
+      socketType = os.SOCK_STREAM
+    } else if protocolType == os.IPPROTO_UDP {
+      socketType = os.SOCK_DGRAM
+    } else {
+      assert with "Unknown protocolType #{protocolType}"
+    }
+    socket.handle = os.socket(addressFamily, socketType, protocolType)
+    assert socket.handle != os.INVALID_SOCKET with 
+      "os.socket failed with #{os.WSAGetLastError()}\r\n\t\
+      addressFamily = #{addressFamily}\r\n\t\
+      socketType = #{socketType}\r\n\t\
+      protocolType = #{protocolType}"
+    iocp.completionPort.associate(socket.handle)
+    if addressFamily == os.AF_INET6 {
+      const off = 0
+      assert os.setsockopt(socket.handle, os.IPPROTO_IPV6, os.IPV6_V6ONLY, &off, sizeof(off)) != os.SOCKET_ERROR with 
+        "os.setsockopt failed with #{os.WSAGetLastError()}"
+    }
+    socket.status = os.STATUS_OPEN
+    println("#{socket} opened")
+    return socket
+  }
+
+  fn close(this) {
+    if atomic.cmpxchg(&this.status, os.STATUS_OPEN, os.STATUS_CLOSED) {
+      println("#{this} closed")
+      assert os.closesocket(this.handle) != os.SOCKET_ERROR with 
+        "os.closesocket failed with #{os.WSAGetLastError()} for #{this}"
+      this.handle = os.INVALID_SOCKET
+      iocp.completionPort.disassociate(this.handle)
+      return os.S_OK
+    }
+    return os.WSAESHUTDOWN
+  }
+
+  fn format(this, stream, fmt = "") {
+    stream.append("Socket(#{UInt64(this.handle)}[#{this.index}])")
+  }
+
+  fn bind(this, localAddress) {
+    if os.bind(this.handle, localAddress, sizeof(ip.Address)) == os.SOCKET_ERROR {
+      println("os.bind failed with #{os.WSAGetLastError()} for #{this} @ #{localAddress}")
+      return false
+    }
+    return true
+  }
+
+  fn listen(this, localAddress, backlog = os.SOMAXCONN) {
+    if this.bind(localAddress) {
+      if os.listen(this.handle, backlog) != os.SOCKET_ERROR {
+        return true
+      }
+      println("os.listen failed with #{os.WSAGetLastError()} with localAddress = #{localAddress}, backlog = #{backlog}")
+    }
+    return false
+  }
+
+  async fn connect(this, remoteAddress) {
+    if this.isClosed() || iocp.isClosed() {
+      // Don't proceed if either {this} socket or the {iocp} is closed or closing.
+      __ioresult__ = os.WSAESHUTDOWN
+    } else {
+      if !os.ConnectEx(this.handle, remoteAddress, sizeof( ip.Address ), null, 0, null, self) {
+        const hResult = os.WSAGetLastError()
+        if hResult == os.ERROR_IO_PENDING {
+          await
+        } else {
+          __ioresult__ = hResult
+        }
+      }
+    }
+    if __ioresult__ != os.S_OK {
+        println("os.ConnectEx failed with #{os.WSAGetLastError()} for #{remoteAddress}")
+    }
+    return __ioresult__ == os.S_OK
+  }
+
+  async fn accept(this, listenerSocket) {
+    if this.isClosed() || listenerSocket.isClosed() || iocp.isClosed() {
+      // Don't proceed if closed or closing.
+      __ioresult__ = os.WSAESHUTDOWN
+    } else {
+      const bytes = 0
+      if !os.AcceptEx(listenerSocket.handle, this.handle, dummyAcceptBuffer, 0, sizeof(ip.Address), sizeof(ip.Address), &bytes, self) {
+        const hResult = os.WSAGetLastError()
+        if hResult == os.ERROR_IO_PENDING {
+          await
+          if __ioresult__ {
+            // os.AcceptEx failed.
+          } else if os.setsockopt(this.handle, os.SOL_SOCKET, os.SO_UPDATE_ACCEPT_CONTEXT, 
+                                  &listenerSocket.handle, sizeof(listenerSocket.handle)) == os.SOCKET_ERROR {
+            __ioresult__ = os.WSAGetLastError()
+            println("os.setsockopt failed with #{__ioresult__} for #{this}; listener = #{listenerSocket}")
+          }
+        } else {
+          __ioresult__ = hResult
+        }
+      }
+    }
+    if __ioresult__ != os.S_OK {
+        println("os.AcceptEx failed with #{__ioresult__} for #{this}; listener = #{listenerSocket}")
+    }
+    return __ioresult__ == os.S_OK
+  }
+
+  async fn receive(this, buffer, maxTimeout = 0xFFF) {
+    fn recv(handle, buf, resumable) {
+      return {
+        overlapped = os.OVERLAPPED{},
+        iocallback = fn(self, bytesTransferred, hResult) {
+          if self.isOpen {
+            self.resumable.iocallback(bytesTransferred, hResult)
+          } else {
+            self.isOpen = true
+            const flags = 0
+            const result = os.WSARecv(self.handle, self.buf, 1, null, &flags, self, null)
+            if result == os.SOCKET_ERROR {
+              hResult = os.WSAGetLastError()
+              if hResult != os.ERROR_IO_PENDING {
+                self.resumable.iocallback(bytesTransferred, hResult)
+              }
+            }
+          }
+        },
+        handle = handle,
+        resumable = resumable,
+        buf = buf,
+        isOpen = false
+      }
+    }
+    for {
+      __ioresult__ = os.S_OK
+      __iotransferred__ = 0
+      if this.isClosed() || iocp.isClosed() {
+        // Don't proceed if closed or closing.
+        __ioresult__ = os.WSAESHUTDOWN
+      } else {
+        if !buffer.reserved() {
+          buffer.reserve(DEFAULT_RECV_BUFFER_SIZE)
+        }
+        //println("Receiving on #{this}")
+        const buf = os.WSABUF{ buf = buffer.text + buffer.length, len = buffer.reserved() }
+        const receiver = recv(this.handle, buf, self)
+        await aio.run(receiver)
+        if __ioresult__ {
+          assert __iotransferred__ == 0
+          println("os.WSARecv failed with #{__ioresult__} for #{this}")
+        } else if __iotransferred__ {
+          buffer.setLength(buffer.length + __iotransferred__)
+          println("#{this} received #{__iotransferred__} B")
+          //println("#{this} received\r\n#{buffer}")
+        } else {
+          // Remote host disconnected.
+          assert __iotransferred__ == 0
+          __ioresult__ = os.WSAESHUTDOWN
+        }
+      }
+      break if __ioresult__
+      yield __iotransferred__
+    }
+  }
+
+  async fn send(this, buffer) {
+    fn send(handle, buf, resumable) {
+      return {
+        overlapped = os.OVERLAPPED{},
+        iocallback = fn(self, bytesTransferred, hResult) {
+          if self.isOpen {
+            self.resumable.iocallback(bytesTransferred, hResult)
+          } else {
+            self.isOpen = true
+            const flags = 0
+            const result = os.WSASend(self.handle, self.buf, 1, null, flags, self, null)
+            if result == os.SOCKET_ERROR {
+              hResult = os.WSAGetLastError()
+              if hResult != os.ERROR_IO_PENDING {
+                self.resumable.iocallback(bytesTransferred, hResult)
+              }
+            }
+          }
+        },
+        handle = handle,
+        resumable = resumable,
+        buf = buf,
+        isOpen = false
+      }
+    }
+    for {
+      __ioresult__ = os.S_OK
+      __iotransferred__ = 0
+      assert buffer.length
+      if this.isClosed() || iocp.isClosed() {
+        // Don't proceed if closed or closing.
+        __ioresult__ = os.WSAESHUTDOWN
+      } else for var written = 0; written < buffer.length; {
+        __ioresult__ = os.S_OK
+        __iotransferred__ = 0
+        //println("sending...\r\n#{buffer}")
+        const buf = os.WSABUF{ buf = buffer.text + written, len = buffer.length - written }
+        const sender = send(this.handle, buf, self)
+        await aio.run(sender)
+        break if __ioresult__
+        written += __iotransferred__
+        println("#{this} sent #{__iotransferred__} B")
+        assert written <= buffer.length with 
+          "__iotransferred__ = #{__iotransferred__}\r\n\t\
+          __overlapped__.Internal = #{__overlapped__.Internal}\r\n\t\
+          __overlapped__.InternalHigh = #{__overlapped__.InternalHigh}\r\n\t\
+          written = #{written};\r\n\t\
+          buffer.length = #{buffer.length}\r\n\t\
+          buf.len = #{buf.len}\r\n\t\
+          buffer = \r\n#{buffer}\r\n\t\
+          buf = \r\n#{string.fromTextAndLength(buf.buf, buf.len)}"
+      }
+      if __ioresult__ {
+        assert __iotransferred__ == 0  with
+          "__iotransferred__ = #{__iotransferred__}" // IO failed.
+        println("os.WSASend failed with #{__ioresult__}")
+        break
+      }
+      yield __iotransferred__
+    }
+  }
+
+  async fn sendFile(this, fHandle, head, tail) {
+    fn send(socket, fHandle, resumable) {
+      return {
+        overlapped = os.OVERLAPPED{},
+        iocallback = fn(self, bytesTransferred, hResult) {
+          if self.isOpen {
+            self.resumable.iocallback(bytesTransferred, hResult)
+          } else {
+            self.isOpen = true
+            const flags = 0
+            const result = os.TransmitFile(self.socket, self.fHandle, 0, 0, self, self.buf, os.TF_USE_KERNEL_APC)
+            if result == os.SOCKET_ERROR {
+              hResult = os.WSAGetLastError()
+              if hResult != os.ERROR_IO_PENDING {
+                self.resumable.iocallback(bytesTransferred, hResult)
+              }
+            }
+          }
+        },
+        socket = socket,
+        fHandle = fHandle,
+        resumable = resumable,
+        buf = os.TRANSMIT_FILE_BUFFERS*{},
+        isOpen = false
+      }
+    }
+    const buf = os.TRANSMIT_FILE_BUFFERS{
+      Head = head.text,
+      HeadLength = head.length,
+      Tail = tail.text,
+      TailLength = tail.length
+    }
+    const sender = send(this.handle, fHandle, self)
+    if this.isClosed() || iocp.isClosed() {
+      // Don't proceed if closed or closing.
+      __ioresult__ = os.WSAESHUTDOWN
+    } else {
+      if !buf.isEmpty() {
+        sender.buf = &buf
+      }
+      await aio.run(sender)
+    }
+    if __ioresult__ {
+      assert __iotransferred__ == 0  with
+        "__iotransferred__ = #{__iotransferred__}" // IO failed.
+      println("os.TransmitFile failed with #{__ioresult__}")
+    }
+    return __ioresult__ == os.S_OK
+  }
+
+  fn localAddress(this) {
+    const addr = ip.Address{}
+    const addrlen = sizeof(addr)
+    if os.getsockname(this.handle, addr, &addrlen) == os.SOCKET_ERROR {
+      println("os.getsockname failed with #{os.WSAGetLastError()}")
+    }
+    return addr
+  }
+
+  fn remoteAddress(this) {
+    const addr = ip.Address{}
+    const addrlen = sizeof(addr)
+    if os.getpeername(this.handle, addr, &addrlen) == os.SOCKET_ERROR {
+      println("os.getpeername failed with #{os.WSAGetLastError()}")
+    }
+    return addr
+  }
+}

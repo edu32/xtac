@@ -1,0 +1,111 @@
+fn run(context, node) {
+  const pass = Marker{ typer = context.typer }
+  pass.run(node)
+  context.update(pass)
+}
+
+
+struct Marker {
+  const           typer = Typer&{}
+  readonly       locals = List(ast.Symbol*){}
+  readonly   freeLocals = List(ast.Symbol*){}
+  readonly   unloadable = 0
+  readonly addressTaken = 0
+  readonly       shared = 0
+  readonly        total = 0
+  readonly  sharedIndex = 1
+
+
+  fn run(this, node) {
+    switch node {
+      case ast.File     this.mark(node.scope)
+      case ast.Function this.mark(node.scope) if !node.generator
+      default assert 0
+    }
+    delete this.freeLocals
+    delete this.locals
+  }
+
+
+  fn mark(this, node): void {
+    switch node {
+      case ast.Scope {
+        this.markStatements(node)
+      }
+      case ast.If {
+        this.markStatements(node)
+      }
+      case ast.Loop {
+        this.markStatements(node)
+      }
+    }
+  }
+
+
+  fn markStatements(this, scope): void {
+    const startOfScopeLocals = this.locals.length
+
+    for item in scope.symbols {
+      const   symbol = item.value
+      if const local = symbol.instance is ast.Local {
+        this.tryShareLocal(symbol)
+      }
+    }
+
+    for statement in scope.statements {
+      this.mark(statement)
+    }
+
+    for var i = startOfScopeLocals; i < this.locals.length; ++i {
+      const symbol = this.locals.items[i]
+      const  local = symbol.instance as ast.Local*
+      var    found = false
+      assert local.sharedIndex
+      for freeSymbol in this.freeLocals {
+        const freeLocal = freeSymbol.instance as ast.Local*
+        assert freeLocal.sharedIndex
+        if local.sharedIndex == freeLocal.sharedIndex {
+          found = true
+          break
+        }
+      }
+      if !found {
+        this.freeLocals.append(this.locals.items[i])
+      }
+    }
+
+    this.locals.setLength(startOfScopeLocals)
+  }
+
+
+  fn tryShareLocal(this, symbol) {
+    const local = symbol.instance as ast.Local*
+
+    assert !symbol.replacedBy && !local.sharedIndex
+
+    ++this.total // +1 unmarked local seen
+
+    if local.requiresStackFrameSlot() {
+      this.shareLocal(symbol)
+    }
+  }
+
+
+  fn shareLocal(this, symbol) {
+    const local = symbol.instance as ast.Local*
+    if this.freeLocals.length {
+      const      replacer = this.freeLocals.removeLast()
+      const replacerLocal = replacer.instance as ast.Local*
+      local.sharedIndex = replacerLocal.sharedIndex
+      ++this.shared
+    } else {
+      this.locals.append(symbol)
+      local.sharedIndex = this.sharedIndex++
+    }
+  }
+
+
+  fn cberr(this, pos, ctx, cb) {
+    this.typer.cberr(pos, ctx, cb)
+  }
+}

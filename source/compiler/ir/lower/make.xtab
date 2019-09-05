@@ -1,0 +1,1336 @@
+import Translator from translator
+
+import Io from ssa
+
+define op1 0
+define op2 1
+define op3 2
+
+define nops 0
+define 1ops 1
+define 2ops 2
+define 3ops 3
+
+
+var xxxx = 100
+
+
+struct Constant : ssa.Value {
+  const value = Immediate{}
+  var    xxxx = 0
+}
+
+
+struct Locals {
+  const list = List(ssa.Local*){}
+  var  outer = Locals*{}
+
+  fn dispose(this) {
+    delete this.list
+  }
+}
+
+
+struct Make {
+  const          ctx = Translator*{}
+  const     function = ssa.Function*{}
+  const  astFunction = ast.Function*{}
+  readonly    locals = Locals*{}
+  readonly    parent = ssa.Block*{}
+  var         retval = ssa.Value*{}  
+  readonly    labels = List(ssa.Block*){}
+  readonly constants = Queue(ssa.Value){}
+  const      indices = List(Int32){}
+  readonly      bidx = 0
+  readonly  boffsets = 0
+  readonly   localIndex = 0
+  readonly sharedLocals = 0
+
+  fn dispose(this) {
+    for label in this.labels {
+      if label.index < 0 {
+        this.ctx.ts.cberr(label.pos, label) with {
+          println("target not taken #{it.offset}")
+        }
+        assert label.body.isEmpty() && label.uses.isEmpty()
+        delete label
+      }
+    }
+    delete this.labels
+    delete this.constants with fn(x) = delete x
+    delete this.indices
+  }
+
+
+  fn entryPos(pos) {
+    return Pos {
+      file = pos.file,
+      range = Range{ start = pos.range.start, end = pos.range.start }
+    }
+  }
+
+
+  fn exitPos(pos) {
+    return Pos {
+      file = pos.file,
+      range = Range{ start = pos.range.end, end = pos.range.end }
+    }
+  }
+
+
+  fn block(this, pos) {
+    return new ssa.Block{ pos = pos, parent = this.function, type = ssa.tyVoid  }
+  }
+
+
+  fn current(this, block) {
+    assert block.isEmpty()
+    assert !block.qprev && !block.qnext
+
+    if this.parent {
+      assert !this.parent.term() && !block.term()
+      this.jump(exitPos(this.parent.pos), block)
+    }
+    this.parent = block
+    return block
+  }
+
+
+  fn local(this, pos, name, type): ssa.Value* {
+    assert name && this.locals
+    const local = new ssa.Local{ pos = pos, parent = this.parent, name = name, type = type,
+      localIndex = this.getLocalIndex() }
+    local.initialize(operands = nops)
+    this.append(local)
+    this.locals.list.append(local)
+    return local
+  }
+
+
+  fn getLocalIndex(this) {
+    if this.indices.length {
+      ++this.sharedLocals
+      return this.indices.removeLast()
+    }
+    return this.localIndex++
+  }
+
+
+  fn returnSharedIndices(this) {
+    for local in this.locals.list {
+      var i = 0
+      for ; i < this.indices.length; ++i {
+        break if this.indices.items[i] == local.localIndex
+      }
+      if i == this.indices.length {
+        this.indices.append(local.localIndex)
+      }
+    }
+  }
+
+
+  fn parameter(this, pos, name, parameterIndex, type): ssa.Value* {
+    const parameter = new ssa.Parameter{ pos = pos, parent = this.parent, name = name, type = type,
+      parameterIndex = parameterIndex }
+    parameter.initialize(operands = nops)
+    this.function.parameters.append(parameter)
+    return this.append(parameter)
+  }
+
+
+  fn stackParameter(this, pos, name, parameterIndex, type): ssa.Value* {
+    // parameter
+    const parameter = new ssa.Parameter{ pos = pos, name = name, parent = this.parent, type = type,
+      parameterIndex = parameterIndex, addressIsTaken = parameterIndex < 4 }
+    parameter.initialize(operands = nops)
+
+    this.function.parameters.append(parameter)
+    this.append(parameter)
+
+    // elem:T frame[parameter]  ; memory location of parameter
+
+    if parameter.addressIsTaken {
+      // frame[parameter] ⟵ parameter
+      const elem = this.parameterAt(pos, parameter)
+      this.store(pos, elem, parameter)
+    }
+
+    return parameter
+  }
+
+
+  fn store(this, pos, dst, src): ssa.Value* {
+    var dstval = dst as ssa.Value*
+    var srcval = src as ssa.Value*
+
+    if dstval == srcval {
+      return dstval
+    }
+
+    if dstval {
+      if dstval.type != srcval.type {
+        this.ctx.ts.cberr(pos, { dst = dst.type, src = src.type } ) with {
+          println("bad store types #{it.dst} ← #{it.src}")
+        }
+        assert 0
+      }
+      var val = ssa.Value*{}
+      if const   dstMem = dstval.isMemory() {
+        if const srcMem = srcval.isMemory() { // [dstval] = [srcval]
+          if dstMem.operands == srcMem.operands {
+            return dstval
+          }
+        } // [dstval] = srcval
+        val = new ssa.Store{ pos = pos, parent = this.parent, type = dstval.type }
+      } else { // dstval = srcval
+        assert dstval.type.isLoadable()
+        if const    last = this.parent.body.last {
+          const operands = last.operands
+          switch last {
+            case ssa.Load {
+              if dstval == last {
+                //  Peephole optimization to eliminate this pattern:
+                //    (1) t1 ⟵ x  ; Load {x} to {t1}.
+                //    (2) t1 = y   ; Then overwrite {t1} with {y}. 
+                //  Eliminate (2) by loading {y} to {t1} in (1).
+                this.set(operands, op1, srcval)
+                return dstval
+              }
+            }
+          }
+        }
+        val = new ssa.Assign{ pos = pos, parent = this.parent, type = dstval.type }
+      }
+      const operands = val.initialize(operands = 2ops)
+      this.set(operands, op1, dstval, ssa.Io.Write)
+      this.set(operands, op2, srcval)
+      this.append(val)
+      return dstval
+    }
+    return srcval
+  }
+
+
+  fn temp(this, pos, type, name = Identifier*{}): ssa.Value* {
+    if type.isLoadable() {
+      // dst ⟵ 0
+      const val = new ssa.Load{ pos = pos, name = name, parent = this.parent, type = type }
+      const operands = val.initialize(operands = 1ops)
+      operands.setZeroOf(op1, type)
+      return this.append(val)
+    }
+    if !name {
+      name = this.ctx.ts.ids.random("temp")
+    }
+    // elem:T frame[local]
+    const local = this.local(pos, name, type)
+    return this.localAt(pos, local)
+  }
+
+
+  fn localAt(this, pos, local): ssa.Value* {
+    //  elem:T frame[local]
+    assert local is ssa.Local
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = local.type }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, this.function.frame)
+    this.set(operands, op2, local)
+    return this.append(elem)
+  }
+
+
+  fn parameterAt(this, pos, parameter): ssa.Value* {
+    //  elem:T frame[parameter]
+    assert parameter is ssa.Parameter
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = parameter.type }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, this.function.frame)
+    this.set(operands, op2, parameter)
+    return this.append(elem)
+  }
+
+
+  fn argumentAt(this, pos, argument): ssa.Value* {
+    //  elem:T frame[argument]
+    assert argument is ssa.Argument
+    assert argument.argumentIndex > 3
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = argument.type }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, this.function.frame)
+    this.set(operands, op2, argument)
+    return this.append(elem)
+  }
+
+
+  fn fieldAt(this, pos, base, field): ssa.Value* {
+    //  elem:T base[field]
+    assert field is ssa.Field
+    assert base.isMemory() with nameof(base)
+    assert base.type.isaStruct()
+
+    return this.copyElementAt(pos, base as ssa.ElementAt*, field, field.type)
+  }
+
+
+  fn globalAt(this, pos, global): ssa.Value* {
+    //  elem:T data[global]
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = global.type }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, this.ctx.ts.ir.data)
+    this.set(operands, op2, global)
+    return this.append(elem)
+  }
+
+
+  fn fileAt(this, pos, file): ssa.Value* {
+    //  elem:T code[file]
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = file.type }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, this.ctx.ts.ir.code)
+    this.set(operands, op2, file)
+    return this.append(elem)
+  }
+
+
+  fn functionAt(this, pos, function): ssa.Value* {
+    //  elem:T code[function]
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = function.type }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, this.ctx.ts.ir.code)
+    this.set(operands, op2, function)
+    return this.append(elem)
+  }
+
+
+  fn externAt(this, pos, function): ssa.Value* {
+    //  elem:T data[function]
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = function.type }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, this.ctx.ts.ir.data)
+    this.set(operands, op2, function)
+    return this.append(elem)
+  }
+
+
+  fn elementAt(this, pos, base, index): ssa.Value* {
+    var (baseval, indexval) = this.adjustBaseAndIndexForElementAt(pos, base, index)
+
+    const elementType = this.getElementType(baseval)
+
+    if const elem = baseval.isMemory() {
+      return this.copyElementAt(pos, elem, indexval, elementType)
+    }
+
+    const     elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = elementType }
+    const operands = elem.initialize(operands = 2ops)
+    this.set(operands, op1, baseval)
+    this.set(operands, op2, indexval)
+    return this.append(elem)
+  }
+
+
+  fn adjustBaseAndIndexForElementAt(this, pos, base, index): (ssa.Value*, ssa.Value*) {
+    var  baseval = base as ssa.Value*
+    var indexval = index as ssa.Value*
+
+    if indexval.isMemory() {
+      // Load index to a register if value is in memory.
+      indexval = this.load(pos, indexval)
+    }
+
+    if const elem = baseval.isMemory() {
+      if elem.type.isaPointer() {
+        // Load base to a register if it is a pointer in memory.
+        //  baseval:T* ⟵ [elem]
+        baseval = this.load(pos, baseval)
+      } else if elem.operands.items[0].isaSymbol() && indexval !is Constant {
+        // Don't index to data/code/stack etc. with a register. Only constants allowed.
+        //    addr:T* ⟵ & elem
+        //  baseval:T ⟵ tmp[0]
+        const    addr = this.addressOf(pos, this.ctx.nulldst, baseval)
+              baseval = this.dereference(pos, this.ctx.nulldst, addr)
+      }
+    }
+    return (baseval, indexval)
+  }
+
+
+  fn copyElementAt(this, pos, base, index, type) {
+    const     copy = new ssa.ElementAt{ pos = pos, parent = this.parent, type = type }
+    const operands = copy.initialize(operands = base.operands.length + 1)
+    for i, operand in base.operands {
+      if const constant = operand.isanImmediate() {
+        operands.imm(i, constant)
+      } else if const node = operand.isaNode() {
+        operands.set(i, node)
+      }
+    }
+    this.set(operands, base.operands.length, index)
+    return this.append(copy)
+  }
+
+
+  fn elementOfQuoted(this, pos, global, index): ssa.Value* {
+    // elem:T data[global][index]
+    var indexval = index as ssa.Value*
+
+    if indexval !is Constant {
+      indexval = this.load(pos, indexval)
+    }
+
+    const elementType = this.getElementType(global)
+
+    const elem = new ssa.ElementAt{ pos = pos, parent = this.parent, type = elementType }
+    const operands = elem.initialize(operands = 3ops)
+    this.set(operands, op1, this.ctx.ts.ir.data)
+    this.set(operands, op2, global)
+    this.set(operands, op3, indexval)
+    return this.append(elem)
+  }
+
+
+  fn getElementType(base): ssa.Type {
+    if base.type.isaPointer() {
+      return base.type.pointee()
+    }
+    if const array = base.type.isanArray() {
+      return array.element
+    }
+    assert with "#{base.type}"
+    return ssa.tyUnknown
+  }
+
+
+  fn addressOf(this, pos, dst, value): ssa.Value* {
+    // addr ⟵ &value
+    assert value.isMemory() with this.function.name
+    const     addr = new ssa.Address{ pos = pos, parent = this.parent, type = value.type.address() }
+    const operands = addr.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(addr)
+    return this.store(pos, dst, addr)
+  }
+
+
+  fn dereference(this, pos, dst, value): ssa.Value* {
+    assert value.type.isaPointer()
+    if value.isMemory() {
+      //   tmp:T* ⟵ [value]
+      //  deref:T ⟵ tmp[0]
+      return this.dereference(pos, dst, this.load(pos, value))
+    }
+    // deref:T ⟵ value[0]
+    const    deref = new ssa.ElementAt{ pos = pos, parent = this.parent, type = value.type.pointee() }
+    const operands = deref.initialize(operands = 2ops)
+    this.set(operands, op1, value)
+    operands.setZero(op2)
+    this.append(deref)
+    return this.store(pos, dst, deref)
+  }
+
+
+  fn load(this, pos, value, name = Identifier*{}): ssa.Value* {
+    assert value.type.isLoadable()
+    // dst:T ⟵ load [value]
+    const      dst = new ssa.Load{ pos = pos, parent = this.parent, type = value.type, name = name }
+    const operands = dst.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    return this.append(dst)
+  }
+
+
+  fn loadIfMemory(this, pos, value): ssa.Value* {
+    if const elem = value.isMemory() {
+      return this.load(pos, elem)
+    }
+    return value
+  }
+
+
+  fn cmp(this, pos, lhs, op, rhs): ssa.Value* {
+    // cmp lhs, rhs
+    assert lhs.type == rhs.type && lhs.type.isLoadable()
+    const      val = new ssa.Compare{ pos = pos, parent = this.parent, op = op, type = ssa.tyBool }
+    const operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    return this.append(val)
+  }
+
+
+  fn cmpzero(this, pos, op, lhs): ssa.Value* {
+    assert lhs.type.isLoadable()
+    const       val = new ssa.Compare{ pos = pos, parent = this.parent, op = op, type = ssa.tyBool }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    operands.setZeroOf(op2, lhs.type)
+    return this.append(val)
+  }
+
+
+  fn cmpxchg(this, pos, dst, lhs, op, rhs, exchange): ssa.Value* {
+    assert lhs.type == rhs.type && lhs.type == exchange.type && lhs.type.isLoadable()
+    assert lhs.isMemory()
+    switch rhs {
+      case ssa.ElementAt return this.cmpxchg(pos, dst, lhs, op, this.load(rhs.pos, rhs), exchange)
+      case Constant      return this.cmpxchg(pos, dst, lhs, op, this.load(rhs.pos, rhs), exchange)
+    }
+    switch exchange {
+      case ssa.ElementAt return this.cmpxchg(pos, dst, lhs, op, rhs, this.load(rhs.pos, exchange))
+      case Constant      return this.cmpxchg(pos, dst, lhs, op, rhs, this.load(rhs.pos, exchange))
+    }
+    const       val = new ssa.CompareExchange{ pos = pos, parent = this.parent, op = op, type = ssa.tyBool }
+    const  operands = val.initialize(operands = 3ops)
+    const    rhsval = this.load(pos, rhs)    
+    this.set(operands, op1, lhs, ssa.Io.Write)
+    this.set(operands, op2, rhsval, ssa.Io.Write)
+    this.set(operands, op3, exchange)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn xadd(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  xadd lhs, rhs
+    //  Translates to:
+    //    tmp ⟵ rhs
+    //    rhs ⟵ lhs   ; Ensure {rhs} is writeable.
+    //    lhs ⟵ lhs + tmp
+    switch rhs {
+      case ssa.ElementAt return this.xadd(pos, dst, lhs, this.load(rhs.pos, rhs))
+      case Constant      return this.xadd(pos, dst, lhs, this.load(rhs.pos, rhs))
+    }
+    assert lhs.isMemory()
+    assert lhs.type == rhs.type && lhs.type.isLoadable()
+    const      val = new ssa.XAdd{ pos = pos, parent = this.parent, type = lhs.type }
+    const operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs, ssa.Io.Write)
+    this.set(operands, op2, rhs, ssa.Io.Write)
+    this.append(val)
+    if dst {
+      return this.store(pos, dst, rhs)
+    }
+    return lhs
+  }
+
+
+  fn oneOf(this, type) {
+    const one = ssa.Constant{ type = type }
+    if type.isaFloat() {
+      one.value.f32 = 1.0f
+    } else if type.isaDouble() {
+      one.value.f64 = 1.0
+    } else if type.isIntegral() {
+      one.value.i64 = 1i64
+    } else {
+      assert with "#{type}"
+    }
+    return one
+  }
+
+
+  fn preDecrement(this, pos, dst, value): ssa.Value* {
+    if value.type.isaPointer() {
+      var val = this.loadIfMemory(value.pos, value)      
+      //  size:Int64 ⟵ sizeof( T )
+      //      sub:T* ⟵ val - size
+      //       value ⟵ sub
+      //         dst ⟵ value
+      const   pointee = val.type.pointee()
+      const immediate = Immediate{ i64 = Int64(pointee.size()) }
+      const      size = ssa.Constant{ value = immediate, type = ssa.tyInt64 }
+      const       sub = new ssa.Subtract{ pos = pos, parent = this.parent, type = val.type }
+      const  operands = sub.initialize(operands = 2ops)
+      this.set(operands, op1, val)
+      operands.imm(op2, size)
+      this.append(sub)
+      this.store(pos, value, sub)
+      return this.store(pos, dst, value)
+    }
+    if value.type.isIntegral() {
+      // --(dec ⟵ value)
+      //  value ⟵ dec
+      //    dst ⟵ value
+      const      dec = new ssa.Decrement{ pos = pos, parent = this.parent, type = value.type }
+      const operands = dec.initialize(operands = 1ops)
+      this.set(operands, op1, value)
+      this.append(dec)
+      this.store(pos, value, dec)
+      return this.store(pos, dst, value)
+    }
+    //    sub ⟵ value - 1
+    //  value ⟵ sub
+    //    dst ⟵ value
+    const      one = this.oneOf(value.type)
+    const      sub = new ssa.Subtract{ pos = pos, parent = this.parent, type = value.type }
+    const operands = sub.initialize(operands = 2ops)
+    this.set(operands, op1, value)
+    operands.imm(op2, one)
+    this.append(sub)
+    this.store(pos, value, sub)
+    return this.store(pos, dst, value)
+  }
+
+
+  fn preIncrement(this, pos, dst, value): ssa.Value* {
+    if value.type.isaPointer() {
+      var val = this.loadIfMemory(value.pos, value)      
+      //  size:Int64 ⟵ sizeof( T )
+      //      add:T* ⟵ val + size
+      //    value:T* ⟵ add
+      //         dst ⟵ value
+      const   pointee = val.type.pointee()
+      const immediate = Immediate{ i64 = Int64(pointee.size()) }
+      const      size = ssa.Constant{ value = immediate, type = ssa.tyInt64 }
+      const       add = new ssa.Add{ pos = pos, parent = this.parent, type = val.type }
+      const  operands = add.initialize(operands = 2ops)
+      this.set(operands, op1, val)
+      operands.imm(op2, size)
+      this.append(add)
+      this.store(pos, value, add)
+      return this.store(pos, dst, value)
+    }
+    if value.type.isIntegral() {
+      // ++(inc ⟵ value)
+      //  value ⟵ inc
+      //    dst ⟵ value
+      const      inc = new ssa.Increment{ pos = pos, parent = this.parent, type = value.type }
+      const operands = inc.initialize(operands = 1ops)
+      this.set(operands, op1, value)
+      this.append(inc)
+      this.store(pos, value, inc)
+      return this.store(pos, dst, value)
+    }
+    //    add ⟵ value + 1
+    //  value ⟵ add
+    //    dst ⟵ value
+    const      one = this.oneOf(value.type)
+    const      add = new ssa.Add{ pos = pos, parent = this.parent, type = value.type }
+    const operands = add.initialize(operands = 2ops)
+    this.set(operands, op1, value)
+    operands.imm(op2, one)
+    this.append(add)
+    this.store(pos, value, add)
+    return this.store(pos, dst, value)
+  }
+
+
+  fn postDecrement(this, pos, dst, value): ssa.Value* {
+    if dst {
+      this.store(pos, dst, value)
+    } else {
+      dst = this.load(pos, value)
+    }
+    if value.type.isaPointer() {
+      //      dst:T* ⟵ value
+      //  size:Int64 ⟵ sizeof( T )
+      //      sub:T* ⟵ value - size
+      //    value:T* ⟵ sub
+      const   pointee = value.type.pointee()
+      const immediate = Immediate{ i64 = Int64(pointee.size()) }
+      const      size = ssa.Constant{ value = immediate, type = ssa.tyInt64 }
+      const       sub = new ssa.Subtract{ pos = pos, parent = this.parent, type = value.type }
+      const  operands = sub.initialize(operands = 2ops)
+      this.set(operands, op1, value)
+      operands.imm(op2, size)
+      this.append(sub)
+      this.store(pos, value, sub)
+    } else if value.type.isIntegral() {
+      //  dst:T ⟵ value
+      //    dec ⟵ value - 1
+      //  value ⟵ dec
+      const      dec = new ssa.Decrement{ pos = pos, parent = this.parent, type = value.type }
+      const operands = dec.initialize(operands = 1ops)
+      this.set(operands, op1, value)
+      this.append(dec)
+      this.store(pos, value, dec)
+    } else {
+      //    dst ⟵ value
+      //    sub ⟵ value - 1
+      //  value ⟵ val
+      const      one = this.oneOf(value.type)
+      const      sub = new ssa.Subtract{ pos = pos, parent = this.parent, type = value.type }
+      const operands = sub.initialize(operands = 2ops)
+      this.set(operands, op1, value)
+      operands.imm(op2, one)
+      this.append(sub)
+      this.store(pos, value, sub)
+    }
+    return dst
+  }
+
+
+  fn postIncrement(this, pos, dst, value): ssa.Value* {
+    if dst {
+      this.store(pos, dst, value)
+    } else {
+      dst = this.load(pos, value)
+    }
+    if value.type.isaPointer() {
+      //      dst:T* ⟵ value
+      //  size:Int64 ⟵ sizeof( T )
+      //      sub:T* ⟵ value + size
+      //    value:T* ⟵ sub
+      this.store(pos, dst, value)
+      const   pointee = value.type.pointee()
+      const immediate = Immediate{ i64 = Int64(pointee.size()) }
+      const      size = ssa.Constant{ value = immediate, type = ssa.tyInt64 }
+      const       add = new ssa.Add{ pos = pos, parent = this.parent, type = value.type }
+      const  operands = add.initialize(operands = 2ops)
+      this.set(operands, op1, value)
+      operands.imm(op2, size)
+      this.append(add)
+      this.store(pos, value, add)
+    } else if value.type.isIntegral() {
+      //    dst ⟵ value
+      //    inc ⟵ value + 1
+      //  value ⟵ inc
+      const      inc = new ssa.Increment{ pos = pos, parent = this.parent, type = value.type }
+      const operands = inc.initialize(operands = 1ops)
+      this.set(operands, op1, value)
+      this.append(inc)
+      this.store(pos, value, inc)
+    } else {
+      //    dst ⟵ value
+      //    add ⟵ value + 1.0
+      //  value ⟵ add
+      const      one = this.oneOf(value.type)
+      const      add = new ssa.Add{ pos = pos, parent = this.parent, type = value.type }
+      const operands = add.initialize(operands = 2ops)
+      this.set(operands, op1, value)
+      operands.imm(op2, one)
+      this.append(add)
+      this.store(pos, value, add)
+    }
+    return dst
+  }
+
+
+  fn negate(this, pos, dst, value): ssa.Value* {
+    if value.type.isIntegral() {
+    //  val ⟵ 0 - value
+    //  dst ⟵ val
+      const      val = new ssa.Negate{ pos = pos, parent = this.parent, type = value.type }
+      const operands = val.initialize(operands = 1ops)
+      this.set(operands, op1, value)
+      this.append(val)
+      return this.store(pos, dst, val)
+    }
+    //  val ⟵ 0.0 - value
+    //  dst ⟵ val
+    const      val = new ssa.Subtract{ pos = pos, parent = this.parent, type = value.type }
+    const operands = val.initialize(operands = 2ops)
+    operands.setZeroOf(op1, value.type)
+    this.set(operands, op2, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn bitwiseNot(this, pos, dst, value): ssa.Value* {
+    //  tmp ⟵ value
+    //  val ⟵ ~tmp
+    //  dst ⟵ val
+    const      val = new ssa.BitwiseNot{ pos = pos, parent = this.parent, type = value.type }
+    const operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn roundUp(this, pos, dst, value): ssa.Value* {
+    //  val ⟵ roundup value
+    //  dst ⟵ val
+    assert value.type.isaReal()
+    const         val = new ssa.Round{ pos = pos, parent = this.parent, type = value.type, mode = ssa.RoundingMode.Up }
+    const    operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn roundDown(this, pos, dst, value): ssa.Value* {
+    //  val ⟵ rounddown value
+    //  dst ⟵ val
+    assert value.type.isaReal()
+    const         val = new ssa.Round{ pos = pos, parent = this.parent, type = value.type, mode = ssa.RoundingMode.Down }
+    const    operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn truncate(this, pos, dst, value): ssa.Value* {
+    //  val ⟵ truncate value
+    //  dst ⟵ val
+    assert value.type.isaReal()
+    const         val = new ssa.Round{ pos = pos, parent = this.parent, type = value.type, mode = ssa.RoundingMode.TowardZero }
+    const    operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn or(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs | rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.Or{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn xor(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs ^ rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.XOr{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn and(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs & rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.And{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn leftShift(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs << rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.LeftShift{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn rightShift(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs >> rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.RightShift{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn unsignedRightShift(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs >>> rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.UnsignedRightShift{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn add(this, pos, dst, lhs, rhs): ssa.Value* {
+    if lhs.type.isaPointer() {    
+      //  size:Int64 ⟵ sizeof( T )
+      //   tmp:Int64 ⟵ rhs × size
+      //      val:T* ⟵ lhs + tmp
+      //         dst ⟵ val
+      assert rhs.type.isIntegral()
+      const   pointee = lhs.type.pointee()
+      const immediate = Immediate{ i64 = Int64(pointee.size()) }
+      const      size = this.constant(pos, immediate, rhs.type)
+      const       tmp = this.multiply(pos, this.ctx.nulldst, rhs, size)
+      const       val = new ssa.Add{ pos = pos, parent = this.parent, type = lhs.type }
+      const  operands = val.initialize(operands = 2ops)
+      this.set(operands, op1, lhs)
+      this.set(operands, op2, tmp)
+      this.append(val)
+      return this.store(pos, dst, val)
+    }
+    //  val ⟵ lhs + rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.Add{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn subtract(this, pos, dst, lhs, rhs): ssa.Value* {
+    if lhs.type.isaPointer() {
+      if rhs.type.isaPointer() {
+        assert lhs.type == rhs.type
+        //   val:Int64 ⟵ lhs - rhs
+        //  size:Int64 ⟵ sizeof( T )
+        //   tmp:Int64 ⟵ val ÷ size
+        //         dst ⟵ tmp
+        const       val = new ssa.Subtract{ pos = pos, parent = this.parent, type = ssa.tyInt64 }
+        const  operands = val.initialize(operands = 2ops)
+        this.set(operands, op1, lhs)
+        this.set(operands, op2, rhs)
+        this.append(val)
+        const   pointee = lhs.type.pointee()
+        const immediate = Immediate{ i64 = Int64(pointee.size()) }
+        const      size = this.constant(pos, immediate, val.type)
+        return this.divide(pos, dst, val, size)
+      }    
+      //  size:Int64 ⟵ sizeof( T )
+      //   tmp:Int64 ⟵ rhs × size
+      //      val:T* ⟵ lhs - tmp
+      //         dst ⟵ val
+      assert rhs.type.isIntegral()
+      const   pointee = lhs.type.pointee()
+      const immediate = Immediate{ i64 = Int64(pointee.size()) }
+      const      size = this.constant(pos, immediate, rhs.type)
+      const       tmp = this.multiply(pos, this.ctx.nulldst, rhs, size)
+      const       val = new ssa.Subtract{ pos = pos, parent = this.parent, type = lhs.type }
+      const  operands = val.initialize(operands = 2ops)
+      this.set(operands, op1, lhs)
+      this.set(operands, op2, tmp)
+      this.append(val)
+      return this.store(pos, dst, val)
+    }
+    //  val ⟵ lhs - rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.Subtract{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn remainder(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs % rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.Remainder{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn divide(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs ÷ rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.Divide{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn multiply(this, pos, dst, lhs, rhs): ssa.Value* {
+    //  val ⟵ lhs × rhs
+    //  dst ⟵ val
+    assert lhs.type == rhs.type && lhs.type.isNumeric()
+    const       val = new ssa.Multiply{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, rhs)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn rotateLeft(this, pos, dst, lhs, times): ssa.Value* {
+    //  val ⟵ rol lhs, times
+    //  dst ⟵ val
+    assert lhs.type == times.type && lhs.type.isIntegral()
+    const       val = new ssa.RotateLeft{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, times)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn rotateRight(this, pos, dst, lhs, times): ssa.Value* {
+    //  val ⟵ ror lhs, times
+    //  dst ⟵ val
+    assert lhs.type == times.type && lhs.type.isIntegral()
+    const       val = new ssa.RotateRight{ pos = pos, parent = this.parent, type = lhs.type }
+    const  operands = val.initialize(operands = 2ops)
+    this.set(operands, op1, lhs)
+    this.set(operands, op2, times)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn argument(this, pos, argumentIndex, value): ssa.Value* {
+    const val = new ssa.Argument{ pos = pos, parent = this.parent, type = value.type,
+      argumentIndex = argumentIndex }
+    if argumentIndex < 4 {      
+      const operands = val.initialize(operands = 1ops)
+      this.set(operands, op1, value)
+      this.append(val)      
+      return val
+    }
+    //  frame[argument] ⟵ value
+    val.initialize(operands = nops)
+    this.append(val)
+    const elem = this.argumentAt(pos, val)
+    return this.store(pos, elem, value)
+  }
+
+
+  fn call(this, pos, callee, arguments, type, dstrax) {
+    const         call = new ssa.Call{ pos = pos, parent = this.parent, type = type }
+    const operandCount = 1 + arguments.length + (dstrax != null)
+    const     operands = call.initialize(operands = operandCount)
+    var   operandIndex = 0
+    this.set(operands, operandIndex++, callee)
+    for i, argument in arguments {
+      this.set(operands, operandIndex++, argument)
+    }
+    if dstrax {
+      this.set(operands, operandIndex++, dstrax)
+    }
+    return this.append(call)
+  }
+
+
+  fn signExtend(this, pos, dst, value, type): ssa.Value* {
+    assert value.type != type
+    const      val = new ssa.SignExtend{ pos = pos, parent = this.parent, type = type }
+    const operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn zeroExtend(this, pos, dst, value, type): ssa.Value* {
+    assert value.type != type
+    const      val = new ssa.ZeroExtend{ pos = pos, parent = this.parent, type = type }
+    const operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn numericCast(this, pos, dst, value, type): ssa.Value* {
+    assert value.type != type
+    const      val = new ssa.NumericCast{ pos = pos, parent = this.parent, type = type }
+    const operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn narrowingCast(this, pos, dst, value, type): ssa.Value* {
+    assert value.type != type
+    const      val = new ssa.NarrowingCast{ pos = pos, parent = this.parent, type = type }
+    const operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn bitCast(this, pos, dst, value, type): ssa.Value* {
+    assert value.type != type
+    assert value.type.size() == type.size()
+    const      val = new ssa.BitCast{ pos = pos, parent = this.parent, type = type }
+    const operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, value)
+    this.append(val)
+    return this.store(pos, dst, val)
+  }
+
+
+  fn yield_(this, pos): ssa.Value* {
+    //  jmp {epilogue}
+    const val = new ssa.Yield{ pos = pos, parent = this.parent, type = ssa.tyVoid }
+    val.initialize(operands = nops)
+    this.append(val)
+    this.takeCurrentBlock()
+    return val
+  }
+
+
+  fn jump(this, pos, target): ssa.Value* {
+    //  jmp {target}
+    const      val = new ssa.Jump{ pos = pos, parent = this.parent, type = ssa.tyVoid }
+    const operands = val.initialize(operands = 1ops)
+    this.set(operands, op1, target)
+    this.append(val)
+    this.takeCurrentBlock()
+    return val
+  }
+
+
+  fn jumpif(this, pos, condition, iftrue, ifalse): ssa.Value* {
+    //  goto {iftrue} if {condition} else goto {ifalse}
+    assert iftrue != ifalse
+    const      val = new ssa.JumpIf{ pos = pos, parent = this.parent, type = ssa.tyVoid }
+    const operands = val.initialize(operands = 3ops)
+    this.set(operands, op1, iftrue)
+    this.set(operands, op2, condition)
+    this.set(operands, op3, ifalse)
+    this.append(val)
+    this.takeCurrentBlock()
+    return val
+  }
+
+
+  fn assert_(this, pos): ssa.Value* {
+    //  int3
+    const val = new ssa.Assert{ pos = pos, parent = this.parent, type = ssa.tyVoid }
+    val.initialize(operands = nops)
+    return this.append(val)
+  }
+
+  fn pause(this, pos): ssa.Value* {
+    //  pause
+    const val = new ssa.Pause{ pos = pos, parent = this.parent, type = ssa.tyVoid }
+    val.initialize(operands = nops)
+    return this.append(val)
+  }
+
+
+  fn loadIfConstant(this, value): ssa.Value* {
+    if const constant = value is Constant {
+      return this.load(value.pos, value)
+    }
+    return value
+  }
+
+
+  fn constant(this, pos, value, type): ssa.Value* {
+    var val = Constant*{}
+    if const last = this.constants.removeLast() {
+      val = last as Constant*
+      assert val.isUnused()
+      val.pos = pos
+      val.parent = this.parent
+      val.value.i64 = value.i64
+      val.type = type     
+    } else {
+      val = new Constant{ pos = pos, parent = this.parent, value = value, type = type }
+      val.initialize(operands = nops)
+    }
+    val.xxxx = xxxx++
+    if val.xxxx == 0 {
+      this.ctx.ts.err(pos, "#{val.xxxx}")
+      assert 0
+    }
+    return this.append(val)
+  }
+
+
+  fn int(this, pos, value): ssa.Value* {
+    const constant = Immediate{ i64 = Int64(value) }
+    return this.constant(pos, constant, ssa.tyInt32)
+  }
+
+
+  fn int64(this, pos, value): ssa.Value* {
+    const constant = Immediate{ i64 = Int64(value) }
+    return this.constant(pos, constant, ssa.tyInt64)
+  }
+
+
+  fn zeroOf(this, pos, type) {
+    const constant = Immediate{}
+    return this.constant(pos, constant, type)
+  }
+
+
+  fn freeConstant(this, val) {
+    assert val.isUnused()
+    val.parent.body.remove(val as ssa.Value*)
+    this.constants.append(val)
+  }
+
+
+  fn openFunction(this, scope, locals) {
+    this.collectLabels(scope)
+
+    this.openScope(scope, locals)
+
+    this.parent = this.block(this.function.pos)
+
+    const fnreturn = this.function.fnreturn
+    if fnreturn.isVoid() || fnreturn.isLoadable() {
+      this.retval = new ssa.RetVal{ pos = this.entryPos(this.function.pos), parent = this.parent,
+        type = fnreturn, name = this.ctx.ts.ids.kw_retval }
+      this.retval.initialize(operands = nops)
+      this.append(this.retval)
+    } else {
+      const address = fnreturn.address()      
+      this.retval = new ssa.RetVal{ pos = this.entryPos(this.function.pos), parent = this.parent,
+        type = address, name = this.ctx.ts.ids.kw_retval }
+      this.retval.initialize(operands = nops)
+      this.append(this.retval)
+    }
+  }
+
+
+  fn collectLabels(this, scope):void {
+    return if !scope
+    for statement in scope.statements {
+      switch statement {
+        case ast.Scope this.collectLabels(statement)
+        case ast.If    this.collectLabels(statement)
+        case ast.Loop  this.collectLabels(statement)
+        case ast.Label {
+            const label = this.block(statement.pos)
+            if statement.id {
+              label.offset = statement.id
+            } else {
+              label.offset = --this.boffsets
+              statement.id = label.offset
+            }
+            this.labels.append(label)
+        }
+      }
+    }
+  }
+
+
+  fn closeFunction(this, scope, locals) {
+    this.closeScope(scope, locals)
+    assert !this.locals && this.retval
+
+    const      ret = new ssa.Return{ pos = exitPos(this.parent.pos), parent = this.parent, type = this.retval.type }
+    const operands = ret.initialize(operands = 1ops)
+    if this.retval.type.isVoid() {
+      operands.setZeroOf(op1, ssa.tyVoid)
+    } else if this.function.fnreturn.isNotLoadable() {
+      this.set(operands, op1, this.dereference(ret.pos, this.ctx.nulldst, this.retval))  
+    } else {
+      this.set(operands, op1, this.retval)
+    }
+    this.append(ret)
+
+    this.takeCurrentBlock()
+
+    each block in this.function.blocks() {
+      assert block.index >= 0
+      this.removeUnusedElementAts(block)
+    }
+  }
+
+
+  fn removeUnusedElementAts(this, block) {
+    for var value = block.body.first; value; {
+      assert value.parent == block
+      const qnext = value.qnext
+      switch value {
+        case ssa.ElementAt {
+          if value.uses.isEmpty() {
+            value.operands.clear()
+            block.body.remove(value)
+            delete value
+          }
+        }
+      }
+      value = qnext
+    }
+  }
+
+
+  fn openScope(this, scope, locals) {
+    locals.outer = this.locals
+     this.locals = &locals
+  }
+
+
+  fn closeScope(this, scope, locals) {
+    assert this.locals == &locals
+    if this.locals.outer {
+      this.returnSharedIndices()
+    }
+    this.locals = locals.outer
+  }
+
+
+  fn labelOf(this, node) {
+    for label in this.labels {
+      return label if label.offset == node.id
+    }
+    return null
+  }
+
+
+  fn set(this, operands, index, value, io = Io.Read) {
+    if const constant = value is Constant {
+      operands.imm(index, constant)
+      this.freeConstant(constant)
+    } else {
+      operands.set(index, value, io)
+    }
+  }
+
+
+  fn append(this, val) {
+    assert this.parent
+    if val.type.isUnknown() {
+      this.ctx.ts.cberr(val.pos, val) with {
+        println("unknown type\r\n\t\
+          →  val: #{nameof(it)}\r\n\t\
+          → type: #{it.type}")
+      }
+    }
+    this.parent.body.append(val)
+    return val
+  }
+
+  fn takeCurrentBlock(this) {
+    for var val = this.parent.body.first; val; val = val.qnext {      
+      if const constant = val is Constant {
+        this.ctx.ts.cberr(val.pos, { function = this.function, constant = constant }) with {
+          println("untaken constant #{it.function.name}: #{it.constant.pos.range}; #{it.constant.value.i64}; #{it.constant.xxxx}")
+        }
+        for use in constant.uses {
+          println("user: #{nameof(use.user)}")
+        }
+        assert 0
+      }
+      assert val !is Constant with "untaken constant"
+    }
+    this.parent.index = this.bidx++
+    this.function.body.append(this.parent)
+    this.parent = null // Closed
+  }
+}

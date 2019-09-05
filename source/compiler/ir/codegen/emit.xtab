@@ -1,0 +1,2494 @@
+import op
+
+struct Emitter {
+  const encode = Encoder&{}
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn mov(this, dst, src) {
+    return if dst.reg == src.reg
+    const size = dst.type.size()
+    if dst.type.isaRealOrPacked() {
+      switch size {
+        case SIZE_OF_FLOAT  this.vmovss(dst, src)
+        case SIZE_OF_DOUBLE this.vmovsd(dst, src)
+        case SIZE_OF_XMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx4  this.vmovps(dst, src)
+            case ssa.Kind.Doublex2 this.vmovpd(dst, src)
+            default                this.vmovdqu(dst, src)
+          }
+        }
+        case SIZE_OF_YMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx8  this.vmovpsqq(dst, src)
+            case ssa.Kind.Doublex4 this.vmovpdqq(dst, src)
+            default                this.vmovqqu(dst, src)
+          }
+        }
+        default assert with "#{size}"
+      }
+    } else switch size {
+      case SIZE_OF_BYTE    this.movb(dst, src)
+      case SIZE_OF_WORD    this.movw(dst, src)
+      case SIZE_OF_INT     this.movl(dst, src)
+      case SIZE_OF_POINTER this.movq(dst, src)
+      case SIZE_OF_XMM     this.vmovdqu(dst, src)
+      case SIZE_OF_YMM     this.vmovqqu(dst, src)
+      default assert with "#{size}"
+    }
+  }
+
+
+  fn movb(this, dst, src) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() { //  mov gpr8, gpr8
+        this.encodeOneByteRexOp(SIZE_OF_BYTE, reg, src.reg.name(), op.mov_GbEb)
+      } else if src.reg.isMemory() { //  mov gpr8, mem8
+        this.encodeOneByteRexAddressOp(SIZE_OF_BYTE, reg, src, op.mov_GbEb).patch()
+      } else if src.reg.isanImmediate() { //  mov gpr8, imm8
+        const imm = src.reg.immediate()
+        this.encodeOneByteRexOp(SIZE_OF_BYTE, reg, INVALID_REGISTER, op.mov_rb_Ib)
+        this.encodeImm8(src.reg.immediate())
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isMemory() {
+      if src.reg.isaGpr() { //  mov mem8, gpr8
+        this.encodeOneByteRexAddressOp(SIZE_OF_BYTE, src.reg.name(), dst, op.mov_EbGb).patch()
+      } else if src.reg.isanImmediate() { //  mov mem8, imm8
+        this.encodeOneByteRexAddressOp(SIZE_OF_BYTE, INVALID_REGISTER, dst, op.group11_EbIb, op.group11_mov)
+        this.encodeImm8(src.reg.immediate()).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn movw(this, dst, src) {
+    this._movwlq(SIZE_OF_WORD, dst, src)
+  }
+
+
+  fn movl(this, dst, src) {
+    this._movwlq(SIZE_OF_INT, dst, src)
+  }
+
+
+  fn movq(this, dst, src) {
+    this._movwlq(SIZE_OF_POINTER, dst, src)
+  }
+
+
+  fn _movwlq(this, opSize, dst, src) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() {
+        this.encodeOneByteRexOp(opSize, reg, src.reg.name(), op.mov_GvEv)
+      } else if src.reg.isMemory() {
+        this.encodeOneByteRexAddressOp(opSize, reg, src, op.mov_GvEv).patch()
+      } else if src.reg.isanImmediate() {
+        const imm = src.reg.immediate()
+        if opSize == SIZE_OF_POINTER { // mov gpr64, imm32 (sign-extended)
+          this.encodeOneByteRexOp(opSize, INVALID_REGISTER, reg, op.group11_EvIz, op.group11_mov)
+        } else {
+          this.encodeOneByteRexOp(opSize, reg, INVALID_REGISTER, op.mov_rv_Iv)  
+        }
+        if opSize == SIZE_OF_WORD {
+          this.encodeImm16(src.reg.immediate())
+        } else {
+          this.encodeImm32(src.reg.immediate())
+        }
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isMemory() {
+      if src.reg.isaGpr() {
+        this.encodeOneByteRexAddressOp(opSize, src.reg.name(), dst, op.mov_EvGv).patch()
+      } else if src.reg.isanImmediate() {
+        this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, dst, op.group11_EvIz, op.group11_mov)
+        if opSize == SIZE_OF_WORD {
+          this.encodeImm16(src.reg.immediate()).patch()
+        } else {
+          this.encodeImm32(src.reg.immediate()).patch()
+        }
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn movabs(this, dst, value) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      this.encodeOneByteRexOp(SIZE_OF_POINTER, reg, INVALID_REGISTER, op.mov_rv_Iv)
+      this.encodeImm64(value)
+    } else {
+      assert 0
+    }
+  }
+
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn vmovd(this, dst, src) {
+    //  VEX.128.66.0F.W0 6E / vmovd     xmm32, gpr/mem32  ; vmovd_VyWy
+    //  VEX.128.66.0F.W0 7E / vmovd gpr/mem32, xmm32      ; vmovd_WyVy
+    this._vmovdq(dst, src, op.vmovd_VyWy, op.vmovd_WyVy, w = 0)
+  }
+
+
+  fn vmovq(this, dst, src) {
+    //  VEX.128.66.0F.W1 6E / vmovq     xmm64, gpr/mem64  ; vmovq_VyWy
+    //  VEX.128.66.0F.W1 7E / vmovq gpr/mem64, xmm64      ; vmovq_WyVy
+    this._vmovdq(dst, src, op.vmovq_VyWy, op.vmovq_WyVy, w = 1)
+  }
+
+
+  fn _vmovdq(this, dst, src, opCodeVyWy, opCodeWyVy, w) {
+    const opSize = dst.type.size()
+    assert opSize == SIZE_OF_FLOAT || opSize == SIZE_OF_DOUBLE
+    if dst.reg.isaGpr() {
+      if src.reg.isanXmm() {
+        this.encodeTwoByteVexOp(dst.name(), INVALID_REGISTER, src.name(), opCodeWyVy, op.prefix_66, op.128bit_vector, w)
+      } else if src.reg.isMemory() {
+        this._movwlq(opSize, dst, src)
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isanXmm() {
+      if src.reg.isaGpr() {
+        this.encodeTwoByteVexOp(dst.name(), INVALID_REGISTER, src.name(), opCodeVyWy, op.prefix_66, op.128bit_vector, w)
+      } else if src.reg.isMemory() {
+        this.encodeTwoByteVexAddressOp(src.name(), INVALID_REGISTER, dst, opCodeVyWy, op.prefix_66, op.128bit_vector, w).patch()
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isMemory() {
+      if src.reg.isaGpr() {
+        this._movwlq(opSize, dst, src)
+      } else if src.reg.isanXmm() {
+        this.encodeTwoByteVexAddressOp(src.name(), INVALID_REGISTER, dst, opCodeWyVy, op.prefix_66, op.128bit_vector, w).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn vmovss(this, dst, src) {
+    //  Float ⟵ Float
+    //  VEX.LIG.F3.0F.WIG 10 /r vmovss xmm32, xmm/mem32 ; vmovss_VxHxWss
+    //  VEX.LIG.F3.0F.WIG 11 /r vmovss mem32, xmm32     ; vmovd_WyVy
+    this._vmov(dst, src, op.vmovss_VxHxWss, op.vmovq_WyVy, op.suffix_ss, op.no_vector)
+  }
+
+
+  fn vmovsd(this, dst, src) {
+    //  Double ⟵ Double
+    //  VEX.LIG.F2.0F.WIG 10 /r vmovsd xmm64, xmm/mem64 ; vmovsd_VxHxWsd
+    //  VEX.LIG.F2.0F.WIG 11 /r vmovsd mem64, xmm64     ; vmovsd_WsdHxVsd 
+    this._vmov(dst, src, op.vmovsd_VxHxWsd, op.vmovsd_WsdHxVsd, op.suffix_sd, op.no_vector)
+  }
+
+
+  fn vmovps(this, dst, src) {
+    //  Floatx4 ⟵ Floatx4
+    //  VEX.128.0F.WIG 10 /r vmovups xmm128, xmm/mem128 ; vmovups_VpsWps
+    //  VEX.128.0F.WIG 11 /r vmovups mem128, xmm128     ; vmovups_WpsVps
+    this._vmov(dst, src, op.vmovups_VpsWps, op.vmovups_WpsVps, op.suffix_ps, op.128bit_vector)
+  }
+
+
+  fn vmovpd(this, dst, src) {
+    //  Doublex2 ⟵ Doublex2
+    //  VEX.128.66.0F.WIG 10 /r vmovupd xmm256, xmm/mem256 ; vmovupd_VpdWpd
+    //  VEX.128.66.0F.WIG 11 /r vmovupd mem256, xmm256     ; vmovupd_WpdVpd
+    this._vmov(dst, src, op.vmovupd_VpdWpd, op.vmovupd_WpdVpd, op.suffix_ps, op.128bit_vector)
+  }
+
+
+  fn vmovpsqq(this, dst, src) {
+    //  Floatx8 ⟵ Floatx8
+    //  VEX.256.0F.WIG 10 /r vmovups xmm256, xmm/mem2568 ; vmovups_VpsWps
+    //  VEX.256.0F.WIG 11 /r vmovups mem256, xmm256      ; vmovups_WpsVps
+    this._vmov(dst, src, op.vmovups_VpsWps, op.vmovups_WpsVps, op.suffix_ps, op.256bit_vector)
+  }
+
+
+  fn vmovpdqq(this, dst, src) {
+    //  Doublex4 ⟵ Doublex4
+    //  VEX.256.66.0F.WIG 10 /r vmovupd xmm256, xmm/mem256 ; vmovupd_VpdWpd
+    //  VEX.256.66.0F.WIG 11 /r vmovupd mem256, xmm256     ; vmovupd_WpdVpd
+    this._vmov(dst, src, op.vmovupd_VpdWpd, op.vmovupd_WpdVpd, op.suffix_ps, op.256bit_vector)
+  }
+
+
+  fn vmovdqu(this, dst, src) {
+    //  U/Int8x16 ⟵ U/Int8x16 ; unaligned
+    //  U/Int16x8 ⟵ U/Int16x8 ; unaligned
+    //  U/Int32x4 ⟵ U/Int32x4 ; unaligned
+    //  U/Int64x2 ⟵ U/Int64x2 ; unaligned
+    //  VEX.128.F3.0F.WIG 6F /r vmovdqu xmm128, xmm/mem128 ; vmovdq_VxWx
+    //  VEX.128.F3.0F.WIG 7F /r vmovdqu mem128, xmm128     ; vmovdq_WxVx
+    this._vmov(dst, src, op.vmovdq_VxWx, op.vmovdq_WxVx, op.prefix_F3, op.128bit_vector, putvreg = false)
+  }
+
+
+  fn vmovqqu(this, dst, src) {
+    //   U/Int8x32 ⟵ U/Int8x32  ; unaligned
+    //  U/Int16x16 ⟵ U/Int16x16 ; unaligned
+    //   U/Int32x8 ⟵ U/Int32x8  ; unaligned
+    //   U/Int64x4 ⟵ U/Int64x4  ; unaligned
+    //  VEX.256.F3.0F.WIG 6F /r vmovdqu xmm256, xmm/mem256 ; vmovdq_VxWx
+    //  VEX.256.F3.0F.WIG 7F /r vmovdqu mem256, xmm256     ; vmovdq_WxVx
+    this._vmov(dst, src, op.vmovdq_VxWx, op.vmovdq_WxVx, op.prefix_F3, op.256bit_vector, putvreg = false)
+  }
+
+
+  fn vmovdqa(this, dst, src) {
+    //  U/Int8x16 ⟵ U/Int8x16 ; aligned
+    //  U/Int16x8 ⟵ U/Int16x8 ; aligned
+    //  U/Int32x4 ⟵ U/Int32x4 ; aligned
+    //  U/Int64x2 ⟵ U/Int64x2 ; aligned
+    //  VEX.128.66.0F.WIG 6F /r vmovdqa xmm128, xmm/mem128 ; vmovdq_VxWx
+    //  VEX.128.66.0F.WIG 7F /r vmovdqa mem128, xmm128     ; vmovdq_WxVx
+    this._vmov(dst, src, op.vmovdq_VxWx, op.vmovdq_WxVx, op.prefix_66, op.128bit_vector, putvreg = false)
+  }
+
+
+  fn vmovqqa(this, dst, src) {
+    //   U/Int8x32 ⟵ U/Int8x32  ; aligned
+    //  U/Int16x16 ⟵ U/Int16x16 ; aligned
+    //   U/Int32x8 ⟵ U/Int32x8  ; aligned
+    //   U/Int64x4 ⟵ U/Int64x4  ; aligned
+    //  VEX.256.66.0F.WIG 6F /r vmovdqa xmm256, xmm/mem256 ; vmovdq_VxWx
+    //  VEX.256.66.0F.WIG 7F /r vmovdqa mem256, xmm256     ; vmovdq_WxVx
+    this._vmov(dst, src, op.vmovdq_VxWx, op.vmovdq_WxVx, op.prefix_66, op.256bit_vector, putvreg = false)
+  }
+
+
+  fn _vmov(this, dst, src, opCodeVxWx, opCodeWxVx, prefix, vector, putvreg = true) {    
+    if dst.reg.isanXmm() {
+      const dreg = dst.reg.name()
+      if src.reg.isanXmm() {
+        const sreg = src.reg.name()
+        const vreg = (sreg if putvreg else INVALID_REGISTER)
+        this.encodeTwoByteVexOp(dreg, vreg, sreg, opCodeVxWx, prefix, vector)
+      } else if src.reg.isMemory() {
+        this.encodeTwoByteVexAddressOp(dreg, INVALID_REGISTER, src, opCodeVxWx, prefix, vector).patch()
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isMemory() {
+      if src.reg.isanXmm() {
+        this.encodeTwoByteVexAddressOp(src.reg.name(), INVALID_REGISTER, dst, opCodeWxVx, prefix, vector).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn xor(this, dst, lhs, rhs) {
+    const size = dst.type.size()
+    if dst.type.isaRealOrPacked() {
+      switch size {
+        case SIZE_OF_FLOAT  this.vxorps(dst, lhs, rhs)
+        case SIZE_OF_DOUBLE this.vxorpd(dst, lhs, rhs)
+        case SIZE_OF_XMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx4  this.vxorps(dst, lhs, rhs)
+            case ssa.Kind.Doublex2 this.vxorpd(dst, lhs, rhs)
+            default                this.vxordq(dst, lhs, rhs)
+          }
+        }
+        case SIZE_OF_YMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx4  this.vxorpsqq(dst, lhs, rhs)
+            case ssa.Kind.Doublex2 this.vxorpdqq(dst, lhs, rhs)
+            default                this.vxorqq(dst, lhs, rhs)
+          }
+        }
+        default assert 0
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch size {
+        case SIZE_OF_BYTE    this.xorb(dst, rhs)
+        case SIZE_OF_WORD    this.xorw(dst, rhs)
+        case SIZE_OF_INT     this.xorl(dst, rhs)
+        case SIZE_OF_POINTER this.xorq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn xorb(this, dst, src) {
+    this._group1b(dst, src, op.xor_EbGb, op.xor_GbEb, op.xor_ALIb, op.group1_xor)
+  }  
+
+  fn xorw(this, dst, src) {
+    this._group1wlq(SIZE_OF_WORD, dst, src, op.xor_EvGv, op.xor_GvEv, op.xor_rAXIz, op.group1_xor)
+  }
+
+  fn xorl(this, dst, src) {
+    this._group1wlq(SIZE_OF_INT, dst, src, op.xor_EvGv, op.xor_GvEv, op.xor_rAXIz, op.group1_xor)
+  }
+
+  fn xorq(this, dst, src) {
+    this._group1wlq(SIZE_OF_POINTER, dst, src, op.xor_EvGv, op.xor_GvEv, op.xor_rAXIz, op.group1_xor)
+  }
+
+  fn vxorps(this, dst, lhs, rhs) {
+    //  VEX.128.0F.WIG 57 /r vxorps xmm128, xmm128, xmm/mem128 ; vxorps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vxorps_VpsHpsWps, op.suffix_ps, op.128bit_vector)
+  }
+
+  fn vxorpsqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 57 /r vxorps xmm256, xmm256, xmm/mem256 ; vxorps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vxorps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn vxorpd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG 57 /r vxorpd xmm128, xmm128, xmm/mem128 ; vxorpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vxorpd_VpdHpdWpd, op.suffix_pd, op.128bit_vector)
+  }
+
+  fn vxorpdqq(this, dst, lhs, rhs) {
+    //  VEX.256.66.0F.WIG 57 /r vxorpd xmm256, xmm2568, xmm/mem256 ; vxorpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vxorpd_VpdHpdWpd, op.suffix_pd, op.256bit_vector)
+  }
+
+  fn vxordq(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG EF /r vpxor xmm128, xmm128, xmm/mem128 ; vpxor_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpxor_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vxorqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 57 /r vxorps xmm256, xmm256, xmm/mem256 ; vxorps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vxorps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn _vbitwise(this, dst, lhs, rhs, opCode, prefix, vector) {
+    if dst.reg.isNotValid() {
+      if lhs.reg.isanXmm() {
+        const reg = lhs.reg.name()
+        if rhs.reg.isanXmm() {
+          this.encodeTwoByteVexOp(reg, INVALID_REGISTER, rhs.reg.name(), opCode, prefix, vector)
+        } else if rhs.reg.isMemory() {
+          this.encodeTwoByteVexAddressOp(reg, INVALID_REGISTER, rhs, opCode, prefix, vector).patch()
+        } else {
+          assert 0
+        }
+      } else {
+        assert 0
+      }
+    } else if lhs.reg.isanXmm() {
+      if dst.reg.isanXmm() {
+        const reg = dst.reg.name()
+        if rhs.reg.isanXmm() {
+          this.encodeTwoByteVexOp(reg, lhs.reg.name(), rhs.reg.name(), opCode, prefix, vector)
+        } else if rhs.reg.isMemory() {
+          this.encodeTwoByteVexAddressOp(reg, lhs.reg.name(), rhs, opCode, prefix, vector).patch()
+        } else {
+          assert 0
+        }
+      } else {
+        assert 0
+      }
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn and(this, dst, lhs, rhs) {
+    const size = dst.type.size()
+    if dst.type.isaRealOrPacked() {
+      switch size {
+        case SIZE_OF_FLOAT  this.vandps(dst, lhs, rhs)
+        case SIZE_OF_DOUBLE this.vandpd(dst, lhs, rhs)
+        case SIZE_OF_XMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx4  this.vandps(dst, lhs, rhs)
+            case ssa.Kind.Doublex2 this.vandpd(dst, lhs, rhs)
+            default                this.vanddq(dst, lhs, rhs)
+          }
+        }
+        case SIZE_OF_YMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx4  this.vandpsqq(dst, lhs, rhs)
+            case ssa.Kind.Doublex2 this.vandpdqq(dst, lhs, rhs)
+            default                this.vandqq(dst, lhs, rhs)
+          }
+        }
+        default assert 0
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch size {
+        case SIZE_OF_BYTE    this.andb(dst, rhs)
+        case SIZE_OF_WORD    this.andw(dst, rhs)
+        case SIZE_OF_INT     this.andl(dst, rhs)
+        case SIZE_OF_POINTER this.andq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn andb(this, dst, src) {
+    this._group1b(dst, src, op.and_EbGb, op.and_GbEb, op.and_ALIb, op.group1_and)
+  }
+
+  fn andw(this, dst, src) {
+    this._group1wlq(SIZE_OF_WORD, dst, src, op.and_EvGv, op.and_GvEv, op.and_rAXIz, op.group1_and)
+  }
+
+  fn andl(this, dst, src) {
+    this._group1wlq(SIZE_OF_INT, dst, src, op.and_EvGv, op.and_GvEv, op.and_rAXIz, op.group1_and)
+  }
+
+  fn andq(this, dst, src) {
+    this._group1wlq(SIZE_OF_POINTER, dst, src, op.and_EvGv, op.and_GvEv, op.and_rAXIz, op.group1_and) 
+  }
+
+  fn vandps(this, dst, lhs, rhs) {
+    //  VEX.128.0F.WIG 54 /r vandps xmm128, xmm128, xmm/mem128 ; vandps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vandps_VpsHpsWps, op.suffix_ps, op.128bit_vector)
+  }
+
+  fn vandpsqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 54 /r vandps xmm256, xmm256, xmm/mem256 ; vandps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vandps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn vandpd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG 54 /r vandpd xmm128, xmm128, xmm/mem128 ; vandpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vandpd_VpdHpdWpd, op.suffix_pd, op.128bit_vector)
+  }
+
+  fn vandpdqq(this, dst, lhs, rhs) {
+    //  VEX.256.66.0F.WIG 54 /r vandpd xmm256, xmm2568, xmm/mem256 ; vandpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vandpd_VpdHpdWpd, op.suffix_pd, op.256bit_vector)
+  }
+
+  fn vanddq(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG DB /r vpand xmm128, xmm128, xmm/mem128 ; vpand_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpand_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vandqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 54 /r vandpd xmm256, xmm256, xmm/mem256 ; vandps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vandps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn or(this, dst, lhs, rhs) {
+    const size = dst.type.size()
+    if dst.type.isaRealOrPacked() {
+      switch size {
+        case SIZE_OF_FLOAT  this.vorps(dst, lhs, rhs)
+        case SIZE_OF_DOUBLE this.vorpd(dst, lhs, rhs)
+        case SIZE_OF_XMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx4  this.vorps(dst, lhs, rhs)
+            case ssa.Kind.Doublex2 this.vorpd(dst, lhs, rhs)
+            default                this.vpordq(dst, lhs, rhs)
+          }
+        }
+        case SIZE_OF_YMM {
+          switch dst.type.kind {
+            case ssa.Kind.Floatx4  this.vorpsqq(dst, lhs, rhs)
+            case ssa.Kind.Doublex2 this.vorpdqq(dst, lhs, rhs)
+            default                this.vporqq(dst, lhs, rhs)
+          }
+        }
+        default assert 0
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch size {
+        case SIZE_OF_BYTE    this.orb(dst, rhs)
+        case SIZE_OF_WORD    this.orw(dst, rhs)
+        case SIZE_OF_INT     this.orl(dst, rhs)
+        case SIZE_OF_POINTER this.orq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn orb(this, dst, src) {
+    this._group1b(dst, src, op.or_EbGb, op.or_GbEb, op.or_ALIb, op.group1_or)
+  }
+
+  fn orw(this, dst, src) {
+    this._group1wlq(SIZE_OF_WORD, dst, src, op.or_EvGv, op.or_GvEv, op.or_rAXIz, op.group1_or)
+  }
+
+  fn orl(this, dst, src) {
+    this._group1wlq(SIZE_OF_INT, dst, src, op.or_EvGv, op.or_GvEv, op.or_rAXIz, op.group1_or)
+  }
+
+  fn orq(this, dst, src) {
+    this._group1wlq(SIZE_OF_POINTER, dst, src, op.or_EvGv, op.or_GvEv, op.or_rAXIz, op.group1_or) 
+  }
+
+  fn vorps(this, dst, lhs, rhs) {
+    //  VEX.128.0F.WIG 56 /r vorps xmm128, xmm128, xmm/mem128 ; vorps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vorps_VpsHpsWps, op.suffix_ps, op.128bit_vector)
+  }
+
+  fn vorpsqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 56 /r vorps xmm256, xmm256, xmm/mem256 ; vorps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vorps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn vorpd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG 56 /r vorpd xmm128, xmm128, xmm/mem128 ; vorpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vorpd_VpdHpdWpd, op.suffix_pd, op.128bit_vector)
+  }
+
+  fn vorpdqq(this, dst, lhs, rhs) {
+    //  VEX.256.66.0F.WIG 56 /r vorpd xmm256, xmm2568, xmm/mem256 ; vorpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vorpd_VpdHpdWpd, op.suffix_pd, op.256bit_vector)
+  }
+
+  fn vpordq(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG DB /r vpor xmm128, xmm128, xmm/mem128 ; vpor_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpor_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vporqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 56 /r vorpd xmm256, xmm256, xmm/mem256 ; vorps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vorps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn add(this, dst, lhs, rhs) {
+    if dst.type.isaRealOrPacked() {
+      switch dst.type.kind {        
+        case ssa.Kind.Float                      this.vaddss(dst, lhs, rhs)
+        case ssa.Kind.Double                     this.vaddsd(dst, lhs, rhs)
+        case ssa.Kind.Floatx4                    this.vaddps(dst, lhs, rhs)
+        case ssa.Kind.Doublex2                   this.vaddpd(dst, lhs, rhs)        
+        case ssa.Kind.UInt8x16, ssa.Kind.Int8x16 this.vpaddb(dst, lhs, rhs)
+        case ssa.Kind.UInt16x8, ssa.Kind.Int16x8 this.vpaddw(dst, lhs, rhs)
+        case ssa.Kind.UInt32x4, ssa.Kind.Int32x4 this.vpaddd(dst, lhs, rhs)
+        case ssa.Kind.UInt64x2, ssa.Kind.Int64x2 this.vpaddq(dst, lhs, rhs)
+        case ssa.Kind.Floatx8                    this.vaddpsqq(dst, lhs, rhs)
+        case ssa.Kind.Doublex4                   this.vaddpdqq(dst, lhs, rhs)
+        default assert with nameof(dst.type.kind)
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch dst.type.size() {
+        case SIZE_OF_BYTE    this.addb(dst, rhs)
+        case SIZE_OF_WORD    this.addw(dst, rhs)
+        case SIZE_OF_INT     this.addl(dst, rhs)
+        case SIZE_OF_POINTER this.addq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn addb(this, dst, src) {
+    this._group1b(dst, src, op.add_EbGb, op.add_GbEb, op.add_ALIb, op.group1_add)
+  }  
+
+  fn addw(this, dst, src) {
+    this._group1wlq(SIZE_OF_WORD, dst, src, op.add_EvGv, op.add_GvEv, op.add_rAXIz, op.group1_add)
+  }
+
+  fn addl(this, dst, src) {
+    this._group1wlq(SIZE_OF_INT, dst, src, op.add_EvGv, op.add_GvEv, op.add_rAXIz, op.group1_add)
+  }
+
+  fn addq(this, dst, src) {
+    this._group1wlq(SIZE_OF_POINTER, dst, src, op.add_EvGv, op.add_GvEv, op.add_rAXIz, op.group1_add)
+  }
+
+  fn vaddss(this, dst, lhs, rhs) {
+    //  VEX.LIG.F3.0F.WIG 58 /r vaddss xmm32, xmm32, xmm/mem32 ; vaddss_VssHssWss
+    this._vbitwise(dst, lhs, rhs, op.vaddss_VssHssWss, op.suffix_ss, op.no_vector)
+  }
+
+  fn vaddps(this, dst, lhs, rhs) {
+    //  VEX.128.0F.WIG 58 /r vaddps xmm128, xmm128, xmm/mem128 ; vaddps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vaddps_VpsHpsWps, op.suffix_ps, op.128bit_vector)
+  }
+
+  fn vaddpsqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 58 /r vaddps xmm256, xmm256, xmm/mem256 ; vaddps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vaddps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn vaddsd(this, dst, lhs, rhs) {
+    //  VEX.LIG.F2.0F.WIG 58 /r vaddsd xmm64, xmm64, xmm/mem64 ; vaddsd_VsdHsdWsd
+    this._vbitwise(dst, lhs, rhs, op.vaddsd_VsdHsdWsd, op.suffix_sd, op.no_vector)
+  }
+
+  fn vaddpd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG 58 /r vaddpd xmm128, xmm128, xmm/mem128 ; vaddpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vaddpd_VpdHpdWpd, op.suffix_pd, op.128bit_vector)
+  }
+
+  fn vaddpdqq(this, dst, lhs, rhs) {
+    //  VEX.256.66.0F.WIG 58 /r vaddpd xmm256, xmm256, xmm/mem256 ; vaddpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vaddpd_VpdHpdWpd, op.suffix_pd, op.256bit_vector)
+  }
+
+  fn vpaddb(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG FC /r vpaddb xmm128, xmm128, xmm/m128 ; vpaddb_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpaddb_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vpaddw(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG FD /r vpaddw xmm128, xmm128, xmm/m128 ; vpaddw_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpaddw_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vpaddd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG FE /r vpaddd xmm128, xmm128, xmm/m128 ; vpaddd_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpaddd_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vpaddq(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG D4 /r vpaddq xmm128, xmm128, xmm/m128 ; vpaddq_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpaddq_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn sub(this, dst, lhs, rhs) {
+    if dst.type.isaRealOrPacked() {
+      switch dst.type.kind {        
+        case ssa.Kind.Float                      this.vsubss(dst, lhs, rhs)
+        case ssa.Kind.Double                     this.vsubsd(dst, lhs, rhs)
+        case ssa.Kind.Floatx4                    this.vsubps(dst, lhs, rhs)
+        case ssa.Kind.Doublex2                   this.vsubpd(dst, lhs, rhs)        
+        case ssa.Kind.UInt8x16, ssa.Kind.Int8x16 this.vpsubb(dst, lhs, rhs)
+        case ssa.Kind.UInt16x8, ssa.Kind.Int16x8 this.vpsubw(dst, lhs, rhs)
+        case ssa.Kind.UInt32x4, ssa.Kind.Int32x4 this.vpsubd(dst, lhs, rhs)
+        case ssa.Kind.UInt64x2, ssa.Kind.Int64x2 this.vpsubq(dst, lhs, rhs)
+        case ssa.Kind.Floatx8                    this.vsubpsqq(dst, lhs, rhs)
+        case ssa.Kind.Doublex4                   this.vsubpdqq(dst, lhs, rhs)
+        default assert with nameof(dst.type.kind)
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch dst.type.size() {
+        case SIZE_OF_BYTE    this.subb(dst, rhs)
+        case SIZE_OF_WORD    this.subw(dst, rhs)
+        case SIZE_OF_INT     this.subl(dst, rhs)
+        case SIZE_OF_POINTER this.subq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn subb(this, dst, src) {
+    this._group1b(dst, src, op.sub_EbGb, op.sub_GbEb, op.sub_ALIb, op.group1_sub)
+  }  
+
+  fn subw(this, dst, src) {
+    this._group1wlq(SIZE_OF_WORD, dst, src, op.sub_EvGv, op.sub_GvEv, op.sub_rAXIz, op.group1_sub)
+  }
+
+  fn subl(this, dst, src) {
+    this._group1wlq(SIZE_OF_INT, dst, src, op.sub_EvGv, op.sub_GvEv, op.sub_rAXIz, op.group1_sub)
+  }
+
+  fn subq(this, dst, src) {
+    this._group1wlq(SIZE_OF_POINTER, dst, src, op.sub_EvGv, op.sub_GvEv, op.sub_rAXIz, op.group1_sub)
+  }
+
+  fn vsubss(this, dst, lhs, rhs) {
+    //  VEX.LIG.F3.0F.WIG 5C /r vsubss xmm32, xmm32, xmm/mem32 ; vsubss_VssHssWss
+    this._vbitwise(dst, lhs, rhs, op.vsubss_VssHssWss, op.suffix_ss, op.no_vector)
+  }
+
+  fn vsubps(this, dst, lhs, rhs) {
+    //  VEX.128.0F.WIG 5C /r vsubps xmm128, xmm128, xmm/mem128 ; vsubps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vsubps_VpsHpsWps, op.suffix_ps, op.128bit_vector)
+  }
+
+  fn vsubpsqq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 5C /r vsubps xmm256, xmm256, xmm/mem256 ; vsubps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vsubps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn vsubsd(this, dst, lhs, rhs) {
+    //  VEX.LIG.F2.0F.WIG 5C /r vsubsd xmm64, xmm64, xmm/mem64 ; vsubsd_VsdHsdWsd
+    this._vbitwise(dst, lhs, rhs, op.vsubsd_VsdHsdWsd, op.suffix_sd, op.no_vector)
+  }
+
+  fn vsubpd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG 5C /r vsubpd xmm128, xmm128, xmm/mem128 ; vsubpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vsubpd_VpdHpdWpd, op.suffix_pd, op.128bit_vector)
+  }
+
+  fn vsubpdqq(this, dst, lhs, rhs) {
+    //  VEX.256.66.0F.WIG 5C /r vsubpd xmm256, xmm256, xmm/mem256 ; vsubpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vsubpd_VpdHpdWpd, op.suffix_pd, op.256bit_vector)
+  }
+
+  fn vpsubb(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG F8 /r vpsubb xmm128, xmm128, xmm/m128 ; vpsubb_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpsubb_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vpsubw(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG F9 /r vpsubw xmm128, xmm128, xmm/m128 ; vpsubw_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpsubw_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vpsubd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG FA /r vpsubd xmm128, xmm128, xmm/m128 ; vpsubd_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpsubd_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  fn vpsubq(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG FB /r vpsubq xmm128, xmm128, xmm/m128 ; vpsubq_VxHxWx
+    this._vbitwise(dst, lhs, rhs, op.vpsubq_VxHxWx, op.prefix_66, op.128bit_vector)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn mul(this, dst, lhs, rhs) {
+    const size = dst.type.size()
+    if dst.type.isaRealOrPacked() {
+      switch dst.type.kind {        
+        case ssa.Kind.Float    this.vmulss(dst, lhs, rhs)
+        case ssa.Kind.Double   this.vmulsd(dst, lhs, rhs)
+        case ssa.Kind.Floatx4  this.vmulps(dst, lhs, rhs)
+        case ssa.Kind.Doublex2 this.vmulpd(dst, lhs, rhs)
+        case ssa.Kind.Floatx8  this.vmulpsq(dst, lhs, rhs)
+        case ssa.Kind.Doublex4 this.vmulpdq(dst, lhs, rhs)
+        default assert with nameof(dst.type.kind)
+      }
+    } else if dst.type.isUnsigned() || size == SIZE_OF_BYTE {
+      assert dst.reg.isaGpr() && dst.reg.name() == rax
+      assert !rhs.reg.isanImmediate()
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch size {
+        case SIZE_OF_BYTE    this.mulb(rhs)
+        case SIZE_OF_WORD    this.mulw(rhs)
+        case SIZE_OF_INT     this.mull(rhs)
+        case SIZE_OF_POINTER this.mulq(rhs)
+        default assert 0
+      }
+    } else if rhs.reg.isanImmediate() {
+      //  dst ⟵ lhs × imm
+      switch size {
+        case SIZE_OF_WORD    this.imulwi(dst, lhs, rhs)
+        case SIZE_OF_INT     this.imulli(dst, lhs, rhs)
+        case SIZE_OF_POINTER this.imulqi(dst, lhs, rhs)
+        default assert 0
+      }
+    } else {
+      //  dst ⟵ lhs
+      //  dst ⟵ dst × rhs
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch size {
+        case SIZE_OF_WORD    this.imulw(dst, rhs)
+        case SIZE_OF_INT     this.imull(dst, rhs)
+        case SIZE_OF_POINTER this.imulq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn mulb(this, src) {
+    //  al ⟵ al × gpr/mem8
+    this._group3(SIZE_OF_BYTE, lhs = src, rhs = Register{}, opGroup = op.group3_mul)
+  }  
+
+  fn mulw(this, src) {
+    //  ax ⟵ ax × gpr/mem16
+    this.cwd()
+    this._group3(SIZE_OF_WORD, lhs = src, rhs = Register{}, opGroup = op.group3_mul)
+  }
+
+  fn mull(this, src) {
+    //  eax ⟵ eax × gpr/mem32
+    this.cdq()
+    this._group3(SIZE_OF_INT, lhs = src, rhs = Register{}, opGroup = op.group3_mul)
+  }
+
+  fn mulq(this, src) {
+    //  rax ⟵ rax × gpr/mem64
+    this.cqo()
+    this._group3(SIZE_OF_POINTER, lhs = src, rhs = Register{}, opGroup = op.group3_mul)
+  }  
+
+  fn imulw(this, dst, src) {
+    this._imul(SIZE_OF_WORD, dst, src, rhs = Register{})
+  }
+
+  fn imull(this, dst, src) {
+    this._imul(SIZE_OF_INT, dst, src, rhs = Register{})
+  }
+
+  fn imulq(this, dst, src) {
+    this._imul(SIZE_OF_POINTER, dst, src, rhs = Register{})
+  }
+
+  fn imulwi(this, dst, lhs, rhs) {
+    this._imul(SIZE_OF_WORD, dst, lhs, rhs.reg)
+  }
+
+  fn imulli(this, dst, lhs, rhs) {
+    this._imul(SIZE_OF_INT, dst, lhs, rhs.reg)
+  }
+
+  fn imulqi(this, dst, lhs, rhs) {
+    this._imul(SIZE_OF_POINTER, dst, lhs, rhs.reg)
+  }
+
+  fn vmulss(this, dst, lhs, rhs) {
+    //  VEX.LIG.F3.0F.WIG 59 /r vmulss xmm32, xmm32, xmm/mem32 ; vmulss_VssHssWss
+    this._vbitwise(dst, lhs, rhs, op.vmulss_VssHssWss, op.suffix_ss, op.no_vector)
+  }
+
+  fn vmulps(this, dst, lhs, rhs) {
+    //  VEX.128.0F.WIG 59 /r vmulps xmm128, xmm128, xmm/mem128 ; vmulps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vmulps_VpsHpsWps, op.suffix_ps, op.128bit_vector)
+  }
+
+  fn vmulpsq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 59 /r vmulps xmm256, xmm256, xmm/mem256 ; vmulps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vmulps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn vmulsd(this, dst, lhs, rhs) {
+    //  VEX.LIG.F2.0F.WIG 59 /r vmulsd xmm64, xmm64, xmm/mem64 ; vmulsd_VsdHsdWsd
+    this._vbitwise(dst, lhs, rhs, op.vmulsd_VsdHsdWsd, op.suffix_sd, op.no_vector)
+  }
+
+  fn vmulpd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG 59 /r vmulpd xmm128, xmm128, xmm/mem128 ; vmulpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vmulpd_VpdHpdWpd, op.suffix_pd, op.128bit_vector)
+  }
+
+  fn vmulpdq(this, dst, lhs, rhs) {
+    //  VEX.256.66.0F.WIG 59 /r vmulpd xmm256, xmm256, xmm/mem256 ; vmulpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vmulpd_VpdHpdWpd, op.suffix_pd, op.256bit_vector)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn rem(this, dst, rax, lhs, rhs) {
+    /*      rax ⟵ lhs:gpr/mem
+        rdx:rax ⟵ rax ÷ rhs:gpr/mem
+    */
+    if rax.reg != lhs.reg {
+      this.mov(rax, lhs)
+    }
+    const isUnsigned = dst.type.isUnsigned()
+    switch dst.type.size() {
+      case SIZE_OF_BYTE    this.divb(rhs) if isUnsigned else this.idivb(rhs)
+      case SIZE_OF_WORD    this.divw(rhs) if isUnsigned else this.idivw(rhs)
+      case SIZE_OF_INT     this.divl(rhs) if isUnsigned else this.idivl(rhs)
+      case SIZE_OF_POINTER this.divq(rhs) if isUnsigned else this.idivq(rhs)
+      default assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn div(this, dst, lhs, rhs) {
+    if dst.type.isaRealOrPacked() {
+      switch dst.type.kind {        
+        case ssa.Kind.Float    this.vdivss(dst, lhs, rhs)
+        case ssa.Kind.Double   this.vdivsd(dst, lhs, rhs)
+        case ssa.Kind.Floatx4  this.vdivps(dst, lhs, rhs)
+        case ssa.Kind.Doublex2 this.vdivpd(dst, lhs, rhs)
+        case ssa.Kind.Floatx8  this.vdivpsq(dst, lhs, rhs)
+        case ssa.Kind.Doublex4 this.vdivpdq(dst, lhs, rhs)
+        default assert with nameof(dst.type.kind)
+      }
+    } else {
+      assert dst.reg.isaGpr() && dst.reg.name() == rax
+      assert !rhs.reg.isanImmediate()
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      const isUnsigned = dst.type.isUnsigned()
+      switch dst.type.size() {
+        case SIZE_OF_BYTE    this.divb(rhs) if isUnsigned else this.idivb(rhs)
+        case SIZE_OF_WORD    this.divw(rhs) if isUnsigned else this.idivw(rhs)
+        case SIZE_OF_INT     this.divl(rhs) if isUnsigned else this.idivl(rhs)
+        case SIZE_OF_POINTER this.divq(rhs) if isUnsigned else this.idivq(rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn divb(this, src) {
+    //  al ⟵ al ÷ gpr/mem8
+    this._group3(SIZE_OF_BYTE, lhs = src, rhs = Register{}, opGroup = op.group3_div)
+  }  
+
+  fn divw(this, src) {
+    //  ax ⟵ ax ÷ gpr/mem16
+    this.cwd()
+    this._group3(SIZE_OF_WORD, lhs = src, rhs = Register{}, opGroup = op.group3_div)
+  }
+
+  fn divl(this, src) {
+    //  eax ⟵ eax ÷ gpr/mem32
+    this.cdq()
+    this._group3(SIZE_OF_INT, lhs = src, rhs = Register{}, opGroup = op.group3_div)
+  }
+
+  fn divq(this, src) {
+    //  rax ⟵ rax ÷ gpr/mem64
+    this.cqo()
+    this._group3(SIZE_OF_POINTER, lhs = src, rhs = Register{}, opGroup = op.group3_div)
+  }
+
+  fn idivb(this, src) {
+    //  al ⟵ al ÷ gpr/mem8
+    this._group3(SIZE_OF_BYTE, lhs = src, rhs = Register{}, opGroup = op.group3_idiv)
+  }  
+
+  fn idivw(this, src) {
+    //  ax ⟵ ax ÷ gpr/mem16
+    this.cwd()
+    this._group3(SIZE_OF_WORD, lhs = src, rhs = Register{}, opGroup = op.group3_idiv)
+  }
+
+  fn idivl(this, src) {
+    //  eax ⟵ eax ÷ gpr/mem32
+    this.cdq()
+    this._group3(SIZE_OF_INT, lhs = src, rhs = Register{}, opGroup = op.group3_idiv)
+  }
+
+  fn idivq(this, src) {
+    //  rax ⟵ rax ÷ gpr/mem64
+    this.cqo()
+    this._group3(SIZE_OF_POINTER, lhs = src, rhs = Register{}, opGroup = op.group3_idiv)
+  }   
+
+  fn vdivss(this, dst, lhs, rhs) {
+    //  VEX.LIG.F3.0F.WIG 5E /r vdivss xmm32, xmm32, xmm/mem32 ; vdivss_VssHssWss
+    this._vbitwise(dst, lhs, rhs, op.vdivss_VssHssWss, op.suffix_ss, op.no_vector)
+  }
+
+  fn vdivps(this, dst, lhs, rhs) {
+    //  VEX.128.0F.WIG 5E /r vdivps xmm128, xmm128, xmm/mem128 ; vdivps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vdivps_VpsHpsWps, op.suffix_ps, op.128bit_vector)
+  }
+
+  fn vdivpsq(this, dst, lhs, rhs) {
+    //  VEX.256.0F.WIG 5E /r vdivps xmm256, xmm256, xmm/mem256 ; vdivps_VpsHpsWps
+    this._vbitwise(dst, lhs, rhs, op.vdivps_VpsHpsWps, op.suffix_ps, op.256bit_vector)
+  }
+
+  fn vdivsd(this, dst, lhs, rhs) {
+    //  VEX.LIG.F2.0F.WIG 5E /r vdivsd xmm64, xmm64, xmm/mem64 ; vdivsd_VsdHsdWsd
+    this._vbitwise(dst, lhs, rhs, op.vdivsd_VsdHsdWsd, op.suffix_sd, op.no_vector)
+  }
+
+  fn vdivpd(this, dst, lhs, rhs) {
+    //  VEX.128.66.0F.WIG 5E /r vdivpd xmm128, xmm128, xmm/mem128 ; vdivpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vdivpd_VpdHpdWpd, op.suffix_pd, op.128bit_vector)
+  }
+
+  fn vdivpdq(this, dst, lhs, rhs) {
+    //  VEX.256.66.0F.WIG 5E /r vdivpd xmm256, xmm256, xmm/mem256 ; vdivpd_VpdHpdWpd
+    this._vbitwise(dst, lhs, rhs, op.vdivpd_VpdHpdWpd, op.suffix_pd, op.256bit_vector)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn shl(this, dst, lhs, rhs) {
+    if dst.type.isaRealOrPacked() {
+      switch dst.type.kind {         
+        case ssa.Kind.UInt16x8, ssa.Kind.Int16x8 this.vpsllw(dst, lhs, rhs)
+        case ssa.Kind.UInt32x4, ssa.Kind.Int32x4 this.vpslld(dst, lhs, rhs)
+        case ssa.Kind.UInt64x2, ssa.Kind.Int64x2 this.vpsllq(dst, lhs, rhs)
+        default assert with nameof(dst.type.kind)
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch dst.type.size() {
+        case SIZE_OF_BYTE    this.shlb(dst, rhs)
+        case SIZE_OF_WORD    this.shlw(dst, rhs)
+        case SIZE_OF_INT     this.shll(dst, rhs)
+        case SIZE_OF_POINTER this.shlq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn shlb(this, dst, src) {
+    this._group2(SIZE_OF_BYTE, dst, src, op.group2_shl)
+  }  
+
+  fn shlw(this, dst, src) {
+    this._group2(SIZE_OF_WORD, dst, src, op.group2_shl)
+  }
+
+  fn shll(this, dst, src) {
+    this._group2(SIZE_OF_INT, dst, src, op.group2_shl)
+  }
+
+  fn shlq(this, dst, src) {
+    this._group2(SIZE_OF_POINTER, dst, src, op.group2_shl)
+  }
+
+  fn vpsllw(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  fn vpslld(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  fn vpsllq(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn sar(this, dst, lhs, rhs) {
+    if dst.type.isaRealOrPacked() {
+      switch dst.type.kind {         
+        case ssa.Kind.UInt16x8, ssa.Kind.Int16x8 this.vpsraw(dst, lhs, rhs)
+        case ssa.Kind.UInt32x4, ssa.Kind.Int32x4 this.vpsrad(dst, lhs, rhs)
+        case ssa.Kind.UInt64x2, ssa.Kind.Int64x2 this.vpsraq(dst, lhs, rhs)
+        default assert with nameof(dst.type.kind)
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch dst.type.size() {
+        case SIZE_OF_BYTE    this.sarb(dst, rhs)
+        case SIZE_OF_WORD    this.sarw(dst, rhs)
+        case SIZE_OF_INT     this.sarl(dst, rhs)
+        case SIZE_OF_POINTER this.sarq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn sarb(this, dst, src) {
+    this._group2(SIZE_OF_BYTE, dst, src, op.group2_sar)
+  }  
+
+  fn sarw(this, dst, src) {
+    this._group2(SIZE_OF_WORD, dst, src, op.group2_sar)
+  }
+
+  fn sarl(this, dst, src) {
+    this._group2(SIZE_OF_INT, dst, src, op.group2_sar)
+  }
+
+  fn sarq(this, dst, src) {
+    this._group2(SIZE_OF_POINTER, dst, src, op.group2_sar)
+  }
+
+  fn vpsraw(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  fn vpsrad(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  fn vpsraq(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn shr(this, dst, lhs, rhs) {
+    if dst.type.isaRealOrPacked() {
+      switch dst.type.kind {         
+        case ssa.Kind.UInt16x8, ssa.Kind.Int16x8 this.vpsrlw(dst, lhs, rhs)
+        case ssa.Kind.UInt32x4, ssa.Kind.Int32x4 this.vpsrld(dst, lhs, rhs)
+        case ssa.Kind.UInt64x2, ssa.Kind.Int64x2 this.vpsrlq(dst, lhs, rhs)
+        default assert with nameof(dst.type.kind)
+      }
+    } else {
+      if dst.reg != lhs.reg {
+        this.mov(dst, lhs)
+      }
+      switch dst.type.size() {
+        case SIZE_OF_BYTE    this.shrb(dst, rhs)
+        case SIZE_OF_WORD    this.shrw(dst, rhs)
+        case SIZE_OF_INT     this.shrl(dst, rhs)
+        case SIZE_OF_POINTER this.shrq(dst, rhs)
+        default assert 0
+      }
+    }
+  }
+
+  fn shrb(this, dst, src) {
+    this._group2(SIZE_OF_BYTE, dst, src, op.group2_shr)
+  }  
+
+  fn shrw(this, dst, src) {
+    this._group2(SIZE_OF_WORD, dst, src, op.group2_shr)
+  }
+
+  fn shrl(this, dst, src) {
+    this._group2(SIZE_OF_INT, dst, src, op.group2_shr)
+  }
+
+  fn shrq(this, dst, src) {
+    this._group2(SIZE_OF_POINTER, dst, src, op.group2_shr)
+  }
+
+  fn vpsrlw(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  fn vpsrld(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  fn vpsrlq(this, dst, lhs, rhs) {
+    assert 0
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn rol(this, dst, lhs, rhs) {
+    if dst.reg != lhs.reg {
+      this.mov(dst, lhs)
+    }
+    switch dst.type.size() {
+      case SIZE_OF_BYTE    this.rolb(dst, rhs)
+      case SIZE_OF_WORD    this.rolw(dst, rhs)
+      case SIZE_OF_INT     this.roll(dst, rhs)
+      case SIZE_OF_POINTER this.rolq(dst, rhs)
+      default assert 0
+    }
+  }
+
+  fn rolb(this, dst, src) {
+    this._group2(SIZE_OF_BYTE, dst, src, op.group2_rol)
+  }  
+
+  fn rolw(this, dst, src) {
+    this._group2(SIZE_OF_WORD, dst, src, op.group2_rol)
+  }
+
+  fn roll(this, dst, src) {
+    this._group2(SIZE_OF_INT, dst, src, op.group2_rol)
+  }
+
+  fn rolq(this, dst, src) {
+    this._group2(SIZE_OF_POINTER, dst, src, op.group2_rol)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn ror(this, dst, lhs, rhs) {
+    if dst.reg != lhs.reg {
+      this.mov(dst, lhs)
+    }
+    switch dst.type.size() {
+      case SIZE_OF_BYTE    this.rorb(dst, rhs)
+      case SIZE_OF_WORD    this.rorw(dst, rhs)
+      case SIZE_OF_INT     this.rorl(dst, rhs)
+      case SIZE_OF_POINTER this.rorq(dst, rhs)
+      default assert 0
+    }
+  }
+
+  fn rorb(this, dst, src) {
+    this._group2(SIZE_OF_BYTE, dst, src, op.group2_ror)
+  }  
+
+  fn rorw(this, dst, src) {
+    this._group2(SIZE_OF_WORD, dst, src, op.group2_ror)
+  }
+
+  fn rorl(this, dst, src) {
+    this._group2(SIZE_OF_INT, dst, src, op.group2_ror)
+  }
+
+  fn rorq(this, dst, src) {
+    this._group2(SIZE_OF_POINTER, dst, src, op.group2_ror)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn cmp(this, lhs, rhs) {
+    const type = lhs.type
+    const size = type.size()
+    if type.isaRealOrPacked() {
+      switch type.kind {
+        case ssa.Kind.Float  this.vucomiss(lhs, rhs)
+        case ssa.Kind.Double this.vucomisd(lhs, rhs)
+        default assert 0
+
+      }
+    } else switch size {
+      case SIZE_OF_BYTE    this.cmpb(lhs, rhs)
+      case SIZE_OF_WORD    this.cmpw(lhs, rhs)
+      case SIZE_OF_INT     this.cmpl(lhs, rhs)
+      case SIZE_OF_POINTER this.cmpq(lhs, rhs)
+      default assert 0
+    }
+  }
+
+
+  fn cmpb(this, lhs, rhs) {
+    this._group1b(lhs, rhs, op.cmp_EbGb, op.cmp_GbEb, op.cmp_ALIb, op.group1_cmp)
+  }
+
+
+  fn cmpw(this, lhs, rhs) {
+    this._group1wlq(SIZE_OF_WORD, lhs, rhs, op.cmp_EvGv, op.cmp_GvEv, op.cmp_rAXIz, op.group1_cmp)
+  }
+
+
+  fn cmpl(this, lhs, rhs) {
+    this._group1wlq(SIZE_OF_INT, lhs, rhs, op.cmp_EvGv, op.cmp_GvEv, op.cmp_rAXIz, op.group1_cmp)
+  }
+
+
+  fn cmpq(this, lhs, rhs) {
+    this._group1wlq(SIZE_OF_POINTER, lhs, rhs, op.cmp_EvGv, op.cmp_GvEv, op.cmp_rAXIz, op.group1_cmp)
+  }
+
+  fn vucomiss(this, lhs, rhs) {
+    //  VEX.LIG.0F.WIG 2E /r vucomiss xmm32, xmm/mem32
+    const dst = Reg{}
+    this._vbitwise(dst, lhs, rhs, op.vucomiss_VssWss, op.prefix_00, op.no_vector)
+  }
+
+  fn vucomisd(this, lhs, rhs) {
+    //  VEX.LIG.66.0F.WIG 2E /r vucomisd xmm64, xmm/mem64
+    const dst = Reg{}
+    this._vbitwise(dst, lhs, rhs, op.vucomisd_VsdWsd, op.prefix_66, op.no_vector)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn xchg(this, lhs, rhs) {
+     switch lhs.type.size() {
+      case SIZE_OF_BYTE    this.xchgb(lhs, rhs)
+      case SIZE_OF_WORD    this.xchgw(lhs, rhs)
+      case SIZE_OF_INT     this.xchgl(lhs, rhs)
+      case SIZE_OF_POINTER this.xchgq(lhs, rhs)
+      default assert 0
+    }
+  }
+
+
+  fn xchgb(this, lhs, rhs) {
+    this._xchg(SIZE_OF_BYTE, lhs, rhs, op.xchg_EbGb)
+  }
+
+
+  fn xchgw(this, lhs, rhs) {
+    this._xchg(SIZE_OF_WORD, lhs, rhs, op.xchg_EvGv)
+  }
+
+
+  fn xchgl(this, lhs, rhs) {
+    this._xchg(SIZE_OF_INT, lhs, rhs, op.xchg_EvGv)
+  }
+
+
+  fn xchgq(this, lhs, rhs) {
+    this._xchg(SIZE_OF_POINTER, lhs, rhs, op.xchg_EvGv)
+  }
+
+  fn _xchg(this, opSize, lhs, rhs, opCode) {
+    if lhs.reg.isaGpr() {
+      const lhsreg = lhs.reg.name()
+      if rhs.reg.isaGpr() {
+        const rhsreg = rhs.reg.name()
+        assert lhsreg != rhsreg
+        if lhsreg == rax {
+          this.encodeOneByteRexOp(opSize, INVALID_REGISTER, INVALID_REGISTER, op.xchg_rAX, rhsreg)
+        } else if rhsreg == rax {
+          this.encodeOneByteRexOp(opSize, INVALID_REGISTER, INVALID_REGISTER, op.xchg_rAX, lhsreg)
+        } else {
+          this.encodeOneByteRexOp(opSize, lhsreg, rhsreg, opCode)
+        }
+      } else {
+        assert 0
+      }
+    } else if lhs.reg.isMemory() {
+      if rhs.reg.isaGpr() {
+        this.encodeOneByteRexAddressOp(opSize, rhs.reg.name(), lhs, opCode).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn cmpxchg(this, value, comparand, exchange) {
+     switch value.type.size() {
+      case SIZE_OF_BYTE    this.cmpxchgb(value, comparand, exchange)
+      case SIZE_OF_WORD    this.cmpxchgw(value, comparand, exchange)
+      case SIZE_OF_INT     this.cmpxchgl(value, comparand, exchange)
+      case SIZE_OF_POINTER this.cmpxchgq(value, comparand, exchange)
+      default assert 0
+    }
+  }
+
+
+  fn cmpxchgb(this, value, comparand, exchange) {
+    this._cmpxchg(SIZE_OF_BYTE, value, comparand, exchange, op.cmpxchg_EbGb)
+  }
+
+
+  fn cmpxchgw(this, value, comparand, exchange) {
+    this._cmpxchg(SIZE_OF_WORD, value, comparand, exchange, op.cmpxchg_EvGv)
+  }
+
+
+  fn cmpxchgl(this, value, comparand, exchange) {
+    this._cmpxchg(SIZE_OF_INT, value, comparand, exchange, op.cmpxchg_EvGv)
+  }
+
+
+  fn cmpxchgq(this, value, comparand, exchange) {
+    this._cmpxchg(SIZE_OF_POINTER, value, comparand, exchange, op.cmpxchg_EvGv)
+  }
+
+  fn _cmpxchg(this, opSize, value, comparand, exchange, opCode) {
+    if comparand.reg.isaGpr() {
+      assert comparand.reg.name() == rax
+    } else {
+      assert 0
+    }
+    if value.reg.isMemory() {
+      if exchange.reg.isaGpr() {
+        this.encodeTwoByteRexAddressOp(opSize, exchange.reg.name(), value, opCode, INVALID_OPCODE, op.prefix_lock).patch()
+      } else {
+        assert 0
+      }
+    } else if value.reg.isaGpr() {
+      if exchange.reg.isaGpr() {
+        this.encodeTwoByteRexOp(opSize, value.reg.name(), exchange.reg.name(), opCode)
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn xadd(this, dst, src) {
+     switch dst.type.size() {
+      case SIZE_OF_BYTE    this.xaddb(dst, src)
+      case SIZE_OF_WORD    this.xaddw(dst, src)
+      case SIZE_OF_INT     this.xaddl(dst, src)
+      case SIZE_OF_POINTER this.xaddq(dst, src)
+      default assert 0
+    }
+  }
+
+
+  fn xaddb(this, dst, src) {
+    this._xadd(SIZE_OF_BYTE, dst, src, op.xadd_EbGb)
+  }
+
+
+  fn xaddw(this, dst, src) {
+    this._xadd(SIZE_OF_WORD, dst, src, op.xadd_EvGv)
+  }
+
+
+  fn xaddl(this, dst, src) {
+    this._xadd(SIZE_OF_INT, dst, src, op.xadd_EvGv)
+  }
+
+
+  fn xaddq(this, dst, src) {
+    this._xadd(SIZE_OF_POINTER, dst, src, op.xadd_EvGv)
+  }
+
+  fn _xadd(this, opSize, dst, src, opCode) {
+    if dst.reg.isMemory() {
+      if src.reg.isaGpr() {
+        this.encodeTwoByteRexAddressOp(opSize, src.reg.name(), dst, opCode, INVALID_OPCODE, op.prefix_lock).patch()
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isaGpr() {
+      if src.reg.isaGpr() {
+        this.encodeTwoByteRexOp(opSize, dst.reg.name(), src.reg.name(), opCode)
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn push(this, src) {
+    const size = src.type.size()
+    switch size {
+      case SIZE_OF_BYTE    this.pushb(src)
+      case SIZE_OF_WORD    this.pushw(src)
+      case SIZE_OF_INT     this.pushl(src)
+      case SIZE_OF_POINTER this.pushq(src)
+      default assert with "#{size}"
+    }
+  }
+
+
+  fn pushb(this, src) {
+    this._push(SIZE_OF_BYTE, src)
+  }
+
+
+  fn pushw(this, src) {
+    this._push(SIZE_OF_WORD, src)
+  }
+
+
+  fn pushl(this, src) {
+    this._push(SIZE_OF_INT, src)
+  }
+
+
+  fn pushq(this, src) {
+    this._push(SIZE_OF_INT, src)
+  }
+
+
+  fn _push(this, opSize, src) {
+    if src.reg.isaGpr() {
+      assert opSize != SIZE_OF_BYTE
+      const reg = src.reg.name()
+      this.encodeOneByteRexOp(opSize, reg, INVALID_REGISTER, op.push_rv)
+    } else if src.reg.isMemory() {
+      assert opSize != SIZE_OF_BYTE
+      this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, src, op.group5_Ev, op.group5_push).patch()
+    } else if src.reg.isanImmediate() {
+      const immediate = src.reg.immediate()
+      if opSize == SIZE_OF_BYTE {
+        this.encodeOneByteRexOp(SIZE_OF_BYTE, INVALID_REGISTER, INVALID_REGISTER, op.push_Ib)
+        this.encodeImm8(immediate)
+      } else if opSize == SIZE_OF_WORD {
+        this.encodeOneByteRexOp(SIZE_OF_WORD, INVALID_REGISTER, INVALID_REGISTER, op.push_Iz)
+        this.encodeImm16(immediate)
+      } else {
+        this.encodeOneByteRexOp(opSize, INVALID_REGISTER, INVALID_REGISTER, op.push_Iz)
+        this.encodeImm32(immediate)
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn pop(this, src) {
+    switch src.type.size() {
+      case SIZE_OF_WORD    this.popw(src)
+      case SIZE_OF_INT     this.popl(src)
+      case SIZE_OF_POINTER this.popq(src)
+      default assert with "#{size}"
+    }
+  }
+
+
+  fn popw(this, src) {
+    this._pop(SIZE_OF_WORD, src)
+  }
+
+
+  fn popl(this, src) {
+    this._pop(SIZE_OF_INT, src)
+  }
+
+
+  fn popq(this, src) {
+    this._pop(SIZE_OF_INT, src)
+  }
+
+
+  fn _pop(this, opSize, src) {
+    if src.reg.isaGpr() {
+      const reg = src.reg.name()
+      this.encodeOneByteRexOp(opSize, reg, INVALID_REGISTER, op.pop_rv)
+    } else if src.reg.isMemory() {
+      this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, src, op.group1_8FEv, op.group1_pop).patch()
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn call(this, callee) {
+    if callee.reg.isaGpr() {
+      const reg = callee.reg.name()
+      this.encodeOneByteRexOp(SIZE_OF_INT, INVALID_REGISTER, reg, op.group5_Ev, op.group5_call)
+    } else if callee.reg.isMemory() {
+      if callee.reg.isRipRelative() {
+        if const       elem = callee.node is ssa.ElementAt {
+          if const function = elem.indexIsAFunctionOrBlock() {
+            //  4 B version: 66 E8 xx xx       ; xx xx is rel16
+            //  5 B version:    E8 xx xx xx xx ; rel32
+            this.encodeOneByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, op.call_Jz)
+            this.encodeDisp32(0).collectDisplacementPatch(callee).patch()
+            return
+          }
+        }
+      }
+      this.encodeOneByteRexAddressOp(SIZE_OF_INT, INVALID_REGISTER, callee, op.group5_Ev, op.group5_call).patch()
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn jmp(this, target) {
+    if target.reg.isaGpr() {
+      const reg = target.reg.name()
+      this.encodeOneByteRexOp(SIZE_OF_POINTER, reg, INVALID_REGISTER, op.group5_Ev, op.group5_jmp)
+    } else if target.reg.isMemory() {
+      if const block = target.node is ssa.Block {
+        if block.offset < 0 {
+          //  {block} has not been emitted yet. Default to jmp rel32.
+          this.encodeOneByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, op.jmp_Jz)
+          this.encodeDisp32(0).collectDisplacementPatch(target).patch()
+        } else {
+          //  2 B version: EB xx          ; rel8
+          //  5 B version: E9 xx xx xx xx ; rel32
+          const   rip = this.encode.buffer.length // rip at start of jmp
+          const  rip8 = rip + 2                   // rip after jmp rel8
+          const diff8 = block.offset - rip8       // #bytes from end of jmp rel8 to {block}.
+          if isaByte(diff8) {
+            this.encodeOneByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, op.jmp_Jb)
+            this.encodeImm8(diff8)
+            assert this.encode.buffer.length == rip8
+          } else {
+            const  rip32 = rip + 5              // rip after jmp rel32
+            const diff32 = block.offset - rip32 // #bytes between rip after jmp rel32 and {block}.
+            this.encodeOneByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, op.jmp_Jz)
+            this.encodeImm32(diff32)
+            assert this.encode.buffer.length == rip32
+          }
+        }
+      } else {
+        this.encodeOneByteRexAddressOp(SIZE_OF_POINTER, INVALID_REGISTER, target, op.group5_Ev, op.group5_jmp).patch()
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn jcc(this, condition, target) {
+    switch condition {
+      case ssa.Condition.Overflow         this._jcc(op.jo_cb,   op.jo_cd,   target)
+      case ssa.Condition.NoOverflow       this._jcc(op.jno_cb,  op.jno_cd,  target)
+      case ssa.Condition.Carry            this._jcc(op.jb_cb,   op.jb_cd,   target)
+      case ssa.Condition.NoCarry          this._jcc(op.jnb_cb,  op.jnb_cd,  target)
+      case ssa.Condition.Zero             this._jcc(op.jz_cb,   op.jz_cd,   target)
+      case ssa.Condition.NotZero          this._jcc(op.jnz_cb,  op.jnz_cd,  target)
+      case ssa.Condition.Sign             this._jcc(op.js_cb,   op.js_cd,   target)
+      case ssa.Condition.NoSign           this._jcc(op.jns_cb,  op.jns_cd,  target)
+      case ssa.Condition.Parity           this._jcc(op.jp_cb,   op.jp_cd,   target)
+      case ssa.Condition.NoParity         this._jcc(op.jnp_cb,  op.jnp_cd,  target)
+      case ssa.Condition.BelowOrEqual     this._jcc(op.jbe_cb,  op.jbe_cd,  target)
+      case ssa.Condition.NotBelowOrEqual  this._jcc(op.jnbe_cb, op.jnbe_cd, target)
+      case ssa.Condition.Less             this._jcc(op.jl_cb,   op.jl_cd,   target)
+      case ssa.Condition.NotLess          this._jcc(op.jnl_cb,  op.jnl_cd,  target)
+      case ssa.Condition.LessOrEqual      this._jcc(op.jle_cb,  op.jle_cd,  target)
+      case ssa.Condition.NotLessOrEqual   this._jcc(op.jnle_cb, op.jnle_cd, target)
+      default assert 0
+    }
+  }
+
+
+  fn _jcc(this, oprel8, oprel32, target) {
+    const block = target.node is ssa.Block
+    assert block
+    if block.offset < 0 {
+      //  {block} has not been emitted yet. Default to jcc rel32.
+      this.encodeTwoByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, oprel32)
+      this.encodeDisp32(0).collectDisplacementPatch(target).patch()
+    } else {
+      //  2 B version:    70+ xx          ; rel8
+      //  6 B version: 0F 88+ xx xx xx xx ; rel32
+      const   rip = this.encode.buffer.length // rip at start of jmp
+      const  rip8 = rip + 2                   // rip after jmp rel8
+      const diff8 = block.offset - rip8       // #bytes from end of jmp rel8 to {block}.
+      if isaByte(diff8) {
+        this.encodeOneByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, oprel8)
+        this.encodeImm8(diff8)
+        assert this.encode.buffer.length == rip8
+      } else {
+        const  rip32 = rip + 6              // rip after jmp rel32
+        const diff32 = block.offset - rip32 // #bytes between rip after jmp rel32 and {block}.
+        this.encodeTwoByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, oprel32)
+        this.encodeImm32(diff32)
+        assert this.encode.buffer.length == rip32
+      }
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn setcc(this, dst, condition) {
+    switch condition {
+      case ssa.Condition.Overflow         this._setcc(dst,   op.seto_Eb)
+      case ssa.Condition.NoOverflow       this._setcc(dst,  op.setno_Eb)
+      case ssa.Condition.Carry            this._setcc(dst,   op.setb_Eb)
+      case ssa.Condition.NoCarry          this._setcc(dst,  op.setnb_Eb)
+      case ssa.Condition.Zero             this._setcc(dst,   op.setz_Eb)
+      case ssa.Condition.NotZero          this._setcc(dst,  op.setnz_Eb)
+      case ssa.Condition.Sign             this._setcc(dst,   op.sets_Eb)
+      case ssa.Condition.NoSign           this._setcc(dst,  op.setns_Eb)
+      case ssa.Condition.Parity           this._setcc(dst,   op.setp_Eb)
+      case ssa.Condition.NoParity         this._setcc(dst,  op.setnp_Eb)
+      case ssa.Condition.BelowOrEqual     this._setcc(dst,  op.setbe_Eb)
+      case ssa.Condition.NotBelowOrEqual  this._setcc(dst, op.setnbe_Eb)
+      case ssa.Condition.Less             this._setcc(dst,   op.setl_Eb)
+      case ssa.Condition.NotLess          this._setcc(dst,  op.setnl_Eb)
+      case ssa.Condition.LessOrEqual      this._setcc(dst,  op.setle_Eb)
+      case ssa.Condition.NotLessOrEqual   this._setcc(dst, op.setnle_Eb)
+      default assert 0
+    }
+  }
+
+
+  fn _setcc(this, dst, opCode) {
+    if dst.reg.isaGpr() {
+      this.encodeTwoByteRexOp(SIZE_OF_BYTE, INVALID_REGISTER, dst.reg.name(), opCode)
+    } else if dst.reg.isMemory() {
+      this.encodeTwoByteRexAddressOp(SIZE_OF_BYTE, INVALID_REGISTER, dst, opCode).patch()
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn inc(this, dst, src) {
+    if dst.reg != src.reg {
+      this.mov(dst, src)
+    }
+    switch dst.type.size() {
+      case SIZE_OF_BYTE    this.incb(dst)
+      case SIZE_OF_WORD    this.incw(dst)
+      case SIZE_OF_INT     this.incl(dst)
+      case SIZE_OF_POINTER this.incq(dst)
+      default assert 0
+    }
+  } 
+
+  fn dec(this, dst, src) {
+    if dst.reg != src.reg {
+      this.mov(dst, src)
+    }
+    switch dst.type.size() {
+      case SIZE_OF_BYTE    this.decb(dst)
+      case SIZE_OF_WORD    this.decw(dst)
+      case SIZE_OF_INT     this.decl(dst)
+      case SIZE_OF_POINTER this.decq(dst)
+      default assert 0
+    }
+  }
+
+  fn incb(this, dst) {
+    this._group4(SIZE_OF_BYTE, dst, op.group4_inc)
+  }
+
+  fn incw(this, dst) {
+    this._group4(SIZE_OF_WORD, dst, op.group4_inc)
+  }
+
+  fn incl(this, dst) {
+    this._group4(SIZE_OF_INT, dst, op.group4_inc)
+  }
+
+  fn incq(this, dst) {
+    this._group4(SIZE_OF_POINTER, dst, op.group4_inc)
+  }
+
+  fn decb(this, dst) {
+    this._group4(SIZE_OF_BYTE, dst, op.group4_dec)
+  }
+
+  fn decw(this, dst) {
+    this._group4(SIZE_OF_WORD, dst, op.group4_dec)
+  }
+
+  fn decl(this, dst) {
+    this._group4(SIZE_OF_INT, dst, op.group4_dec)
+  }
+
+  fn decq(this, dst) {
+    this._group4(SIZE_OF_POINTER, dst, op.group4_dec)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn neg(this, dst, src) {
+    if dst.reg != src.reg {
+      this.mov(dst, src)
+    }
+    switch dst.type.size() {
+      case SIZE_OF_BYTE    this.negb(dst)
+      case SIZE_OF_WORD    this.negw(dst)
+      case SIZE_OF_INT     this.negl(dst)
+      case SIZE_OF_POINTER this.negq(dst)
+      default assert 0
+    }
+  } 
+
+  fn negb(this, dst) {
+    this._group3(SIZE_OF_BYTE, lhs = dst, rhs = Register{}, opGroup = op.group3_neg)
+  }
+
+  fn negw(this, dst) {
+    this._group3(SIZE_OF_WORD, lhs = dst, rhs = Register{}, opGroup = op.group3_neg)
+  }
+
+  fn negl(this, dst) {
+    this._group3(SIZE_OF_INT, lhs = dst, rhs = Register{}, opGroup = op.group3_neg)
+  }
+
+  fn negq(this, dst) {
+    this._group3(SIZE_OF_POINTER, lhs = dst, rhs = Register{}, opGroup = op.group3_neg)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn not(this, dst, src) {
+    if dst.reg != src.reg {
+      this.mov(dst, src)
+    }
+    switch dst.type.size() {
+      case SIZE_OF_BYTE    this.notb(dst)
+      case SIZE_OF_WORD    this.notw(dst)
+      case SIZE_OF_INT     this.notl(dst)
+      case SIZE_OF_POINTER this.notq(dst)
+      default assert 0
+    }
+  } 
+
+  fn notb(this, dst) {
+    this._group3(SIZE_OF_BYTE, lhs = dst, rhs = Register{}, opGroup = op.group3_not)
+  }
+
+  fn notw(this, dst) {
+    this._group3(SIZE_OF_WORD, lhs = dst, rhs = Register{}, opGroup = op.group3_not)
+  }
+
+  fn notl(this, dst) {
+    this._group3(SIZE_OF_INT, lhs = dst, rhs = Register{}, opGroup = op.group3_not)
+  }
+
+  fn notq(this, dst) {
+    this._group3(SIZE_OF_POINTER, lhs = dst, rhs = Register{}, opGroup = op.group3_not)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn movsx(this, dst, src) {
+    switch dst.type.size() {
+      case SIZE_OF_WORD     this.movsxbw(dst, src)
+      case SIZE_OF_INT {
+        switch src.type.size() {
+          case SIZE_OF_BYTE this.movsxbl(dst, src)
+          case SIZE_OF_WORD this.movsxwl(dst, src)
+          default assert 0
+        }
+      }
+      case SIZE_OF_POINTER {
+        switch src.type.size() {
+          case SIZE_OF_BYTE this.movsxbl(dst, src)
+          case SIZE_OF_WORD this.movsxwl(dst, src)
+          case SIZE_OF_INT  this.movsxlq(dst, src)
+          default assert 0
+        }
+      }
+      default assert 0
+    }
+  }
+
+  fn movzx(this, dst, src) {
+    switch dst.type.size() {
+      case SIZE_OF_WORD     this.movzxbw(dst, src)
+      case SIZE_OF_INT {
+        switch src.type.size() {
+          case SIZE_OF_BYTE this.movzxbl(dst, src)
+          case SIZE_OF_WORD this.movzxwl(dst, src)
+          default assert 0
+        }
+      }
+      case SIZE_OF_POINTER {
+        switch src.type.size() {
+          case SIZE_OF_BYTE this.movzxbl(dst, src)
+          case SIZE_OF_WORD this.movzxwl(dst, src)
+          case SIZE_OF_INT  this.movzxlq(dst, src)
+          default assert 0
+        }
+      }
+      default assert 0
+    }
+  }  
+
+  fn movsxbw(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_BYTE, dst, src, op.movsx_GvEb)
+  }
+
+  fn movsxbl(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_INT, dst, src, op.movsx_GvEb)
+  }
+
+  fn movsxbq(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_POINTER, dst, src, op.movsx_GvEb)
+  }
+
+  fn movsxwl(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_INT, dst, src, op.movsx_GvEw)
+  }
+
+  fn movsxwq(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_POINTER, dst, src, op.movsx_GvEw)
+  }
+
+  fn movsxlq(this, dst, src) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() {
+        this.encodeOneByteRexOp(SIZE_OF_POINTER, reg, src.reg.name(), op.movsxd_GvEv)
+      } else if src.reg.isMemory() {
+        this.encodeOneByteRexAddressOp(SIZE_OF_POINTER, reg, src, op.movsxd_GvEv).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  fn movzxbw(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_BYTE, dst, src, op.movzx_GvEb)
+  }
+
+  fn movzxbl(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_INT, dst, src, op.movzx_GvEb)
+  }
+
+  fn movzxbq(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_POINTER, dst, src, op.movzx_GvEb)
+  }
+
+  fn movzxwl(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_INT, dst, src, op.movzx_GvEw)
+  }
+
+  fn movzxwq(this, dst, src) {
+    this._signOrZeroExtend(SIZE_OF_POINTER, dst, src, op.movzx_GvEw)
+  }
+
+  fn movzxlq(this, dst, src) {
+    this._movwlq(SIZE_OF_INT, dst, src, )
+  }
+
+  fn _signOrZeroExtend(this, opSize, dst, src, opCode) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() {
+        this.encodeTwoByteRexOp(opSize, reg, src.reg.name(), opCode)
+      } else if src.reg.isMemory() {
+        this.encodeTwoByteRexAddressOp(opSize, reg, src, opCode).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn cvt(this, dst, src, truncate) {
+    switch dst.type.kind {
+      case ssa.Kind.Double {
+        switch src.type.kind {
+          case ssa.Kind.Float                  this.cvtss2sd(dst, src)
+          case ssa.Kind.UInt32, ssa.Kind.Int32 this.cvtl2sd(dst, src)
+          case ssa.Kind.UInt64, ssa.Kind.Int64 this.cvtq2sd(dst, src)
+          default assert 0
+        }
+      }
+      case ssa.Kind.Float {
+        switch src.type.kind {
+          case ssa.Kind.Double                 this.cvtsd2ss(dst, src)
+          case ssa.Kind.UInt32, ssa.Kind.Int32 this.cvtl2ss(dst, src)
+          case ssa.Kind.UInt64, ssa.Kind.Int64 this.cvtq2ss(dst, src)
+          default assert 0
+        }
+      }
+      case ssa.Kind.UInt32, ssa.Kind.Int32 {
+        switch src.type.kind {
+          case ssa.Kind.Double this.cvttsd2l(dst, src) if truncate else this.cvtsd2l(dst, src)
+          case ssa.Kind.Float  this.cvttss2l(dst, src) if truncate else this.cvtss2l(dst, src)
+          default assert 0
+        }
+      }
+      case ssa.Kind.UInt64, ssa.Kind.Int64 {
+        switch src.type.kind {
+          case ssa.Kind.Double this.cvttsd2q(dst, src) if truncate else this.cvtsd2q(dst, src)
+          case ssa.Kind.Float  this.cvttss2q(dst, src) if truncate else this.cvtss2q(dst, src)
+          default assert 0
+        }
+      }
+      default assert 0
+    }
+  }
+
+  fn cvtss2l(this, dst, src) {
+    //  VEX.LIG.F3.0F.W0 2D /r vcvtss2si gpr32, xmm/mem32
+    this._cvt(dst, src, op.vcvtss2si_GyWss, op.prefix_F3, w = 0)
+  }
+
+  fn cvtss2q(this, dst, src) {
+    //  VEX.LIG.F3.0F.W1 2D /r vcvtss2si gpr64, xmm/mem32
+    this._cvt(dst, src, op.vcvtss2si_GyWss, op.prefix_F3, w = 1)
+  }
+
+  fn cvtss2sd(this, dst, src) {
+    //  VEX.LIG.F3.0F.WIG 5A /r vcvtss2sd xmm64, xmm32, xmm/mem32
+    this._cvt(dst, src, op.vcvtss2sd_VsdHxWss, op.prefix_F3, w = 0)
+  }
+
+  fn cvtsd2l(this, dst, src) {
+    //  VEX.LIG.F2.0F.W0 2D /r vcvtsd2si gpr32, xmm/mem64
+    this._cvt(dst, src, op.vcvtsd2si_GyWsd, op.prefix_F2, w = 0)
+  }
+
+  fn cvtsd2q(this, dst, src) {
+    //  VEX.LIG.F2.0F.W1 2D /r vcvtsd2si gpr64, xmm/mem64
+    this._cvt(dst, src, op.vcvtsd2si_GyWsd, op.prefix_F2, w = 1)
+  }
+
+  fn cvtsd2ss(this, dst, src) {
+    //  VEX.LIG.F2.0F.WIG 5A /r vcvtsd2ss xmm32, xmm64, xmm/mem64
+    this._cvt(dst, src, op.vcvtsd2ss_VssHxWsd, op.prefix_F2, w = 0)
+  }
+
+  fn cvtl2ss(this, dst, src) {
+    //  VEX.LIG.F3.0F.W0 2A /r vcvtsi2ss xmm32, xmm32, gpr/mem32
+    this._cvt(dst, src, op.vcvtsi2ss_VssHssEy, op.prefix_F3, w = 0)
+  }
+
+  fn cvtq2ss(this, dst, src) {
+    //  VEX.LIG.F3.0F.W1 2A /r vcvtsi2ss xmm32, xmm32, gpr/mem64
+    this._cvt(dst, src, op.vcvtsi2ss_VssHssEy, op.prefix_F3, w = 1)
+  }
+
+  fn cvtl2sd(this, dst, src) {
+    //  VEX.LIG.F2.0F.W0 2A /r vcvtsi2sd xmm64, xmm64, gpr/mem32
+    this._cvt(dst, src, op.vcvtsi2sd_VsdHsdEy, op.prefix_F2, w = 0)
+  }
+
+  fn cvtq2sd(this, dst, src) {
+    //  VEX.LIG.F2.0F.W1 2A /r vcvtsi2sd xmm64, xmm64, gpr/mem64
+    this._cvt(dst, src, op.vcvtsi2sd_VsdHsdEy, op.prefix_F2, w = 1)
+  }
+
+  fn cvttss2l(this, dst, src) {
+    //  VEX.LIG.F3.0F.W0 2C /r vcvttss2si gpr32, xmm/mem32
+    this._cvt(dst, src, op.vcvttss2si_GyWss, op.prefix_F3, w = 0)
+  }
+
+  fn cvttss2q(this, dst, src) {
+    //  VEX.LIG.F3.0F.W1 2C /r vcvttss2si gpr64, xmm/mem32
+    this._cvt(dst, src, op.vcvttss2si_GyWss, op.prefix_F3, w = 1)
+  }
+
+  fn cvttsd2l(this, dst, src) {
+    //  VEX.LIG.F2.0F.W0 2C /r vcvttsd2si gpr32, xmm/mem64
+    this._cvt(dst, src, op.vcvttsd2si_GyWsd, op.prefix_F2, w = 0)
+  }
+
+  fn cvttsd2q(this, dst, src) {
+    //  VEX.LIG.F2.0F.W1 2C /r vcvttsd2si gpr64, xmm/mem64
+    this._cvt(dst, src, op.vcvttsd2si_GyWsd, op.prefix_F2, w = 1)
+  }
+
+  fn _cvt(this, dst, src, opCode, prefix, w) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isanXmm() {
+        this.encodeTwoByteVexOp(reg, INVALID_REGISTER, src.reg.name(), opCode, prefix, op.128bit_vector, w)
+      } else if src.reg.isMemory() {
+        this.encodeTwoByteVexAddressOp(reg, INVALID_REGISTER, src, opCode, prefix, op.128bit_vector, w).patch()
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isanXmm() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() {
+        this.encodeTwoByteVexOp(reg, reg, src.reg.name(), opCode, prefix, op.128bit_vector, w)
+      } else if src.reg.isanXmm() {
+        this.encodeTwoByteVexOp(reg, reg, src.reg.name(), opCode, prefix, op.128bit_vector, w)
+      } else if src.reg.isMemory() {
+        this.encodeTwoByteVexAddressOp(reg, reg, src, opCode, prefix, op.128bit_vector, w).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn bitcast(this, dst, src) {
+    if dst.type.isNumeric() && src.type.isNumeric() {
+      switch dst.type.kind {
+        case ssa.Kind.Float {
+          switch src.type.kind {
+            case ssa.Kind.UInt32, ssa.Kind.Int32 this.vmovd(dst, src)
+            default assert 0
+          }
+        }
+        case ssa.Kind.Double {
+          switch src.type.kind {
+            case ssa.Kind.UInt64, ssa.Kind.Int64 this.vmovq(dst, src)
+            default assert 0
+          }
+        }
+        case ssa.Kind.UInt32, ssa.Kind.Int32 {
+          switch src.type.kind {
+            case ssa.Kind.Float this.vmovd(dst, src)
+            default assert 0
+          }
+        }
+        case ssa.Kind.UInt64, ssa.Kind.Int64 {
+          switch src.type.kind {
+            case ssa.Kind.Double this.vmovq(dst, src)
+            default assert 0
+          }
+        }
+        default assert 0
+      }
+    } else if dst.reg != src.reg {
+      this.movq(dst, src)
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn movsb(this, repeatUntilZero) {
+    this._movs(SIZE_OF_BYTE, op.movs_YbXb, repeatUntilZero)
+  } 
+
+  fn movsw(this, repeatUntilZero) {
+    this._movs(SIZE_OF_WORD, op.movs_YvXv, repeatUntilZero)
+  } 
+
+  fn movsl(this, repeatUntilZero) {
+    this._movs(SIZE_OF_INT, op.movs_YvXv, repeatUntilZero)
+  } 
+
+  fn movsq(this, repeatUntilZero) {
+    this._movs(SIZE_OF_POINTER, op.movs_YvXv, repeatUntilZero)
+  }
+
+  fn _movs(this, opSize, opCode, repeatUntilZero) {
+    this.encodeOneByteRexOp(opSize, INVALID_REGISTER, INVALID_REGISTER, opCode, INVALID_OPCODE,
+      op.prefix_repnz if repeatUntilZero)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn stosb(this, repeatUntilZero) {
+    this._stos(SIZE_OF_BYTE, op.stos_YbAl, repeatUntilZero)
+  } 
+
+  fn stosw(this, repeatUntilZero) {
+    this._stos(SIZE_OF_WORD, op.stos_YvrAX, repeatUntilZero)
+  } 
+
+  fn stosl(this, repeatUntilZero) {
+    this._stos(SIZE_OF_INT, op.stos_YvrAX, repeatUntilZero)
+  } 
+
+  fn stosq(this, repeatUntilZero) {
+    this._stos(SIZE_OF_POINTER, op.stos_YvrAX, repeatUntilZero)
+  }
+
+  fn _stos(this, opSize, opCode, repeatUntilZero) {
+    this.encodeOneByteRexOp(opSize, INVALID_REGISTER, INVALID_REGISTER, opCode, INVALID_OPCODE,
+      op.prefix_repnz if repeatUntilZero)
+  }
+
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn ret(this) {
+    this.encodeByte(op.ret)
+  }
+
+  fn cwd(this) {
+    this.encodeOneByteRexOp(SIZE_OF_WORD, INVALID_REGISTER, INVALID_REGISTER, op.cwd)
+  }
+
+  fn cdq(this) {
+    this.encodeOneByteRexOp(SIZE_OF_INT, INVALID_REGISTER, INVALID_REGISTER, op.cdq)
+  }
+
+  fn cqo(this) {
+    this.encodeOneByteRexOp(SIZE_OF_POINTER, INVALID_REGISTER, INVALID_REGISTER, op.cqo)
+  }
+
+  fn lea(this, dst, src) {
+    assert dst.reg.isaGpr() && src.reg.isMemory()
+    const reg = dst.reg.name()
+    this.encodeOneByteRexAddressOp(SIZE_OF_POINTER, reg, src, op.lea).patch()
+  }
+
+  fn int3(this) { // CC
+    this.encodeByte(op.int3)
+  }
+
+  fn pause(this) { // F3 90
+    this.encodeInt16(op.pause)
+  }
+
+  fn cld(this) {
+    this.encodeByte(op.cld)
+  }
+
+  fn std(this) {
+    this.encodeByte(op.std)
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn _group1b(this, dst, src, opCodeEbGb, opCodeGbEb, opCodeALIb, opGroup) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() {
+        this.encodeOneByteRexOp(SIZE_OF_BYTE, reg, src.reg.name(), opCodeGbEb)
+      } else if src.reg.isMemory() {
+        this.encodeOneByteRexAddressOp(SIZE_OF_BYTE, reg, src, opCodeGbEb).patch()
+      } else if src.reg.isanImmediate() {
+        const imm = src.reg.immediate()
+        if reg == rax {
+          this.encodeOneByteRexOp(SIZE_OF_BYTE, INVALID_REGISTER, INVALID_REGISTER, opCodeALIb)
+        } else {
+          this.encodeOneByteRexOp(SIZE_OF_BYTE, INVALID_REGISTER, reg, op.group1_EbIb, opGroup)
+        }
+        this.encodeImm8(src.reg.immediate())
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isMemory() {
+      if src.reg.isaGpr() {
+        this.encodeOneByteRexAddressOp(SIZE_OF_BYTE, src.reg.name(), dst, opCodeEbGb).patch()
+      } else if src.reg.isanImmediate() {
+        this.encodeOneByteRexAddressOp(SIZE_OF_BYTE, INVALID_REGISTER, dst, op.group1_EbIb, opGroup)
+        this.encodeImm8(src.reg.immediate()).patch()
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  fn _group1wlq(this, opSize, dst, src, opCodeEvGv, opCodeGvEv, opCoderAXIz, opGroup) {
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() { // [REX.WRB] ModRM opCode
+        this.encodeOneByteRexOp(opSize, reg, src.reg.name(), opCodeGvEv)
+      } else if src.reg.isMemory() { // [REX.WRXB] ModRM [SIB] opCode
+        this.encodeOneByteRexAddressOp(opSize, reg, src, opCodeGvEv).patch()
+      } else if src.reg.isanImmediate() {
+        const imm = src.reg.immediate()
+        if isaByte(imm) { // [66h] [REX.WB] ModRM.reg(group)+rm opCode imm8
+          this.encodeOneByteRexOp(opSize, INVALID_REGISTER, reg, op.group1_EvIb, opGroup)
+          this.encodeImm8(imm)
+        } else {
+          if reg == rax {
+            this.encodeOneByteRexOp(opSize, INVALID_REGISTER, INVALID_REGISTER, opCoderAXIz)
+          } else {
+            this.encodeOneByteRexOp(opSize, INVALID_REGISTER, reg, op.group1_EvIz, opGroup)
+          }
+          if opSize == SIZE_OF_WORD {
+            this.encodeImm16(src.reg.immediate())
+          } else {
+            this.encodeImm32(src.reg.immediate())
+          }
+        }
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isMemory() {
+      if src.reg.isaGpr() {
+        this.encodeOneByteRexAddressOp(opSize, src.reg.name(), dst, opCodeEvGv).patch()
+      } else if src.reg.isanImmediate() {
+        const imm = src.reg.immediate()
+        if isaByte(imm) { // [66h] [REX.XB] ModRM.reg(group)+rm [SIB] opCode imm16/32
+          this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, dst, op.group1_EvIb, opGroup)
+          this.encodeImm8(imm).patch()
+        } else { // [66h] [REX.WXB] ModRM.reg(group)+rm [SIB] opCode imm16/32
+          this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, dst, op.group1_EvIz, opGroup)
+          if opSize == SIZE_OF_WORD {
+            this.encodeImm16(src.reg.immediate()).patch()
+          } else {
+            this.encodeImm32(src.reg.immediate()).patch()
+          }
+        }
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  fn _group2(this, opSize, dst, src, opGroup) {
+    const group2_ExIb = (op.group2_EbIb if opSize == SIZE_OF_BYTE else op.group2_EvIb)
+    const  group2_Ex1 = (op.group2_Eb1  if opSize == SIZE_OF_BYTE else op.group2_Ev1)
+    const group2_ExCL = (op.group2_EbCL if opSize == SIZE_OF_BYTE else op.group2_EvCL)
+    if dst.reg.isaGpr() {
+      const reg = dst.reg.name()
+      if src.reg.isaGpr() {
+        assert src.reg.name() == rcx
+        this.encodeOneByteRexOp(opSize, INVALID_REGISTER, reg, group2_ExCL, opGroup)
+      } else if src.reg.isanImmediate() {
+        const imm = src.reg.immediate()
+        if imm == 1 {
+          this.encodeOneByteRexOp(opSize, INVALID_REGISTER, reg, group2_Ex1, opGroup)
+        } else {
+          this.encodeOneByteRexOp(opSize, INVALID_REGISTER, reg, group2_ExIb, opGroup)
+          this.encodeImm8(imm)
+        }
+      } else {
+        assert 0
+      }
+    } else if dst.reg.isMemory() {
+      if src.reg.isaGpr() {
+        assert src.reg.name() == rcx
+        this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, dst, group2_ExCL, opGroup).patch()
+      } else if src.reg.isanImmediate() {
+        const imm = src.reg.immediate()
+        if imm == 1 {
+          this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, dst, group2_Ex1, opGroup).patch()
+        } else {
+          this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, dst, group2_ExIb, opGroup)
+          this.encodeImm8(imm).patch()
+        }
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn _group3(this, opSize, lhs, rhs, opGroup) {
+    const     isaByte = opSize == SIZE_OF_BYTE
+    const group3_ExIx = (op.group3_EbIb if isaByte else op.group3_EvIz)
+    const   group3_Ex = (op.group3_Eb   if isaByte else op.group3_Ev)
+    if rhs.isNotValid() {
+      if lhs.reg.isaGpr() {
+        this.encodeOneByteRexOp(opSize, INVALID_REGISTER, lhs.reg.name(), group3_Ex, opGroup)
+      } else if lhs.reg.isMemory() {
+        this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, lhs, group3_Ex, opGroup).patch()
+      } else {
+        assert 0
+      }
+    } else if rhs.isanImmediate() {
+      const    imm = rhs.immediate()
+      var isMemory = false
+      if lhs.reg.isaGpr() {
+        this.encodeOneByteRexOp(opSize, INVALID_REGISTER, lhs.reg.name(), group3_ExIx, opGroup)
+      } else if lhs.reg.isMemory() {
+        this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, lhs, group3_ExIx, opGroup)
+        isMemory = true
+      } else {
+        assert 0
+      }
+      if isaByte {
+        this.encodeImm8(imm)
+      } else if opSize == SIZE_OF_WORD {
+        this.encodeImm16(imm)
+      } else {
+        this.encodeImm32(imm)
+      }
+      if isMemory {
+        this.encode.patch()
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn _group4(this, opSize, dst, opGroup) {
+    const   isaByte = opSize == SIZE_OF_BYTE
+    const group4_Ex = (op.group4_Eb if isaByte else op.group4_Ev)
+    if dst.reg.isaGpr() {
+      this.encodeOneByteRexOp(opSize, INVALID_REGISTER, dst.reg.name(), group4_Ex, opGroup)
+    } else if dst.reg.isMemory() {
+      this.encodeOneByteRexAddressOp(opSize, INVALID_REGISTER, dst, group4_Ex, opGroup).patch()
+    } else {
+      assert 0
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn _imul(this, opSize, dst, lhs, rhs) {
+    if rhs.isNotValid() { //  dst ⟵ dst × lhs
+      if dst.reg.isaGpr() {
+        const reg = dst.reg.name()
+        if lhs.reg.isaGpr() {
+          this.encodeTwoByteRexOp(opSize, reg, lhs.reg.name(), op.imul_GvEv)
+        } else if lhs.reg.isMemory() {
+          this.encodeTwoByteRexAddressOp(opSize, reg, lhs, op.imul_GvEv).patch()
+        } else {
+          assert 0
+        }
+      } else {
+        assert 0
+      }
+    } else if rhs.isanImmediate() { //  dst ⟵ lhs × immediate
+      const immediate = rhs.immediate()
+      const   isaByte = isaByte(immediate)
+      if dst.reg.isaGpr() {
+        const reg = dst.reg.name()
+        if lhs.reg.isaGpr() {
+          if isaByte {
+            this.encodeOneByteRexOp(opSize, reg, lhs.reg.name(), op.imul_GvEvIb)
+            this.encodeImm8(immediate)
+          } else {
+            this.encodeOneByteRexOp(opSize, reg, lhs.reg.name(), op.imul_GvEvIz)
+            if opSize == SIZE_OF_WORD {
+              this.encodeImm16(immediate)
+            } else {
+              this.encodeImm32(immediate)
+            }
+          }
+        } else if lhs.reg.isMemory() {
+          if isaByte {
+            this.encodeOneByteRexAddressOp(opSize, reg, lhs, op.imul_GvEvIb)
+            this.encodeImm8(immediate).patch()
+          } else {
+            this.encodeOneByteRexAddressOp(opSize, reg, lhs, op.imul_GvEvIz)
+            if opSize == SIZE_OF_WORD {
+              this.encodeImm16(immediate).patch()
+            } else {
+              this.encodeImm32(immediate).patch()
+            }
+          }
+        } else {
+          assert 0
+        }
+      } else {
+        assert 0
+      }
+    } else {
+
+    }
+  }
+
+  //———————————————————————————————————————————————————————————————————————————————————————————————————————
+  fn encodeOneByteRexOp(this, opSize, reg, rm, opCode, opGroup = INVALID_OPCODE, prefix = 0) {
+    this.encode.oneByteRexOp(opSize, reg, rm, opCode, opGroup, prefix)
+  }
+
+  fn encodeOneByteRexAddressOp(this, opSize, reg, address, opCode, opGroup = INVALID_OPCODE, prefix = 0) {
+    this.encode.oneByteRexAddressOp(opSize, reg, address, opCode, opGroup, prefix)
+  }
+
+  fn encodeTwoByteRexOp(this, opSize, reg, rm, opCode, opGroup = INVALID_OPCODE, prefix = 0) {
+    this.encode.twoByteRexOp(opSize, reg, rm, opCode, opGroup, prefix)
+  }
+
+  fn encodeTwoByteRexAddressOp(this, opSize, reg, address, opCode, opGroup = INVALID_OPCODE, prefix = 0) {
+    this.encode.twoByteRexAddressOp(opSize, reg, address, opCode, opGroup, prefix)
+  }
+
+  fn encodeTwoByteVexOp(this, reg, vreg, rm, opCode, prefix, vector, w = 0) {
+    this.encode.twoByteVexOp(reg, vreg, rm, opCode, prefix, vector, w)
+  }
+
+  fn encodeTwoByteVexAddressOp(this, reg, vreg, address, opCode, prefix, vector, w = 0) {
+    this.encode.twoByteVexAddressOp(reg, vreg, address, opCode, prefix, vector, w)
+  }
+
+  fn encodeByte(this, value) {
+    this.encode.buffer.writeByte(value)
+  }
+
+  fn encodeInt16(this, value) {
+    this.encode.buffer.writeInt16(value)
+  }
+
+  fn encodeImm8(this, immediate ) {
+    this.encode.buffer.writeImm8(immediate)
+    return this.encode
+  }
+
+  fn encodeImm16(this, immediate) {
+    this.encode.buffer.writeImm16(immediate)
+    return this.encode
+  }
+
+  fn encodeImm32(this, immediate) {
+    this.encode.buffer.writeImm32(immediate)
+    return this.encode
+  }
+
+  fn encodeImm64(this, immediate) {
+    this.encode.buffer.writeImm64(immediate)
+    return this.encode
+  }
+
+  fn encodeDisp32(this, immediate) {
+    this.encode.buffer.writeDisp32(immediate)
+    return this.encode
+  }
+
+  fn isaByte(immediate) {
+    Encoder.isaByte(immediate)
+  }
+
+  fn isaWord(immediate) {
+    Encoder.isaWord(immediate)
+  }
+
+  fn print(this, offset) {    
+    if const length = this.encode.buffer.length - offset {
+      auto  str = String{}
+      var   pos = this.encode.buffer.bytes + offset
+      const end = pos + length
+      const hex = "0123456789abcdef"
+      for ; pos < end; ++pos {
+        const byte = *pos
+        const hi = (byte >> 0x4) & 0xF
+        const lo = byte & 0xF
+        str.appendTextAndLength(&hex.text[hi], 1)
+        str.appendTextAndLength(&hex.text[lo], 1)
+      }
+      println(str)
+    }
+  }
+}

@@ -1,0 +1,399 @@
+
+
+struct M128A {
+  const Low = 0u64
+  const High = 0u64
+}
+
+struct XSAVE_FORMAT {
+  const    ControlWord =  0u16
+  const     StatusWord =  0u16
+  const        TagWord =  0u8
+  const      Reserved1 =  0u8
+  const    ErrorOpcode =  0u16
+  const    ErrorOffset =  0u32
+  const  ErrorSelector =  0u16
+  const      Reserved2 =  0u16
+  const     DataOffset =  0u32
+  const   DataSelector =  0u16
+  const      Reserved3 =  0u16
+  const          MxCsr =  0u32
+  const     MxCsr_Mask =  0u32
+  const FloatRegisters =  M128A[8]
+  const   XmmRegisters =  M128A[8]
+  const      Reserved4 =  M128A[224]
+}
+
+#align 16
+struct CONTEXT {
+  const P1Home = 0u64
+  const P2Home = 0u64
+  const P3Home = 0u64
+  const P4Home = 0u64
+  const P5Home = 0u64
+  const P6Home = 0u64
+
+  //
+  // Control flags.
+  //
+
+  const ContextFlags = 0u32
+  const        MxCsr = 0u32
+
+  //
+  // Segment Registers and processor flags.
+  //
+
+  const   SegCs = 0u16
+  const   SegDs = 0u16
+  const   SegEs = 0u16
+  const   SegFs = 0u16
+  const   SegGs = 0u16
+  const   SegSs = 0u16
+  const  EFlags = 0u32
+
+  //
+  // Debug registers
+  //
+
+  const Dr0 = 0u64
+  const Dr1 = 0u64
+  const Dr2 = 0u64
+  const Dr3 = 0u64
+  const Dr6 = 0u64
+  const Dr7 = 0u64
+
+  //
+  // Integer registers.
+  //
+
+  const Rax = 0u64
+  const Rcx = 0u64
+  const Rdx = 0u64
+  const Rbx = 0u64
+  const Rsp = 0u64
+  const Rbp = 0u64
+  const Rsi = 0u64
+  const Rdi = 0u64
+  const  R8 = 0u64
+  const  R9 = 0u64
+  const R10 = 0u64
+  const R11 = 0u64
+  const R12 = 0u64
+  const R13 = 0u64
+  const R14 = 0u64
+  const R15 = 0u64
+
+  //
+  // Program counter.
+  //
+
+  const Rip = 0u64
+
+  //
+  // Floating point state.
+  //
+
+  union A {
+    const FltSave = XSAVE_FORMAT{}
+    struct B {
+      const Header = M128A[2]
+      const Legacy = M128A[8]
+      const Xmm0 = M128A{}
+      const Xmm1 = M128A{}
+      const Xmm2 = M128A{}
+      const Xmm3 = M128A{}
+      const Xmm4 = M128A{}
+      const Xmm5 = M128A{}
+      const Xmm6 = M128A{}
+      const Xmm7 = M128A{}
+      const Xmm8 = M128A{}
+      const Xmm9 = M128A{}
+      const Xmm10 = M128A{}
+      const Xmm11 = M128A{}
+      const Xmm12 = M128A{}
+      const Xmm13 = M128A{}
+      const Xmm14 = M128A{}
+      const Xmm15 = M128A{}
+    }
+  }
+
+  //
+  // Vector registers.
+  //
+
+  const VectorRegister = M128A[26]
+  const  VectorControl = 0u64
+
+  //
+  // Special debug control registers.
+  //
+
+  const DebugControl = 0u64
+  const LastBranchToRip = 0u64
+  const LastBranchFromRip = 0u64
+  const LastExceptionToRip = 0u64
+  const LastExceptionFromRip = 0u64
+
+}
+
+
+extern RtlCaptureContext(ContextRecord) = void
+
+
+import stream from console
+
+
+fn run(): void {
+  import malloc, mfree from std.memory
+  synchronize(stream)
+  const w = Writer{}  
+  const context = CONTEXT{}
+  RtlCaptureContext(context)
+  walk(w, context.Rsp, context.Rip)
+}
+
+struct Function {
+  var    name = Char*{}
+  var address = null
+}
+
+struct Window {
+  const    head = 0u64
+  const    name = 0u64
+  const address = 0u64
+  const    tail = 0u64
+}
+
+fn walk(w, rsp, rip) {
+  define      MAGIC 0xdeadbeeffeeddeadu64
+  define   MAX_WALK 0x200000  // Ensure we dont walk to nowhere
+  define MAX_FRAMES 0x18      // Show upto 24 calls.
+  const  stackLow = 0u64
+  const stackHigh = 0u64
+  os.GetCurrentThreadStackLimits(&stackLow, &stackHigh)
+  var    pos = rsp as UInt64*
+  const  end = stackHigh as UInt64*
+  var frames = 0
+  w.write("Assertion failed: rsp = ").hex(rsp).
+    write(", rip = ").hex(rip).
+    write(", stack low = ").hex(stackLow).
+    write(", stack high = ").hex(stackHigh).
+    write(", stack = ").dec(stackHigh - stackLow).
+    write(", used = ").decln(stackHigh - rsp)
+  for pos < end {
+    const window = findWindow(pos, end)
+    break if !window
+    break if window.name == MAGIC && window.address == MAGIC
+    const function = &window.name as Function*
+    w.writeFunction(function)
+    break if frames++ >= MAX_FRAMES
+    pos = (window as UInt64*) + 4
+  }
+
+  fn findWindow(pos, end) {
+    for ; pos < end; ++pos {
+      const window = pos as Window*
+      return window if window.head == MAGIC && window.tail == MAGIC
+    }
+    return null
+  }
+}
+
+
+struct Writer {
+  const numbuf = Char[0x20]
+
+  fn writeFunction(this, function) {
+    this.write("    ").
+         hex(function.address).
+         write("    ")
+    if const name = function.name {
+      const length = os.strlen(name)
+      if length > 0 {
+        if length < 0x200 {
+          const str = string{ text = name, length = length }
+          this.writeln(str)
+        } else {
+          this.write("function.name too long: ").decln(length)
+        }
+      } else {
+        this.writeln("function.name is empty")
+      }
+    } else {
+      this.writeln("function.name is null")
+    }
+  }
+
+  fn write(this, str): this {
+    stream.append(str)
+  } fn writeln(this, str): this {
+    this.write(str)
+    this.write("\r\n")
+  }
+
+  fn hex(this, n): this {
+    os._ui64toa_s(n as UInt64, this.numbuf, this.numbuf.length, 0x10)
+    var length = os.strlen(this.numbuf)
+    this.write(string{ text = this.numbuf.text, length = length })
+  } fn hexln(this, n): this {
+    this.hex(n)
+    this.write("\r\n")
+  }
+
+  fn dec(this, n): this {
+    os._ui64toa_s(n as UInt64, this.numbuf, this.numbuf.length, 0xa)
+    var length = os.strlen(this.numbuf)
+    this.write(string{ text = this.numbuf.text, length = length })
+  } fn decln(this, n): this {
+    this.dec(n)
+    this.write("\r\n")
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+define EXCEPTION_MAXIMUM_PARAMETERS 15 // maximum number of exception parameters
+struct EXCEPTION_RECORD64 {
+    const        ExceptionCode = 0u32
+    const       ExceptionFlags = 0u32
+    const      ExceptionRecord = 0u64
+    const     ExceptionAddress = 0u64
+    const     NumberParameters = 0u32
+    const    __unusedAlignment = 0u32
+    const ExceptionInformation = UInt64[EXCEPTION_MAXIMUM_PARAMETERS]
+}
+struct EXCEPTION_POINTERS {
+    const ExceptionRecord = EXCEPTION_RECORD64*{}
+    const   ContextRecord = CONTEXT*{}
+}
+struct RUNTIME_FUNCTION {
+  const BeginAddress = 0u32
+  const   EndAddress = 0u32
+  const unwind = union {
+    const UnwindInfoAddress = 0u32
+    const UnwindData = 0u32
+    }
+}
+struct DISPATCHER_CONTEXT {
+    const ControlPc = 0u64
+    const ImageBase = 0u64
+    const FunctionEntry = RUNTIME_FUNCTION*{}
+    const EstablisherFrame = 0u64
+    const TargetIp = 0u64
+    const ContextRecord = CONTEXT*{}
+    const LanguageHandler = null
+    const HandlerData = null
+    const HistoryTable = UNWIND_HISTORY_TABLE*{}
+    const ScopeIndex = 0u32
+    const Fill0 = 0u32
+}
+define UNWIND_HISTORY_TABLE_SIZE 12
+struct UNWIND_HISTORY_TABLE_ENTRY {
+    const ImageBase = 0u64
+    const FunctionEntry = RUNTIME_FUNCTION*{}
+}
+struct UNWIND_HISTORY_TABLE {
+    const Count = 0u32
+    const  LocalHint = 0u8
+    const  GlobalHint = 0u8
+    const  Search = 0u8
+    const  Once = 0u8
+    const LowAddress = 0u64
+    const HighAddress = 0u64
+    const Entry = UNWIND_HISTORY_TABLE_ENTRY[UNWIND_HISTORY_TABLE_SIZE]
+}
+define EXCEPTION_CONTINUE_SEARCH 0x0
+define EXCEPTION_EXECUTE_HANDLER 0x1
+//extern WINAPI UnhandledExceptionFilter(ExceptionInfo) = 0
+extern SetUnhandledExceptionFilter(lpTopLevelExceptionFilter) = null
+
+
+// Signal types
+define SIGINT          2   // interrupt
+define SIGILL          4   // illegal instruction - invalid function image
+define SIGFPE          8   // floating point exception
+define SIGSEGV         11  // segment violation
+define SIGTERM         15  // Software termination signal from kill
+define SIGBREAK        21  // Ctrl-Break sequence
+define SIGABRT         22  // abnormal termination triggered by abort call
+
+define SIGABRT_COMPAT  6   // SIGABRT compatible with other platforms, same as SIGABRT
+
+extern signal(_Signal, _Function) = null
+
+
+var previousSIGSEGVHandler = null
+var previousUnhandledExceptionHandler = null
+fn startup(): void {
+  previousSIGSEGVHandler = signal(SIGSEGV, SISGEVHandler{ 0 })
+  previousUnhandledExceptionHandler = SetUnhandledExceptionFilter(handleUnhandledException{ EXCEPTION_POINTERS*{}})
+  // Ensure __C_specific_handler is instantiated.
+  const x = __C_specific_handler{ EXCEPTION_RECORD64*{}, null, CONTEXT*{}, DISPATCHER_CONTEXT*{} }
+
+
+  const module = os.GetModuleHandleA(null)
+  const info = os.MODULEINFO{}
+  assert os.GetModuleInformation(os.GetCurrentProcess(), module, info, sizeof( os.MODULEINFO )) with
+    "os.GetModuleInformation failed with #{os.GetLastError()}"
+
+  const ImageBase = info.lpBaseOfDll as UInt64
+  assert RtlInstallFunctionTableCallback(ImageBase | 0x3u64, 
+                                         ImageBase,
+                                         info.SizeOfImage,
+                                         functionTableCallback{ 0u32, null },
+                                         null,
+                                         null) with
+    "RtlInstallFunctionTableCallback failed with #{os.GetLastError()}"
+}
+fn shutdown() {
+  signal(SIGSEGV, previousSIGSEGVHandler)
+  SetUnhandledExceptionFilter(previousUnhandledExceptionHandler)
+
+}
+
+fn SISGEVHandler(signal) {
+  assert 0
+}
+
+fn handleUnhandledException(ExceptionInfo) {
+  assert 0
+  return EXCEPTION_CONTINUE_SEARCH
+}
+
+/*_VCRTIMP EXCEPTION_DISPOSITION __C_specific_handler(
+            _In_    struct _EXCEPTION_RECORD*   ExceptionRecord,
+            _In_    void*                       EstablisherFrame,
+            _Inout_ struct _CONTEXT*            ContextRecord,
+            _Inout_ struct _DISPATCHER_CONTEXT* DispatcherContext
+            );*/
+enum EXCEPTION_DISPOSITION {
+    ExceptionContinueExecution,
+    ExceptionContinueSearch,
+    ExceptionNestedException,
+    ExceptionCollidedUnwind
+}
+
+fn __C_specific_handler(ExceptionRecord, EstablisherFrame, ContextRecord, DispatcherContext): EXCEPTION_DISPOSITION {
+  assert 0
+  return EXCEPTION_DISPOSITION.ExceptionContinueSearch
+}
+
+extern RtlInstallFunctionTableCallback(
+  TableIdentifier,
+  BaseAddress,
+  Length,
+  Callback,
+  Context,
+  OutOfProcessCallbackDll
+) = 0
+
+fn functionTableCallback(ControlPc, Context): RUNTIME_FUNCTION* {
+  assert 0
+  import console
+  console.readln()
+  const process = os.GetCurrentProcess()
+  const processId = os.GetProcessId(process)
+  assert os.DebugActiveProcess(processId) with "os.DebugActiveProcess failed with #{os.GetLastError()}"
+  os.ExitProcess(1)
+  return 0xdeadbeeffeeddeadu64 as RUNTIME_FUNCTION*
+}

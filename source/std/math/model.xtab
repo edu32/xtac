@@ -1,0 +1,95 @@
+struct Sweep {
+  readonly matrix = Matrix(Double){}
+  readonly p = 0
+  readonly m = 0
+  readonly n = 0
+
+  fn dispose(this) {
+    delete this.matrix
+  }
+
+  fn setup(this, X, Y) {
+    /*  +-------+-------+
+        | X^T X | X^T y |
+        +-------+-------+
+        | y^T X | y^T y |
+        +-------+-------+
+
+    */
+    assert X.rows == Y.rows
+    this.p = X.cols
+    this.m = Y.cols
+    this.n = X.rows
+    this.matrix.resize(this.p + this.m,this. p + this.m)
+    const data = this.matrix.items
+    // X^T X
+    for var i = 0; i < this.n; ++i {
+      for var j = 0; j < this.p; ++j {
+        for var k = 0; k < this.p; ++k {
+          data[j][k] += X.items[i][j] * X.items[i][k]
+        }
+      }
+    }
+    // X^T Y
+    for var i = 0; i < this.n; ++i {
+      for var j = 0; j < this.p; ++j {
+        for var k = 0; k < this.m; ++k {
+          data[j][k + this.p] += X.items[i][j] * Y.items[i][k]
+        }
+      }
+    }
+    // Y^T X
+    for var i = 0; i < this.n; ++i {
+      for var j = 0; j < this.m; ++j {
+        for var k = 0; k < this.p; ++k {
+          data[j + this.p][k] += Y.items[i][j] * X.items[i][k]
+        }
+      }
+    }
+    // Y^T Y
+    for var i = 0; i < this.n; ++i {
+      for var j = 0; j < this.m; ++j {
+        for var k = 0; k < this.m; ++k {
+          data[j + this.p][k + this.p] += Y.items[i][j] * Y.items[i][k]
+        }
+      }
+    }
+  }
+
+  fn step(this) {
+    const swp = {
+      n = this.n,
+      k = 0,
+      kend = this.p - 1,
+      data = this.matrix.items,
+      parameters = {
+        startRow = 0,
+        startCol = this.p,
+        rows = this.p,
+        cols = this.m
+      },
+      sumOfSquares = {
+        startRow = this.p,
+        startCol = this.p,
+        rows = this.m,
+        cols = this.m
+      },
+      betas = {
+        startRow = 0,
+        startCol = this.p,
+        rows = this.p,
+        cols = this.m
+      },
+      isLast  = fn(self)    = self.k == self.kend,
+      isFirst = fn(self) = self.k == 0
+    }
+    for ; swp.k < this.p; ++swp.k {
+      if !this.matrix.sweep(swp.k) {
+        //println("Fail(#{swp.k})\r\n#{this.matrix}")
+      } else {
+        //println("sweep(#{swp.k})\r\n#{this.matrix}")
+      }
+      yield &swp
+    }
+  }
+}

@@ -1,0 +1,304 @@
+fn run(allocator) {
+  const setup = {
+    defs = allocator.defs,
+    gprs = allocator.gprSlots,
+    xmms = allocator.xmmSlots
+  }
+
+  for def in setup.defs {
+    defineOutput(setup, def)
+  }
+
+  for def in setup.defs {
+    const value = def.value
+    const  elem = value is ssa.ElementAt
+    for i, operand in value.operands {
+      if const node = operand.isaValue() {
+        const input = setup.defs.items[node.index]
+        defineInput(setup, i, input, def, operand.isaWrite(), avoidR12 = elem != null)
+      }
+    }
+  }
+
+  for def in setup.defs {
+    if def.value is ssa.Phi {
+      extendPhiRanges(setup, def)
+    }
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+fn defineOutput(setup, def) {
+  const  defs = setup.defs 
+  const value = def.value
+  const  type = value.type
+
+  switch value {
+    //  Don't create ranges for the following.
+    case ssa.Value     return
+    case ssa.ElementAt return
+    case ssa.Store     return
+    case ssa.Assign    return
+    case ssa.Exchange  return
+    case ssa.XAdd      return
+    case ssa.Local     return
+    case ssa.Return    return
+
+    case ssa.Compare         return if value.isaConditionForJumpIf()
+    case ssa.CompareExchange return if value.isaConditionForJumpIf()
+
+    case ssa.RetVal {
+      return if type.isVoid()
+      assert type.isLoadable()
+      if type.isaRealOrPacked() {
+        defineFixedOutputRange(def, def, &setup.xmms.xmm0)
+        return
+      }
+      defineFixedOutputRange(def, def, &setup.gprs.rax)
+      return
+    }
+
+    case ssa.Argument { // Fix register arguments; don't define stack arguments.
+      return if value.isaStackArgument()
+      defineArgumentOutput(defs, def, fixedOfParameterOrArgument(setup, value.argumentIndex, type))
+      return
+    }
+    case ssa.Parameter { // Fix register parameters; don't define stack parameters.
+      if value.parameterIndex < 4 {
+        defineFixedOutputRange(def, def, fixedOfParameterOrArgument(setup, value.parameterIndex, type))
+      }
+      return
+    }
+    case ssa.Remainder {
+      if type.isIntegral() {
+        //  dst:rax ⟵ lhs:rax % rhs
+        defineFixedOutputRange(def, def, &setup.gprs.rax)
+        return
+      }
+    }
+    case ssa.Divide {
+      if type.isIntegral() {
+        //  dst:rax ⟵ lhs:rax ÷ rhs
+        defineFixedOutputRange(def, def, &setup.gprs.rax)
+        return
+      }
+    }
+    case ssa.Multiply {
+      if type.isUnsigned() || (type.isSigned() && type.size() == 1) {
+        //  dst:rax ⟵ lhs:rax × rhs
+        defineFixedOutputRange(def, def, &setup.gprs.rax)
+        return
+      }
+    }
+    case ssa.Call {
+      if type.isNotLoadable() {
+        defineOutputRange(def, def, def)
+      } else if type.isaRealOrPacked() {
+        defineFixedOutputRange(def, def, &setup.xmms.xmm0)
+      } else {
+        defineFixedOutputRange(def, def, &setup.gprs.rax)
+      } 
+      return
+    }
+    case ssa.Phi { // Phis should interfere with each other at a block.
+      definePhiOutput(defs, def)
+      return
+    }
+  }
+
+  if type.isLoadable() {
+    defineOutputRange(def, def, def)
+  }
+}
+
+
+fn defineArgumentOutput(defs, def, fixed) {
+  assert def.ranges.isEmpty() && def.value.uses.length == 1 && def.value.uses.items[0].user is ssa.Call
+  const value = def.value as ssa.Argument*
+  const  call = defs.items[def.value.uses.items[0].user.index]
+  const range = defineFixedOutputRange(def, call, fixed)
+  call.inputs.append(range)
+}
+
+
+fn definePhiOutput(defs, def) {
+  assert def.ranges.isEmpty()
+  const block = def.value.parent
+  const  phis = block.phiRange()
+  const start = defs.items[phis.first.index]
+  const   end = defs.items[phis.last.index]
+  defineOutputRange(def, start, end)
+}
+
+
+fn defineOutputRange(def, start, end) {
+  const range = new UseRange{ owner = def, start = start, end = end,  isActive = true, isaWrite = true }
+  def.ranges.append(range)
+}
+
+
+fn defineFixedOutputRange(def, end, fixed) {
+  const range = new UseRange{ owner = def, start = def, end = end, isFixed = fixed, isActive = true, isaWrite = true }
+  def.ranges.append(range)
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+fn defineInput(setup, index, input, user, isaWrite, avoidR12):void {
+  return if input.value.type.isVoid()
+
+  const  defs = setup.defs
+  const value = input.value
+  const  type = value.type
+  var   fixed = Slot*{}
+
+  switch value {
+    case ssa.ElementAt        return defineMemoryInputs(setup, value, user)
+    case ssa.Local            return
+    case ssa.Parameter        return if value.parameterIndex > 3
+    case ssa.Argument         return // One big range already created for argument.
+    case ssa.Compare          return if input.ranges.isEmpty()
+    case ssa.CompareExchange  return if input.ranges.isEmpty()
+  }
+
+  switch user.value {
+    case ssa.CompareExchange { // cmpxchg value, rax.comparand, exchange
+      if index == 1 {
+        fixed = &setup.gprs.rax
+      }
+    }
+    case ssa.Return {
+      if type.isaRealOrPacked() { // return rax/xmm0
+        fixed = &setup.xmms.xmm0
+      } else {
+        fixed = &setup.gprs.rax
+      }
+    }
+    case ssa.LeftShift { // dst ⟵ lhs << rcx
+      if index == 1 && type.isIntegral() {
+        fixed = &setup.gprs.rcx
+      }
+    }
+    case ssa.RightShift { // dst ⟵ lhs >> rcx
+      if index == 1 && type.isIntegral() {
+        fixed = &setup.gprs.rcx
+      }
+    }
+    case ssa.UnsignedRightShift { // dst ⟵ lhs >>> rcx
+      if index == 1 && type.isIntegral() {
+        fixed = &setup.gprs.rcx
+      }
+    }
+    case call: ssa.Call {
+      switch value {
+        case ssa.Address {
+          if value == call.operands.last().value.node {
+            fixed = &setup.gprs.rax
+          }
+        }
+      }
+    }
+    case ssa.Phi return
+  }
+
+  assert value.type.isLoadable()
+
+  const range = appendUse(&input, &user, fixed, isaWrite, avoidR12, index < 0)
+  user.inputs.append(range)
+}
+
+
+fn defineMemoryInputs(setup, elem, user):void {
+  const defs = setup.defs
+  for operand in elem.operands {
+    if const value = operand.isaValue() {
+      const  input = defs.items[value.index]
+      defineInput(setup, -1, input, user, isaWrite = false, avoidR12 = true)
+    }
+  }
+}
+
+
+fn appendUse(def, pos, fixed, isaWrite, avoidR12, isaMemoryOperand) {  
+  assert def.ranges.isNotEmpty()
+
+  const ranges = UseRanges{ ranges = def.ranges, owner = def }
+
+  //ranges.validate(true, pos)
+
+  var range = UseRange*{}
+
+  const regKind = RegKind.None if def.value.type.isNotLoadable()   else
+                  RegKind.Xmm  if def.value.type.isaRealOrPacked() else
+                  RegKind.Gpr
+
+  if regKind != RegKind.Gpr {
+    avoidR12 = false
+  }
+
+  if const found = ranges.findContainingRange(pos) {
+    const length = found.length()
+    if length == 1 {
+      if found.isActive {
+        assert found.isNotFixed() || found.isFixed == fixed
+        isaMemoryOperand = (true if found.isaMemoryOperand || isaMemoryOperand)
+          found.avoidR12 = (true if found.avoidR12 || avoidR12)
+          found.isaWrite = (true if found.isaWrite || isaWrite)
+           found.isFixed = fixed
+      } else {
+        isaMemoryOperand = isaMemoryOperand
+          found.avoidR12 = avoidR12
+          found.isActive = true
+          found.isaWrite = isaWrite
+           found.isFixed = fixed
+      }
+      range = found
+  if regKind != RegKind.Gpr {
+    assert !range.avoidR12
+  }
+    } else {
+      assert found.isaHole()
+      range = ranges.insertActive(found, pos, fixed, isaWrite, avoidR12)
+    }
+  } else if pos < def.ranges.first.start {
+    range = ranges.prependActive(pos, fixed, isaWrite, avoidR12)
+  } else {
+    assert pos > def.ranges.last.end
+    range = ranges.appendActive(pos, fixed, isaWrite, avoidR12)
+  }
+  range.isaMemoryOperand = isaMemoryOperand
+  if regKind != RegKind.Gpr {
+    assert !range.avoidR12
+  }
+  //ranges.validate(false, pos)
+  return range
+}
+
+//---------------------------------------------------------------------------------------------------------
+fn extendPhiRanges(setup, def) {
+  const   phi = def.value as ssa.Phi*
+  const block = phi.parent
+  for i, operand in phi.operands {
+    const opBlock = block.uses.items[i].user.parent
+    if opBlock.index >= block.index {
+      const   term = &setup.defs.items[opBlock.body.last.index]
+      const ranges = UseRanges{ ranges = def.ranges, owner = def }
+      continue if ranges.findContainingRange(term)
+      ranges.extendTo(term)
+    }
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+fn fixedOfParameterOrArgument(setup, index, type) {
+  switch index {
+    case 0 return &setup.xmms.xmm0 if type.isaRealOrPacked() else &setup.gprs.rcx
+    case 1 return &setup.xmms.xmm1 if type.isaRealOrPacked() else &setup.gprs.rdx
+    case 2 return &setup.xmms.xmm2 if type.isaRealOrPacked() else &setup.gprs.r8
+    case 3 return &setup.xmms.xmm3 if type.isaRealOrPacked() else &setup.gprs.r9
+  }
+  assert 0
+  return Slot&{}
+}

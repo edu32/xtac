@@ -1,0 +1,271 @@
+fn run(allocator) {
+  auto pass = StackFrameLayout{
+      function = allocator.function,
+     arguments = allocator.function.frame.arguments,
+        locals = allocator.function.frame.locals,
+        nvymms = allocator.function.frame.nvymms,
+        nvgprs = allocator.function.frame.nvgprs,
+    parameters = allocator.function.frame.parameters
+  }
+  pass.run(allocator.defs)
+}
+
+struct StackFrameLayout {
+  const function = ssa.Function*{}
+
+  const  arguments = List(ssa.StackFrame.Cell)&{}
+  const     locals = List(ssa.StackFrame.Cell)&{}
+  const     nvymms = List(ssa.StackFrame.Cell)&{}
+  const     nvgprs = List(ssa.StackFrame.Cell)&{}
+  const parameters = List(ssa.StackFrame.Cell)&{}
+
+  readonly calls = 0
+
+
+  fn dispose(this) {
+  }
+
+
+  fn run(this, defs) {
+    this.collect(defs)
+    this.postCollect()
+    this.computeStackFrame()
+  }
+
+
+  fn collect(this, defs) {
+    each value in this.function.flatten() {
+      switch value {
+        case ssa.Local {
+          this.collectLocal(value)
+        }
+        case ssa.Parameter {
+          this.collectParameter(value)
+        }
+        case ssa.Argument {
+          this.collectArgument(value)
+        }
+        case ssa.Call {
+          ++this.calls
+        }
+      }
+    }
+    for def in defs {
+      if def.ranges.first {
+        this.collectNonVolatiles(def.ranges)
+      }
+    }
+  }
+
+
+  fn collectNonVolatiles(this, ranges) {
+    for var range = ranges.first; range; range = range.qnext {
+      if const slot = range.slot {
+        if slot.reg.isNotVolatile() {
+          if slot.reg.isaGpr() {
+            this.collectNonVolatileGpr(slot)
+          } else if slot.reg.isanXmm() {
+            this.collectNonVolatileXmm(slot, range.owner.value.type.size())
+          } else {
+            assert 0
+          }
+        }
+      }
+    }
+  }
+
+
+  fn collectNonVolatileGpr(this, slot) {
+    const name = slot.reg.name()
+    for gpr in this.nvgprs {
+      return if gpr.name == name
+    }
+    this.nvgprs.append(ssa.StackFrame.Cell{ size = SIZE_OF_POINTER, alignment = SIZE_OF_POINTER, name = name })
+  }
+
+
+  fn collectNonVolatileXmm(this, slot, typeSize) {
+    assert typeSize > 0
+    const  size = typeSize
+    const  name = slot.reg.name()
+    for ymm in this.nvymms {
+      return if ymm.name == name
+    }
+    this.nvymms.append(ssa.StackFrame.Cell{ size = size, alignment = SIZE_OF_YMM, name = name })
+  }
+
+
+  fn collectLocal(this, local) {
+    for var i = this.locals.length; i <= local.localIndex; ++i {
+      this.locals.append(ssa.StackFrame.Cell{ name = i })
+    }
+    const      type = local.type
+    const      cell = this.locals.items[local.localIndex]
+    const      size = type.size()
+    const alignment = type.alignment()
+    if size > cell.size {
+      cell.size = size
+    }
+    if alignment > cell.alignment {
+      cell.alignment = alignment
+    }
+  }
+
+
+  fn collectParameter(this, parameter) {
+    for var i = this.parameters.length; i <= parameter.parameterIndex; ++i {
+      this.parameters.append(ssa.StackFrame.Cell{ name = i })
+    }
+    const      type = parameter.type
+    const      cell = this.parameters.items[parameter.parameterIndex]
+    const      size = type.size()
+    const alignment = type.alignment()
+    if size > cell.size {
+      cell.size = size
+    }
+    if alignment > cell.alignment {
+      cell.alignment = alignment
+    }
+  }
+
+
+  fn collectArgument(this, argument) {
+    for var i = this.arguments.length; i <= argument.argumentIndex; ++i {
+      this.arguments.append(ssa.StackFrame.Cell{ name = i })
+    }
+    const      type = argument.type
+    const      cell = this.arguments.items[argument.argumentIndex]
+    const      size = type.size()
+    const alignment = type.alignment()
+    if size > cell.size {
+      cell.size = size
+    }
+    if alignment > cell.alignment {
+      cell.alignment = alignment
+    }
+  }
+
+
+  fn postCollect(this) {
+    if this.calls {
+      for var i = this.arguments.length; i < MAX_REGISTER_ARGUMENTS; ++i {
+        this.arguments.append(ssa.StackFrame.Cell{ name = i, size = SIZE_OF_POINTER, alignment = SIZE_OF_POINTER })
+      }
+    }
+    for var i = this.parameters.length; i < MAX_REGISTER_PARAMETERS; ++i {
+      this.parameters.append(ssa.StackFrame.Cell{ name = i, size = SIZE_OF_POINTER, alignment = SIZE_OF_POINTER })
+    }
+  }
+
+
+  fn computeStackFrame(this) {
+    /*  lower addresses/top of stack
+                  |                 |
+     ―――――――――――――+―――――――――――――――――+ ⟵ rsp at exit of callee (≥ 16 B aligned)
+                  | first argument  |
+            c     +―――――――――――――――――+
+            a     | ...             |
+            l     +―――――――――――――――――+
+            l     | last argument   |
+            e     +―――――――――――――――――+
+            e     | ...             | ⟵ padding before arguments to ensure rsp at exit is 16 B aligned
+                  +―――――――――――――――――+ ⟵ rsp at bottom of locals
+                  | last  local     |
+                  +―――――――――――――――――+
+                  | ...             |
+                  +―――――――――――――――――+
+                  | first local     |
+                  +―――――――――――――――――+
+                  | ...             |
+                  +―――――――――――――――――+ ⟵ rsp at bottom of nvymms (8, 16, or 32 B aligned)
+                  | last nvymm      |
+                  +―――――――――――――――――+
+                  | ...             |
+                  +―――――――――――――――――+
+                  | first nvymm     |
+                  +―――――――――――――――――+
+                  | ...             | ⟵ padding before nvymms for 32 B alignment
+                  +―――――――――――――――――+ ⟵ rsp at bottom of nvgprs (8 or 16 B aligned)
+                  | last nvgpr      |
+                  +―――――――――――――――――+
+                  | ...             |
+                  +―――――――――――――――――+
+                  | first nvgpr     |
+     ―――――――――――――+―――――――――――――――――+ ⟵ rsp at top of nvgprs (8 B aligned)
+                  | return address  |
+     ―――――――――――――+―――――――――――――――――+ ⟵ rsp at exit of caller (16 B aligned)
+                  | first parameter |
+            c     +―――――――――――――――――+
+            a     | ...             |
+            l     +―――――――――――――――――+
+            l     | last parameter  |
+            e     +―――――――――――――――――+
+            r     |                 | 
+        higher addresses/bottom of stack
+    */
+
+    /*  struct Stack {                      ; low address (16 B aligned)
+            const arguments =   Arg[ n ]
+            const    locals = Local[ n ]
+            const    nvymms =   Ymm[ n ]
+            const    nvgprs =   Gpr[ n ]
+            const   retaddr = 0u64 
+        }                                     ; high addresses (16 B aligned)
+    */
+
+    var maxAlignment = SIZE_OF_YMM if this.nvymms.length else SIZE_OF_XMM
+    var       offset = 0
+    for argument in this.arguments {
+      argument.offset = offset
+      offset += SIZE_OF_POINTER
+    }
+
+    for var i = this.locals.length; --i >= 0; {
+      const local = this.locals.items[i]
+      offset += computePadding(offset, local.alignment)
+      local.offset = offset
+      offset += local.size
+      if local.alignment > maxAlignment {
+        maxAlignment = local.alignment
+      }
+    }
+
+    for var i = this.nvymms.length; --i >= 0; {
+      const nvymm = this.nvymms.items[i]
+      offset += computePadding(offset, SIZE_OF_YMM)
+      nvymm.offset = offset
+      offset += SIZE_OF_YMM
+    }
+
+    offset += this.nvgprs.length * SIZE_OF_POINTER
+
+    return if !offset // Empty stack.
+
+    offset += computePadding(offset + SIZE_OF_POINTER, maxAlignment)
+
+    this.function.frame.size = offset
+
+    offset += SIZE_OF_POINTER
+
+    assert maxAlignment <= SIZE_OF_YMM
+    if maxAlignment ==  SIZE_OF_YMM {
+      assert (offset & 0x1F) == 0 with "#{offset}#[%0x]"
+    } else if maxAlignment == SIZE_OF_XMM {
+      assert (offset & 0xF) == 0 with "#{offset}#[%0x]"
+    } else {
+      assert 0
+    }
+
+    for parameter in this.parameters {
+      parameter.offset = offset
+      offset += SIZE_OF_POINTER
+    }
+
+    offset = this.function.frame.size - SIZE_OF_POINTER
+    for nvgpr in this.nvgprs {
+      nvgpr.offset = offset
+      offset -= SIZE_OF_POINTER
+    }
+
+  }
+}

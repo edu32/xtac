@@ -1,0 +1,343 @@
+#align 2 // IMAGE_SYMBOL is 2 B aligned.
+struct IMAGE_SYMBOL {
+  var name = union {
+    var  short = Char[ 8 ]  // Name of symbol if it is 8 characters or shorter.
+    var offset = {
+      lo = 0u32,
+      hi = 0u32             // Offset into the string table if the name is longer than 8 characters.
+    }
+  }
+  var                    value = 0u32 // Value varies.
+  var            sectionNumber = 0i16 // 1-based index of section containing this symbol.
+  var                     type = 0u16 // One of the TypeKind enum members.
+  var             storageClass = 0u8  // One of the StorageClass enum members.
+  var numberOfAuxillarySymbols = 0u8  // Number of auxilliary symbols following this symbol.
+}
+
+#align 2 // IMAGE_AUX_SYMBOL is 2 B aligned. Also manually make each member struct #align 2.
+union IMAGE_AUX_SYMBOL {
+  const sym = #align 2 struct {
+    var tagIndex = 0u32                   // struct, union, or enum tag index
+    var     misc = #align 2 union {
+      var   lnSz = #align 2 struct {
+        var linenumber = 0u16             // declaration line number
+        var       size = 0u16             // size of struct, union, or enum
+      }
+      var totalSize = 0u32
+    }
+    var fcnAry     = #align 2 union {
+      var function = #align 2 struct {    // if ISFCN, tag, or .bb
+        var   pointerToLinenumber = 0u32
+        var pointerToNextFunction = 0u32
+      }
+      var array = #align 2 struct {       // if ISARY, up to 4 dimen.
+        var dimension = UInt16[ 4 ]
+      }
+    }
+    var tvIndex = 0u16                    // tv index
+  }
+  const fileName = Byte[ IMAGE_SIZEOF_SYMBOL ]
+  const  section = #align 2 struct {
+    var              length = 0u32            // section length
+    var numberOfRelocations = 0u16            // number of relocation entries
+    var numberOfLinenumbers = 0u16            // number of line numbers
+    var            checkSum = 0u32            // checksum for communal
+    var              number = 0u16            // section number to associate with
+    var           selection = 0u8             // communal selection type
+    var            reserved = 0u8
+    var          highNumber = 0u16            // high bits of the section number
+  }
+}
+
+struct IMAGE_COFF_SYMBOLS_HEADER {
+  var      numberOfSymbols = 0u32
+  var     lvaToFirstSymbol = 0u32
+  var  numberOfLinenumbers = 0u32
+  var lvaToFirstLinenumber = 0u32
+  var rvaToFirstByteOfCode = 0u32
+  var  rvaToLastByteOfCode = 0u32
+  var rvaToFirstByteOfData = 0u32
+  var  rvaToLastByteOfData = 0u32
+}
+
+struct IMAGE_DEBUG_DIRECTORY {
+    var  characteristics = 0u32
+    var    timeDateStamp = 0u32
+    var     majorVersion = 0u16
+    var     minorVersion = 0u16
+    var             type = 0u32
+    var       sizeOfData = 0u32
+    var addressOfRawData = 0u32
+    var pointerToRawData = 0u32
+}
+
+define IMAGE_SIZEOF_SHORTNAME 8
+define    IMAGE_SIZEOF_SYMBOL 18
+
+define IMAGE_DEBUG_TYPE_COFF 1
+
+//  Fundamental types. Lower byte of a 2 byte type value.
+define IMAGE_SYM_TYPE_NULL                 0x0000u8  // no type.
+define IMAGE_SYM_TYPE_VOID                 0x0001u8  //
+define IMAGE_SYM_TYPE_CHAR                 0x0002u8  // type character.
+define IMAGE_SYM_TYPE_SHORT                0x0003u8  // type short integer.
+define IMAGE_SYM_TYPE_INT                  0x0004u8  //
+define IMAGE_SYM_TYPE_LONG                 0x0005u8  //
+define IMAGE_SYM_TYPE_FLOAT                0x0006u8  //
+define IMAGE_SYM_TYPE_DOUBLE               0x0007u8  //
+define IMAGE_SYM_TYPE_STRUCT               0x0008u8  //
+define IMAGE_SYM_TYPE_UNION                0x0009u8  //
+define IMAGE_SYM_TYPE_ENUM                 0x000Au8  // enumeration.
+define IMAGE_SYM_TYPE_MOE                  0x000Bu8  // member of enumeration.
+define IMAGE_SYM_TYPE_BYTE                 0x000Cu8  //
+define IMAGE_SYM_TYPE_WORD                 0x000Du8  //
+define IMAGE_SYM_TYPE_UINT                 0x000Eu8  //
+define IMAGE_SYM_TYPE_DWORD                0x000Fu8  //
+
+//  Derived types. Upper byte of a 2 byte type value.
+define IMAGE_SYM_DTYPE_NULL                0u8      // no derived type.
+define IMAGE_SYM_DTYPE_POINTER             1u8      // pointer.
+define IMAGE_SYM_DTYPE_FUNCTION            2u8      // function.
+define IMAGE_SYM_DTYPE_ARRAY               3u8      // array.
+
+define IMAGE_SYM_DTYPE_SHIFT               4u8
+
+//  Storage class.
+define IMAGE_SYM_CLASS_END_OF_FUNCTION     0x00FF
+define IMAGE_SYM_CLASS_NULL                0x0000
+define IMAGE_SYM_CLASS_AUTOMATIC           0x0001
+define IMAGE_SYM_CLASS_EXTERNAL            0x0002
+define IMAGE_SYM_CLASS_STATIC              0x0003
+define IMAGE_SYM_CLASS_REGISTER            0x0004
+define IMAGE_SYM_CLASS_EXTERNAL_DEF        0x0005
+define IMAGE_SYM_CLASS_LABEL               0x0006
+define IMAGE_SYM_CLASS_UNDEFINED_LABEL     0x0007
+define IMAGE_SYM_CLASS_MEMBER_OF_STRUCT    0x0008
+define IMAGE_SYM_CLASS_ARGUMENT            0x0009
+define IMAGE_SYM_CLASS_STRUCT_TAG          0x000A
+define IMAGE_SYM_CLASS_MEMBER_OF_UNION     0x000B
+define IMAGE_SYM_CLASS_UNION_TAG           0x000C
+define IMAGE_SYM_CLASS_TYPE_DEFINITION     0x000D
+define IMAGE_SYM_CLASS_UNDEFINED_STATIC    0x000E
+define IMAGE_SYM_CLASS_ENUM_TAG            0x000F
+define IMAGE_SYM_CLASS_MEMBER_OF_ENUM      0x0010
+define IMAGE_SYM_CLASS_REGISTER_PARAM      0x0011
+define IMAGE_SYM_CLASS_BIT_FIELD           0x0012
+
+define IMAGE_SYM_CLASS_FAR_EXTERNAL        0x0044  //
+
+define IMAGE_SYM_CLASS_BLOCK               0x0064
+define IMAGE_SYM_CLASS_FUNCTION            0x0065
+define IMAGE_SYM_CLASS_END_OF_STRUCT       0x0066
+define IMAGE_SYM_CLASS_FILE                0x0067
+// new
+define IMAGE_SYM_CLASS_SECTION             0x0068
+define IMAGE_SYM_CLASS_WEAK_EXTERNAL       0x0069
+
+define IMAGE_CODESECTION_NUMBER 1
+define IMAGE_DATASECTION_NUMBER 2
+
+import       mcopy from memory
+import DataSection from pe
+import CodeSection from pe
+
+
+//⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+fn run(linker, image, offset) {
+  auto writer = Writer{ symbols = linker.symbols, code = image.code, data = image.data }
+  return writer.run(offset)
+}
+
+
+//⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+struct StringTable {
+  const  buffer = Buffer{}
+  const offsets = Dict(UInt32){}
+
+  fn dispose(this) {
+    delete this.buffer
+    delete this.offsets
+  }
+
+  fn initialize(this) {
+    import std.collections.dict
+    this.buffer.append(Byte*{}, sizeof(Int32)) // Reserve 4 bytes at index 0 of the string table.
+    this.write(Char*{}, 0, dict.NULL_HASH)     // Reserve 1 byte for the empty string. 
+  }
+
+  fn get(this, value) {
+    const idx = this.offsets.indexOf(value.hash)
+    if idx >= 0 {
+      return this.offsets.items[idx].value
+    }
+    return this.write(value.text, value.length, value.hash)
+  }
+
+  fn write(this, text, length, hash) {
+    const offset = this.buffer.length
+    this.buffer.appendNullTerminatedString(text, length)
+    this.offsets.append(hash, offset)
+    return offset
+  }
+}
+
+
+//⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+struct Coff {
+  const       code = CodeSection&{}
+  const       data = DataSection&{}
+  const    strings = StringTable{}
+  readonly symbols = 0
+  const    offsets = {
+    start     = 0, // Offset into DataSection of the first byte of the coff stuff.
+    directory = 0, // Offset into DataSection where the debug directory begins.
+    header    = 0, // Offset into DataSection where the coff symbols header begins.
+    symbols   = 0  // Offset into DataSection where the coff symbols begin.
+  }         
+
+  fn dispose(this) {
+    delete this.strings
+  }
+
+  fn begin(this) {
+    this.offsets.start = this.data.buffer.length
+    this.strings.initialize()
+    this.createDebugDirectory()
+    this.createSymbolsHeader()
+  }
+
+  fn appendFunction(this, function, fnsize, isNotLast) {
+    /*  Layout:
+          → fnsym     18 B
+            ·  fnaux  18 B
+          → bfsym     18 B
+            · bfaux   18 B
+          → efsym     18 B
+            · efaux   18 B
+          ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+                     108 B
+
+
+    */
+    static bfName = ".bf"
+    static lfName = ".lf"
+    static efName = ".ef"
+    const  fnName = function.name
+
+    //⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+    //  fnsym 
+    const fnsym = this.createImageSymbol()
+    if fnName.length > IMAGE_SIZEOF_SHORTNAME {
+     fnsym.name.offset.hi = this.strings.get(fnName)
+    } else {
+      mcopy(fnsym.name.short.text, fnName.text, fnName.length)
+    }
+    fnsym.value                    = function.offset
+    fnsym.type                     = (IMAGE_SYM_DTYPE_FUNCTION << IMAGE_SYM_DTYPE_SHIFT)
+    fnsym.sectionNumber            = IMAGE_CODESECTION_NUMBER
+    fnsym.storageClass             = IMAGE_SYM_CLASS_EXTERNAL
+    fnsym.numberOfAuxillarySymbols = 1
+
+    const fnsymidx = this.symbols - 1 // -1 is the index of {fnsym} in the symbol table.
+    const bfsymidx = fnsymidx     + 2 // +0 is fnsym. +1 is fnaux. +2 is bfsymidx.
+
+    //  fnaux
+    const fnaux = this.createAuxilliarySymbol()
+    fnaux.sym.tagIndex = bfsymidx
+    fnaux.sym.misc.totalSize = fnsize
+    if isNotLast {
+      const nextfnsymidx = fnsymidx + 6
+      fnaux.sym.fcnAry.function.pointerToNextFunction = nextfnsymidx
+    }
+
+    //⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+    //  bfsym
+    const bfsym = this.createImageSymbol()
+    mcopy(bfsym.name.short, bfName.text, bfName.length)
+    bfsym.sectionNumber            = IMAGE_CODESECTION_NUMBER
+    bfsym.storageClass             = IMAGE_SYM_CLASS_FUNCTION
+    bfsym.numberOfAuxillarySymbols = 1
+
+    //  bfaux
+    const bfaux = this.createAuxilliarySymbol()
+    if isNotLast {
+      const nextbfsymidx = fnsymidx + 8
+      bfaux.sym.fcnAry.function.pointerToNextFunction = nextbfsymidx
+    }
+
+    //⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+    //  efsym
+    const efsym = this.createImageSymbol()
+    mcopy(efsym.name.short, efName.text, efName.length)
+    efsym.sectionNumber            = IMAGE_CODESECTION_NUMBER
+    efsym.value                    = fnsize
+    efsym.storageClass             = IMAGE_SYM_CLASS_FUNCTION
+    efsym.numberOfAuxillarySymbols = 1
+
+    //  efaux
+    this.createAuxilliarySymbol()
+  }
+
+  fn createDebugDirectory(this) {
+    this.data.align(sizeof(UInt32))
+    this.offsets.directory = this.data.buffer.length
+    this.data.buffer.append(Byte*{}, sizeof(IMAGE_DEBUG_DIRECTORY))
+  }
+
+  fn createSymbolsHeader(this) {
+    this.offsets.header = this.data.buffer.length
+    this.data.buffer.append(Byte*{}, sizeof(IMAGE_COFF_SYMBOLS_HEADER))
+    this.offsets.symbols = this.data.buffer.length
+  }
+
+  fn createImageSymbol(this) {
+    const offset = this.data.buffer.length
+    this.data.buffer.append(Byte*{}, sizeof(IMAGE_SYMBOL))
+    ++this.symbols
+    return (this.data.buffer.bytes + offset) as IMAGE_SYMBOL*
+  }
+
+  fn createAuxilliarySymbol(this) {
+    const offset = this.data.buffer.length
+    this.data.buffer.append(Byte*{}, sizeof(IMAGE_AUX_SYMBOL))
+    ++this.symbols
+    return (this.data.buffer.bytes + offset) as IMAGE_AUX_SYMBOL*
+  }
+
+  fn finish(this, size, timeDateStamp) {
+    *(this.strings.buffer.bytes as Int32*) = this.strings.buffer.length
+    this.data.buffer.append(this.strings.buffer.bytes, this.strings.buffer.length)
+    this.populateDebugDirectory(timeDateStamp)
+    this.populateSymbolsHeader()
+    const length = this.data.buffer.length - this.offsets.start
+    return size + length
+  }
+
+  fn populateDebugDirectory(this, timeDateStamp) {
+    const dir = (this.data.buffer.bytes + this.offsets.directory) as IMAGE_DEBUG_DIRECTORY*
+    dir.characteristics  = 0
+    dir.timeDateStamp    = timeDateStamp
+    dir.majorVersion     = 0xdead
+    dir.minorVersion     = 0xbeef
+    dir.type             = IMAGE_DEBUG_TYPE_COFF
+    dir.sizeOfData       = this.data.buffer.length - this.offsets.header
+    dir.addressOfRawData = this.offsetOfSymbolsHeader()
+    dir.pointerToRawData = this.offsetOfSymbolsHeader()
+  }
+
+  fn populateSymbolsHeader(this) {
+    const header = (this.data.buffer.bytes + this.offsets.header) as IMAGE_COFF_SYMBOLS_HEADER*
+    header.numberOfSymbols      = this.symbols
+    header.lvaToFirstSymbol     = sizeof(IMAGE_COFF_SYMBOLS_HEADER)
+    header.rvaToFirstByteOfCode = this.code.offsetOfFirstByte()
+    header.rvaToLastByteOfCode  = this.code.offsetOfLastByte()
+    header.rvaToFirstByteOfData = this.data.offsetOfFirstByte()
+    header.rvaToLastByteOfData  = this.data.offsetOfLastByteOfGlobals()
+  }
+
+  fn offsetOfDebugDirectory(this) = this.data.offset + this.offsets.directory
+  fn offsetOfSymbolsHeader(this)  = this.data.offset + this.offsets.header
+  fn offsetOfSymbols(this)        = this.data.offset + this.offsets.symbols
+
+  fn sizeOfDebugDirectory(this)   = sizeof(IMAGE_DEBUG_DIRECTORY)
+}

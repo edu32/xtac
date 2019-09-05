@@ -1,0 +1,257 @@
+readonly srw2 = atomic.ExclusiveLock{}
+const  stream = Stream{}
+
+
+struct Stream {
+  readonly         input = null
+  readonly        output = null
+  readonly           srw = atomic.RecursiveExclusiveLock{}
+  readonly isInitialized = false
+
+  fn initialize(this) {
+     this.input = os.GetStdHandle(os.STD_INPUT_HANDLE)
+    this.output = os.GetStdHandle(os.STD_OUTPUT_HANDLE)
+    os.SetConsoleOutputCP(65001)
+    this.isInitialized = true
+  }
+
+  fn lock(this): void {
+    this.srw.lock()
+  }
+
+  fn unlock(this): void {
+    this.srw.unlock()
+  }
+
+
+  fn append(this, str): this {
+    this.initialize() if !this.isInitialized
+    if str.length {
+      var bytesWritten = 0
+      os.WriteConsoleA(this.output, str.text, str.length, &bytesWritten, null)
+    }
+  }
+
+
+  synchronized fn write(this, str): this {
+    this.initialize() if !this.isInitialized
+    if str.length {
+      var bytesWritten = 0
+      os.WriteConsoleA(this.output, str.text, str.length, &bytesWritten, null)
+    }
+  }
+}
+
+fn write(str): Void {
+  stream.write(str)
+  /*srw.lock()
+  const handle = os.GetStdHandle(os.STD_OUTPUT_HANDLE)
+  startup(handle) if !started
+  if str.length {
+    var bytesWritten = 0
+    os.WriteConsoleA(handle, str.text, str.length, &bytesWritten, null)
+  }
+  srw.unlock()*/
+}
+
+fn read(str) {
+  assert str.length > 0
+  const handle = os.GetStdHandle(os.STD_INPUT_HANDLE)
+  var bytesRead = 0
+  if os.ReadConsoleA(handle, str.text, str.length, &bytesRead, null) {
+    assert bytesRead >= 2 && bytesRead < str.length
+    bytesRead -= 2
+    str.terminate(bytesRead)
+    //str.text[str.length = bytesRead] = ''
+  } else {
+    assert with "os.ReadConsoleA failed with #{os.GetLastError()}"
+  }
+}
+
+fn writeln(str): Void {
+  srw2.lock()
+  write(str)
+  write("\r\n")
+  srw2.unlock()
+}
+
+fn indent(times): void {
+  for var i = 0; i < times; ++i {
+    write("  ")
+  }
+}
+
+fn readln() {
+  define READLN_CAPACITY 0x200
+  static array = Char[READLN_CAPACITY]
+  const str = string.fromArrayAndLength(array, array.length)
+  read(str)
+  return str
+}
+
+fn cls() {
+  const   info = os.CONSOLE_SCREEN_BUFFER_INFO{}
+  const handle = os.GetStdHandle(os.STD_OUTPUT_HANDLE)
+  assert os.GetConsoleScreenBufferInfo(handle, info)
+  const        size  = info.dwSize.X * info.dwSize.Y
+  const bytesWritten = 0
+  assert os.FillConsoleOutputCharacterA(handle, ' ', size, 0u32, &bytesWritten)
+  assert os.GetConsoleScreenBufferInfo(handle, info)
+  assert os.FillConsoleOutputAttribute(handle, info.wAttributes, size, 0u32, &bytesWritten)
+  assert os.SetConsoleCursorPosition(handle, 0u32)
+}
+
+enum ForeColor {
+  Default     = -1,
+  Black       = 0,
+  DarkBlue    = 0x0001,
+  DarkGreen   = 0x0002,
+  DarkCyan    = 0x0002 | 0x0001,
+  DarkRed     = 0x0004,
+  DarkMagenta = 0x0004 | 0x0001,
+  DarkYellow  = 0x0004 | 0x0002,
+  DarkGray    = 0x0004 | 0x0002 | 0x0001,
+  Gray        = 0x0008,
+  Blue        = 0x0008 | 0x0001,
+  Green       = 0x0008 | 0x0002,
+  Cyan        = 0x0008 | 0x0002 | 0x0001,
+  Red         = 0x0008 | 0x0004,
+  Magenta     = 0x0008 | 0x0004 | 0x0001,
+  Yellow      = 0x0008 | 0x0004 | 0x0002,
+  White       = 0x0008 | 0x0004 | 0x0002 | 0x0001,
+}
+enum BackColor {
+  Default     = -1,
+  Black       = 0,
+  DarkBlue    = 0x0010,
+  DarkGreen   = 0x0020,
+  DarkCyan    = 0x0020 | 0x0010,
+  DarkRed     = 0x0040,
+  DarkMagenta = 0x0040 | 0x0010,
+  DarkYellow  = 0x0040 | 0x0020,
+  DarkGray    = 0x0040 | 0x0020 | 0x0010,
+  Gray        = 0x0080,
+  Blue        = 0x0080 | 0x0010,
+  Green       = 0x0080 | 0x0020,
+  Cyan        = 0x0080 | 0x0020 | 0x0010,
+  Red         = 0x0080 | 0x0040,
+  Magenta     = 0x0080 | 0x0040 | 0x0010,
+  Yellow      = 0x0080 | 0x0040 | 0x0020,
+  White       = 0x0080 | 0x0040 | 0x0020 | 0x0010,
+}
+
+struct Colors {
+  var backColor = BackColor{}
+  var foreColor = ForeColor{}
+}
+
+// Syntax:
+//    BackColorName '|'
+//    ['|'] ForeColorName
+//    BackColorName '|' ForeColorName
+fn parseColors(s): Colors {
+  return Colors{ backColor = BackColor.Default, foreColor = ForeColor.Default } if s.isEmpty()
+  var pos = s.text
+  const end = s.end()
+  for ; pos < end && *pos != '|'; ++pos {}
+  var backColorName = ""
+  var foreColorName = ""
+  if pos == end {
+    foreColorName.setFromRange(s.text, end)
+  } else if pos == s.text {
+    foreColorName.setFromRange(s.text + 1, end)
+  } else {
+    backColorName.setFromRange(s.text, pos)
+    foreColorName.setFromRange(pos + 1, end)
+  }
+  struct NameValue {
+    var name  = ""
+    var value = ForeColor{}
+  }
+  static nvs = [
+    NameValue{ name = "Black",        value = ForeColor.Black },
+    NameValue{ name = "DarkBlue",     value = ForeColor.DarkBlue },
+    NameValue{ name = "DarkGreen",    value = ForeColor.DarkGreen },
+    NameValue{ name = "DarkCyan",     value = ForeColor.DarkCyan },
+    NameValue{ name = "DarkRed",      value = ForeColor.DarkRed },
+    NameValue{ name = "DarkMagenta",  value = ForeColor.DarkMagenta },
+    NameValue{ name = "DarkYellow",   value = ForeColor.DarkYellow },
+    NameValue{ name = "DarkGray",     value = ForeColor.DarkGray },
+    NameValue{ name = "Gray",         value = ForeColor.Gray },
+    NameValue{ name = "Blue",         value = ForeColor.Blue },
+    NameValue{ name = "Green",        value = ForeColor.Green },
+    NameValue{ name = "Cyan",         value = ForeColor.Cyan },
+    NameValue{ name = "Red",          value = ForeColor.Red },
+    NameValue{ name = "Magenta",      value = ForeColor.Magenta },
+    NameValue{ name = "Yellow",       value = ForeColor.Yellow },
+    NameValue{ name = "White",        value = ForeColor.White }
+  ]
+  var backColor = BackColor.Default
+  if backColorName.length {
+    for nv in nvs {
+      if nv.name.compare(backColorName, caseSensitive = false) == 0 {
+        backColor = ((nv.value as UInt16) << 0x4) as BackColor
+        break
+      }
+    }
+  }
+  var foreColor = ForeColor.Default
+  if foreColorName.length {
+    for nv in nvs {
+      if nv.name.compare(foreColorName, caseSensitive = false) == 0 {
+        foreColor = nv.value
+        break
+      }
+    }
+  }
+  return Colors{ backColor = backColor, foreColor = foreColor }
+}
+
+
+struct Colorizer {
+  const backColor = BackColor{}
+  const foreColor = ForeColor{}
+
+  fn dispose(this) {
+    setTextColors(this.backColor, this.foreColor)
+  }
+}
+
+
+fn colorize(backColor, foreColor): Colorizer {
+  const handle = os.GetStdHandle(os.STD_OUTPUT_HANDLE)
+  const   info = os.CONSOLE_SCREEN_BUFFER_INFO{}
+  assert os.GetConsoleScreenBufferInfo(handle, info) with
+    "os.GetConsoleScreenBufferInfo failed with #{os.GetLastError()}"
+  setTextColors(backColor, foreColor)
+  return Colorizer {
+    foreColor = (info.wAttributes & 0xF) as ForeColor,
+    backColor = ((info.wAttributes >> 0x4) & 0xF) as BackColor
+   }
+}
+
+
+fn setTextColors(backColor, foreColor) {
+  var attributes = 0u16
+  if backColor != BackColor.Default {
+    attributes = backColor as UInt16
+  }
+  if foreColor != ForeColor.Default {
+    attributes |= foreColor as UInt16
+  }
+  if attributes {
+    const handle = os.GetStdHandle(os.STD_OUTPUT_HANDLE)
+    assert os.SetConsoleTextAttribute(handle, attributes) with 
+      "os.SetConsoleTextAttribute failed with #{os.GetLastError()}"
+  }
+}
+
+
+fn setTextForeColor(color) {
+  setTextColors(BackColor.Default, color)
+}
+
+
+fn setTextBackColor(color) {
+  setTextColors(color, ForeColor.Default)
+}

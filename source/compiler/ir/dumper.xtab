@@ -1,0 +1,1474 @@
+
+fn run(ctx, dumpName) {
+  import worker, threads
+  auto      path = String{}
+  const provider = worker.BatchProvider{ program = ctx.ssa }
+  const    start = time.clock()
+  auto generator = provider.dump()
+  const context  = {
+             srw = atomic.ExclusiveLock{},
+       generator = generator,
+            path = *&path,
+    singleThread = false,
+         structs = 0,
+         externs = 0,
+          arrays = 0,
+           files = 0,
+       functions = 0,
+         globals = 0,
+          blocks = 0,
+          values = 0
+  }
+
+  path.append(ctx.sourceFolderPath).append("\\.dump.").append(dumpName)
+
+  if fs.ensureFolderExists(path) {
+    threads.run(context) with {
+      auto  batch = List(ssa.Symbol*){}
+      auto buffer = String{}
+      for it.generator.fill(batch) {
+        const start = time.clock()
+        auto dumper = Dumper{ dumpFolderPath = it.path, buffer = buffer }
+        dumper.run(it, batch)
+      }
+    }
+
+    const elapsed = time.elapsed(start)
+    println("#{'dumper'}#[%<darkblue|cyan>]: {\r\n\
+        #{'purpose'}#[%wl12]: #{'dumps ir to '}#[%<darkyellow>]#{path}#[%<yellow>],\r\n\
+        #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+        #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+        #{'dumped'}#[%wl12]: { files: #{context.files}#[%,%<gray>], \
+                           functions: #{context.functions}#[%,%<gray>], \
+                              blocks: #{context.blocks}#[%,%<gray>], \
+                              values: #{context.values}#[%,%<gray>], \
+                             structs: #{context.structs}#[%,%<gray>], \
+                             externs: #{context.externs}#[%,%<gray>], \
+                              arrays: #{context.arrays}#[%,%<gray>], \
+                             globals: #{context.globals}#[%,%<gray>] },\r\n\
+        #{'memory'}#[%wl12]: #{memory.mformat()} }")
+  } else {
+    println("could not create folder: #{path}#[%<red>]")
+  }
+}
+
+define _CVTBUFSIZE 512
+
+struct Dumper {
+  const            numbuf = Char[ _CVTBUFSIZE ]
+  readonly dumpFolderPath = String&{}
+  const            buffer = String&{}
+  readonly           file = fio.File{}
+  readonly       function = ssa.Function*{}
+
+  fn dispose(this) {
+    this.flush()
+    delete this.file
+  }
+
+
+  fn flush(this) {
+    this.file.append(this.buffer)
+    this.buffer.clear()
+  }
+
+  fn writeRaw(this, str, length):this {
+    define MAX_BUFFER 0x20000
+    var   buf = str.text
+    const end = str.text + length
+    if this.buffer.length >= MAX_BUFFER {
+      this.flush()
+    }
+    for buf < end {
+      const available = MAX_BUFFER - this.buffer.length
+      const  required = end - buf
+      if available >= required {
+        this.buffer.appendTextAndLength(buf, required)
+        break
+      } 
+      this.buffer.appendTextAndLength(buf, available)
+      this.flush()
+      buf += available
+    }
+  }
+
+
+  fn write(this, str):this = this.writeRaw(str, str.length)
+
+
+  fn writeName(this, value):this {
+    if value.length > 1 {
+      if value.text[0] == '~' {
+        this.write("__")
+        var    pos = value.text + 1
+        var   mark = pos
+        const  end = value.text + value.length
+        for ; pos < end; ++pos {
+          if *pos == '~' {
+            mark = replace(this, mark, pos)
+          }
+        }
+        replace(this, mark, pos)
+        return this
+
+        fn replace(p, mark, pos) {
+          if mark < pos {
+            p.write(string.fromRange(mark, pos))
+            p.write("__")
+          }
+          return pos + 1
+        }
+      }
+    }
+    this.write(value)
+  }
+
+
+  fn writeInt32(this, value):this {
+    os._set_errno(0)
+    assert !os._itoa_s(value as Int32, this.numbuf, _CVTBUFSIZE, 10)
+    this.writeRaw(this.numbuf, os.strlen(this.numbuf))
+  }
+
+
+  fn writeInt64(this, value):this {
+    os._set_errno(0)
+    assert !os._i64toa_s(value, this.numbuf, _CVTBUFSIZE, 10)
+    this.writeRaw(this.numbuf, os.strlen(this.numbuf))
+  }
+
+
+  fn writeUInt64(this, value):this {
+    os._set_errno(0)
+    assert !os._ui64toa_s(value, this.numbuf, _CVTBUFSIZE, 10)
+    this.writeRaw(this.numbuf, os.strlen(this.numbuf))
+  }
+
+
+  fn writeSuffixedInt(this, imm):this {
+    switch imm.type.kind {
+      case ssa.Kind.Int8  this.writeInt64(imm.value.i8 as Int64).write("i8")
+      case ssa.Kind.Int16 this.writeInt64(imm.value.i16 as Int64).write("i16")
+      case ssa.Kind.Int32 this.writeInt64(imm.value.i32 as Int64).write("i32")
+      case ssa.Kind.Int64 this.writeInt64(imm.value.i64).write("i64")
+      default assert with nameof(imm.type.kind)
+    }
+  }
+
+
+  fn writeSuffixedUInt(this, imm):this {
+    switch imm.type.kind {
+      case ssa.Kind.UInt8  this.writeUInt64(imm.value.u8 as UInt64).write("u8")
+      case ssa.Kind.UInt16 this.writeUInt64(imm.value.u16 as UInt64).write("u16")
+      case ssa.Kind.UInt32 this.writeUInt64(imm.value.u32 as UInt64).write("u32")
+      case ssa.Kind.UInt64 this.writeUInt64(imm.value.u64).write("u64")
+      default assert with nameof(imm.type.kind)
+    }
+  }
+
+
+  fn writeOffset(this, offset):this {
+    define WIDTH 4
+    this.write("\r\n  ")
+    os._set_errno(0)
+    assert !os._i64toa_s(offset as Int64, this.numbuf, _CVTBUFSIZE, 10)
+    var length = os.strlen(this.numbuf)
+    for var i = length; i < WIDTH; ++i {
+      this.write("0")
+    }
+    this.writeRaw(this.numbuf, os.strlen(this.numbuf))
+    this.write("  ")
+  }
+
+
+  fn writeHex(this, value): this {
+    this.numbuf[0] = '0'
+    this.numbuf[1] = 'x'
+    os._set_errno(0)
+    assert !os._ui64toa_s(value as Int64, &this.numbuf[2], _CVTBUFSIZE, 16)
+    this.writeRaw(this.numbuf, os.strlen(this.numbuf))
+  }
+
+  fn writeSuffixedDouble(this, value, type) {
+    this.writeDouble(value, 8)
+    switch type.kind {
+      case ssa.Kind.Float  this.write("f")
+      case ssa.Kind.Double this.write("f64")
+      default assert with nameof(type.kind)
+    }
+  }
+
+
+  fn writeDouble(this, value, decimals):this {
+    os._set_errno(0)
+    assert !os._gcvt_s(this.numbuf, _CVTBUFSIZE, value, decimals)
+    var len = os.strlen(this.numbuf)
+    if len == 0 {
+      this.numbuf[0] = '0'
+      this.numbuf[1] = '.'
+      this.numbuf[2] = '0'
+      len = 3
+    } else if this.numbuf[0] == '.' {
+      assert 0
+    } else if this.numbuf[len - 1] == '.' {
+      this.numbuf[len++] = '0'
+    } else {
+      var dot = 0
+      for ; dot < len && this.numbuf[dot] != '.'; ++dot {}
+      if dot == len {
+        this.numbuf[len++] = '.'
+        this.numbuf[len++] = '0'
+      }
+    }
+    this.writeRaw(this.numbuf, len)
+  }
+
+
+  fn run(this, context, batch) {
+    const file = batch.first()
+    assert file.type.isaFile() && this.file.isClosed()
+    return if !this.openFile(file)
+    //  Data section: { globals, structs, arrays, externs }
+    for symbol in batch {
+      switch symbol {
+        case ssa.Global this.dumpGlobal(context, symbol)
+      }
+    } for symbol in batch {
+      switch symbol {
+        case ssa.Struct this.dumpStruct(context, symbol)
+      }
+    } for symbol in batch {
+      switch symbol {
+        case ssa.Array this.dumpArray(context, symbol)
+      }
+    } for symbol in batch {
+      switch symbol {
+        case ssa.Extern this.dumpExtern(context, symbol)
+      }
+    }
+    //  Code section: { file, functions }
+    this.dumpFile(context, file)
+    for symbol in batch {
+      switch symbol {
+        case ssa.Function this.dumpFunction(context, symbol)
+      }
+    }
+  }
+
+
+  fn openFile(this, symbol) {
+    var fileok = false
+    auto  path = String{}
+    path.append(this.dumpFolderPath).append("\\").append(symbol.name).append(".xtab")
+    (this.file, fileok) = fio.open(path, os.CREATE_ALWAYS, os.GENERIC_WRITE, os.FILE_SHARE_NONE,
+      os.FILE_ATTRIBUTE_NORMAL | os.FILE_FLAG_WRITE_THROUGH)
+    return fileok
+  }
+
+
+  fn dumpFile(this, context, symbol) {
+    atomic.increment(&context.files)
+  }
+
+
+  fn dumpStruct(this, context, symbol) {
+    atomic.increment(&context.structs)
+    this.write("\r\n\r\n").write("// size = ").
+      writeInt32(symbol.size).write(" B, alignment = ").
+      writeInt32(symbol.alignment).write(" B, uses = ").
+      writeInt32(symbol.uses)
+    if symbol.isaUnion {
+      this.write("\r\nunion ")
+    } else {
+      this.write("\r\nstruct ")
+    }
+    this.writeName(symbol.name).write(" {")
+    for field in symbol.fields {
+      this.dumpField(field)
+    }
+    this.write("\r\n}")
+  }
+
+
+  fn dumpField(this, field) {
+    this.writeOffset(field.offset)
+    this.writeName(field.name).write(": ")
+    this.dumpType(field.type)
+  }
+
+
+  fn dumpExtern(this, context, function) {
+    atomic.increment(&context.externs)
+    this.write("\r\n\r\n").write("// Function: index = ").
+      writeInt32(function.index).write(", offset = ").
+      writeInt32(function.offset).write(", uses = ").
+      writeInt32(function.uses).write("\r\n")
+    this.write("extern ").writeName(function.name).write("(")
+    for i, parameter in function.parameters {
+      if i {
+        this.write(", ")
+      }
+      this.dumpType(parameter)
+    }
+    this.write("): ").dumpType(function.fnreturn)
+  }
+
+
+  fn dumpGlobal(this, context, symbol) {
+    atomic.increment(&context.globals)
+    this.writeOffset(symbol.offset).write("static ").writeName(symbol.name).write(" = ")
+    if const imm = symbol.hasInitializer() {
+      this.dumpConstant(imm)
+    } else {
+      const imm = ssa.Constant{ type = symbol.type }
+      this.dumpConstant(imm)
+    }
+  }
+
+
+  fn dumpArray(this, context, symbol) {
+    atomic.increment(&context.arrays)
+  }
+
+
+  fn dumpFunction(this, context, function) {
+    atomic.increment(&context.functions)
+    this.function = function
+    this.write("\r\n\r\n")
+    if function.isaFile {
+      this.write("// File: fileId = ").writeInt32(function.fileId).write(", index = f")
+    } else {
+      this.write("// Function: index = f")
+    }
+    this.writeInt32(function.index).write(", offset = ").
+      writeInt32(function.offset).write(", uses = ").
+      writeInt32(function.uses).write("\r\n")
+    this.write("fn ").writeName(function.name).write("(")
+    for i, parameter in function.parameters {
+      if i {
+        this.write(", ")
+      }
+      if parameter.name {
+        this.writeName(parameter.name)
+      } else {
+        this.write("<anon-parameter>")
+      }
+      this.write(": ")
+      this.dumpType(parameter.type)
+    }
+    this.write("): ").dumpType(function.fnreturn)
+    this.write(" {")
+    this.preamble()
+    each block in function.blocks() {
+      atomic.increment(&context.blocks)
+      this.dumpBlock(context, block)
+    }
+    this.write("\r\n}")
+  }
+
+  fn preamble(this) {
+    var       bidx = 0,   vidx = 0
+    var     locals = 0, spills = 0
+    auto   actuals = List(Int32){}
+    var assertions = 0
+    each block in this.function.blocks() {
+      block.index = bidx++
+      each val in block.values() {
+        val.index = vidx++
+        switch val {
+          case ssa.Local  {
+            if val.isaSpill {
+              ++spills
+            }
+            ++locals
+            appendActual(actuals, val.localIndex)
+          }
+          case ssa.Assert {
+            ++assertions
+          }
+        }
+      }
+    }
+    this.write("\r\n// locals: { total = ").writeInt32(locals)
+    this.write(", actual = ").writeInt32(actuals.length)
+    if actuals.length {
+      this.write(" (").writeDouble(100.0 * actuals.length / locals, 2).write("%)")
+    }
+    this.write(", spills = ").writeInt32(spills)
+    if spills {
+      this.write(" (").writeDouble(100.0 * spills / locals, 2).write("%)")
+    }
+    this.write(" }, blocks = ").writeInt32(bidx)
+    this.write(", instructions = ").writeInt32(vidx)
+    this.write(", assertions = ").writeInt32(assertions)
+
+    const frame = this.function.frame
+    if frame.size {
+      this.dumpFrame(frame)
+    }
+
+    fn appendActual(actuals, localIndex) {
+      for actual in actuals {
+        return if actual == localIndex
+      }
+      actuals.append(localIndex)
+    }
+  }
+
+
+  fn dumpFrame(this, frame) {
+    this.write("\r\n//  frame: { size = ").writeInt32(frame.size).write(" B")
+    if frame.nvgprs.length {
+      this.write(", nvgprs: ").writeInt32(frame.nvgprs.length).write(" (")
+      for i, gpr in frame.nvgprs {
+        if i {
+          this.write(", ")
+        }
+        this.writeGpr(gpr.name, gpr.size)
+      }
+      this.write(")")
+    }
+    if frame.nvymms.length {
+      this.write(", nvymms: ").writeInt32(frame.nvymms.length).write(" (")
+      for i, ymm in frame.nvymms {
+        this.write(", ") if i
+        this.writeXmm(ymm.name, ymm.size)
+      }
+      this.write(")")
+    }
+    if frame.locals.length {
+      this.write(", locals: ").writeInt32(frame.locals.length)
+    }
+    if frame.arguments.length {
+      this.write(", arguments: ").writeInt32(frame.arguments.length)
+    }
+    if frame.parameters.length {
+      this.write(", parameters: ").writeInt32(frame.parameters.length)
+    }
+    this.write(" }")
+  }
+
+
+  fn dumpBlock(this, context, block) {
+    this.write("\r\nbb.").writeInt32(block.index).write(": // ")    
+    if block.index {
+      this.dumpPredecessors(block)
+    } else {
+      this.write("entry")
+    }
+
+    var ass = ssa.Assert*{}
+    switch block.body.last {
+      case jump: ssa.Jump {
+        if jump.target() == block.qnext {
+          for var expr = jump.qprev; expr; expr = expr.qprev {
+            switch expr {
+              case ssa.Assign {}
+              case ssa.Assert {
+                ass = expr
+                break
+              }
+              default {
+                break
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if ass {
+      var first = block.body.first
+      atomic.increment(&context.values)
+      this.writeOffset(first.index).write("...").write(" // ugly boiler-plate code")
+      for var expr = first.qnext; expr != ass; expr = expr.qnext {
+        atomic.increment(&context.values)
+      }
+      for var expr = ass as ssa.Value*; expr; expr = expr.qnext {
+        atomic.increment(&context.values)
+        this.writeOffset(expr.index)
+        this.dump(expr)
+        this.comment(expr)
+      }
+    } else each expr in block.values() {
+      atomic.increment(&context.values)
+      this.writeOffset(expr.index)
+      this.dump(expr)
+      this.comment(expr)
+    }
+  }
+
+  fn comment(this, expr) {
+    if expr.uses.length {
+      this.write(" // uses = ").writeInt32(expr.uses.length)
+    }
+    switch expr {
+      case ssa.ElementAt {
+        if !expr.uses.length {
+          this.write(" // ")
+        }
+        this.dumpStringAtAddress(expr)
+      }
+      case ssa.Store {
+        switch expr.reason {
+          case ssa.MoveReason.None{} // Do nothing.
+          case ssa.MoveReason.Spill writeComment(this, expr, "regalloc-spill")
+          default assert with nameof(expr.reason)
+        }
+      }
+      case ssa.Fill {
+        writeComment(this, expr, "regalloc-fill")
+      }
+      case ssa.Assign {
+        switch expr.reason {
+          case ssa.MoveReason.None{} // Do nothing.
+          case ssa.MoveReason.Phi      writeComment(this, expr, "regalloc-phi")
+          case ssa.MoveReason.Transfer writeComment(this, expr, "regalloc-transfer")
+          default assert with nameof(expr.reason)
+        }
+      }
+      case ssa.Exchange {
+        switch expr.reason {
+          case ssa.MoveReason.None{} // Do nothing.
+          case ssa.MoveReason.Transfer writeComment(this, expr, "regalloc-exchange")
+          default assert with nameof(expr.reason)
+        }
+      }
+      case ssa.Jump {
+        if expr.target().index <= expr.parent.index {
+          writeComment(this, expr, "loop-footer")
+        }
+      }
+      case ssa.JumpIf {
+        if expr.iftrue().index <= expr.parent.index {
+          writeComment(this, expr, "loop-footer on true branch")
+        } else if expr.ifalse().index <= expr.parent.index {
+          writeComment(this, expr, "loop-footer on false branch")
+        }
+      }
+      case ssa.Load {
+        switch expr.reason {
+          case ssa.MoveReason.None{} // Do nothing
+          case ssa.MoveReason.Legalizing writeComment(this, expr, "regalloc-legalizing")
+          default assert with nameof(expr.reason)
+        }
+      }
+    }
+
+    fn writeComment(writer, expr, comment) {
+      if expr.uses.length {
+        writer.write("; ").write(comment)
+      } else {
+        writer.write(" // ").write(comment)
+      }
+    }
+  }
+
+  fn dumpPredecessors(this, block) {
+    if const uses = block.uses.length {
+      this.writeInt32(uses).write(" predecessor")
+      if uses > 1 {
+        this.write("s")
+      }
+      this.write(": ")
+      var i = 0
+      each predecessor in block.predecessors() {
+        if i++ {
+          this.write(", ")
+        }
+        this.write("bb.").writeInt32(predecessor.index)
+        if predecessor.index >= block.index {
+          this.write(" (loop-header)")
+        }
+      }
+      if uses == 1 {
+        const predecessor = block.uses.items[0].user.parent
+        const        term = predecessor.body.last
+        if predecessor.qnext == block && term is ssa.Jump {
+          this.write("; fallthrough")
+        }
+      }
+    } else {
+      this.write("dead-block")
+      //println("@@dead-block #{this.function.name}.f#{this.function.index} bb.#{block.index}")
+    }
+  }
+
+  fn dump(this, expr) {
+    //expr.syncCheck()
+    switch expr {
+      case ssa.Value                this.dumpNop(expr)
+      case ssa.ElementAt            this.dumpElementAt(expr)
+      case ssa.Store                this.dumpStore(expr)
+      case ssa.Fill                 this.dumpFill(expr)
+      case ssa.Assign               this.dumpAssign(expr)
+      case ssa.Exchange             this.dumpExchange(expr)
+      case ssa.XAdd                 this.dumpXAdd(expr)
+
+      case ssa.RetVal               this.dumpRetVal(expr)
+      case ssa.Local                this.dumpLocal(expr)
+      case ssa.Parameter            this.dumpParameter(expr)
+
+      case ssa.Compare              this.dumpCompare(expr)
+      case ssa.CompareExchange      this.dumpCompareExchange(expr)
+
+      case ssa.Assert               this.dumpAssert(expr)
+      case ssa.Pause                this.dumpPause(expr)
+
+      case ssa.Yield                this.dumpYield(expr)
+      case ssa.Jump                 this.dumpJump(expr)
+      case ssa.JumpIf               this.dumpJumpIf(expr)
+      case ssa.Return               this.dumpReturn(expr)
+
+      case ssa.Load                 this.dumpLoad(expr)
+      case ssa.Argument             this.dumpArgument(expr)
+      case ssa.Address              this.dumpAddress(expr)
+      case ssa.Decrement            this.dumpDecrement(expr)
+      case ssa.Increment            this.dumpIncrement(expr)
+      case ssa.Negate               this.dumpNegate(expr)
+      case ssa.BitwiseNot           this.dumpBitwiseNot(expr)
+      case ssa.SignExtend           this.dumpSignExtend(expr)
+      case ssa.ZeroExtend           this.dumpZeroExtend(expr)
+      case ssa.NarrowingCast        this.dumpNarrowingCast(expr)
+      case ssa.NumericCast          this.dumpNumericCast(expr)
+      case ssa.BitCast              this.dumpBitCast(expr)
+      case ssa.Round                this.dumpRound(expr)
+      case ssa.SquareRoot           this.dumpSquareRoot(expr)
+      case ssa.Abs                  this.dumpAbs(expr)
+
+      case ssa.Or                   this.dumpOr(expr)
+      case ssa.XOr                  this.dumpXOr(expr)
+      case ssa.And                  this.dumpAnd(expr)
+      case ssa.LeftShift            this.dumpLeftShift(expr)
+      case ssa.RightShift           this.dumpRightShift(expr)
+      case ssa.UnsignedRightShift   this.dumpUnsignedRightShift(expr)
+      case ssa.Subtract             this.dumpSubtract(expr)
+      case ssa.Add                  this.dumpAdd(expr)
+      case ssa.Remainder            this.dumpRemainder(expr)
+      case ssa.DivRem               this.dumpDivRem(expr)
+      case ssa.Divide               this.dumpDivide(expr)
+      case ssa.Multiply             this.dumpMultiply(expr)
+      case ssa.Min                  this.dumpMin(expr)
+      case ssa.Max                  this.dumpMax(expr)
+      case ssa.RotateLeft           this.dumpRotateLeft(expr)
+      case ssa.RotateRight          this.dumpRotateRight(expr)
+
+      case ssa.Call                 this.dumpCall(expr)
+      case ssa.Phi                  this.dumpPhi(expr)
+
+      default assert with nameof(expr)
+    }
+  }
+
+
+  fn dumpStringAtAddress(this, expr) {
+    // {expr} is address of a string if it is of the form: data[string][0]
+    return if expr.operands.length < 2
+    // 2nd operand is a: static string:[Char × n]
+    if const node = expr.operands.items[1].isaNode() {
+      switch node {
+        case ssa.Global {
+          if const  array = node.type.isanArray() {
+            if const  str = array.string.utf8 {
+              const start = str.text
+              const   end = start + str.length
+              var     pos = start
+              for ; pos < end; ++pos {
+                break if *pos == '\r' || *pos == '\n'
+              }
+              const value = string{ text = start, length = pos - start }
+              this.write("; \"").write(value).write("\"")
+              if pos < end {
+                this.write("...")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+
+  fn dumpNop(this, expr) {
+    this.write("nop")
+  }
+
+
+  fn dumpElementAt(this, expr) {
+    this.dumpDst(expr)
+    for i, operand in expr.operands {
+      if i {
+        this.write("[")
+      }
+      this.dumpOperand(operand)
+      if i {
+        this.write("]")
+      }
+    }
+  }
+
+
+  fn dumpStore(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" = ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpFill(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" = ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpAssign(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" = ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpExchange(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" ⟵⟶ ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpXAdd(this, expr) {
+    assert expr.operands.length == 2
+    this.write("xadd ")
+    this.dumpOperand(expr.operands.items[0])
+    this.write(", ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpRetVal(this, expr) {
+    assert expr.operands.length == 0
+    this.dumpDst(expr)
+    this.write("noinit")
+  }
+
+
+  fn dumpLocal(this, expr) {
+    assert expr.operands.length == 0
+    this.write("local ").writeName(expr.name).write(".").writeInt32(expr.index)
+    this.write(" @ ").writeInt32(expr.localIndex)
+  }
+
+
+  fn dumpParameter(this, expr) {
+    assert expr.operands.length == 0
+    this.write("parameter ")
+    if expr.reg.isValid() {
+      this.dumpRegister(expr.reg, expr.type.size()).write(".")
+    }
+    this.writeName(expr.name).write(".").writeInt32(expr.index)
+  }
+
+
+  fn dumpCompare(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.write("cmp ")
+    this.dumpOperand(expr.operands.items[0])
+    switch expr.op {
+      case ssa.Condition.Equal
+        this.write(" == ")
+      case ssa.Condition.NotEqual
+        this.write(" != ")
+      case ssa.Condition.Less, ssa.Condition.Below
+        this.write(" < ")
+      case ssa.Condition.LessOrEqual, ssa.Condition.BelowOrEqual
+        this.write(" <= ")
+      case ssa.Condition.Greater, ssa.Condition.Above
+        this.write(" > ")
+      case ssa.Condition.GreaterOrEqual, ssa.Condition.AboveOrEqual
+        this.write(" >= ")
+      default
+        this.write(nameof(expr.op))
+    }
+    this.dumpOperand(expr .operands.items[1])
+  }
+
+
+  fn dumpCompareExchange(this, expr) {
+    assert expr.operands.length == 3
+    this.dumpDst(expr)
+    this.write("cmpxchg ")
+    this.dumpOperand(expr.operands.items[0])
+    this.write(", ")
+    this.dumpOperand(expr .operands.items[1])
+    this.write(", ")
+    this.dumpOperand(expr .operands.items[2])
+  }
+
+
+  fn dumpAssert(this, expr) {
+    assert expr.operands.length == 0
+    this.write("assert")
+  }
+
+
+  fn dumpPause(this, expr) {
+    assert expr.operands.length == 0
+    this.write("pause")
+  }
+
+
+  fn dumpYield(this, expr) {
+    assert expr.operands.length == 0
+    this.write("yield")
+  }
+
+
+  fn dumpJump(this, expr) {
+    //  goto {target}
+    assert expr.operands.length == 1
+
+    const  block = expr.parent
+    const target = expr.target()
+
+    assert target.index > 0
+
+    if target == block.qnext {
+      this.write("fallthrough")
+    } else {
+      this.write("goto ")
+      this.dumpOperand(expr.operands.items[ssa.op1])
+    }
+  }
+
+
+  fn dumpJumpIf(this, expr) {
+    //  goto {iftrue} if {condition} else goto {ifalse}
+    assert expr.operands.length == 3
+
+    const     block = expr.parent
+    const    iftrue = expr.iftrue()
+    const    ifalse = expr.ifalse()
+    const condition = expr.condition()
+
+    assert iftrue != ifalse
+    assert ifalse == block.qnext
+    assert iftrue.index > 0
+
+    this.write("goto ")
+    this.dumpOperand(expr.operands.items[ssa.op1])
+    this.write(" if ")
+    this.dumpOperand(condition)    
+    /*this.write(" else continue with ")
+    this.dumpOperand(expr.operands.items[ssa.op3])*/
+    if condition.isanImmediate() {
+      this.write(" /* dead-jump */")
+    }
+  }
+
+
+  fn dumpReturn(this, expr) {
+    assert expr.operands.length == 1
+    this.write("return ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpLoad(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpArgument(this, expr) {
+    if expr.operands.length == 1 {
+      this.write("argument ")
+      this.dumpDst(expr)
+      this.dumpOperand(expr.operands.items[0])
+    } else {
+      this.write("stack argument ").dumpValueName(expr)
+    }
+  }
+
+
+  fn dumpAddress(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("&")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpDecrement(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("--")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpIncrement(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("++")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpNegate(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("-")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpBitwiseNot(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("~")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpSignExtend(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("signextend ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpZeroExtend(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("zeroextend ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpNarrowingCast(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("narrow ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpNumericCast(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("numericast ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpBitCast(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("bitcast ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpRound(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    switch expr.mode {
+      case ssa.RoundingMode.ToNearestEven this.write("round to nearest even ")
+      case ssa.RoundingMode.Down this.write("rounddown ")
+      case ssa.RoundingMode.Up this.write("roundup ")
+      case ssa.RoundingMode.TowardZero this.write("truncate ")
+    }
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpSquareRoot(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("sqrt ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpAbs(this, expr) {
+    assert expr.operands.length == 1
+    this.dumpDst(expr)
+    this.write("abs ")
+    this.dumpOperand(expr.operands.items[0])
+  }
+
+
+  fn dumpOr(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" | ")
+    this.dumpOperand(expr.operands.items[1])
+
+  }
+
+
+  fn dumpXOr(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" ^ ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpAnd(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" & ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpLeftShift(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" << ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpRightShift(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" >> ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpUnsignedRightShift(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" >>> ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpSubtract(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" - ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpAdd(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" + ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpRemainder(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" % ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpDivRem(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" ÷% ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpDivide(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" ÷ ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpMultiply(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.dumpOperand(expr.operands.items[0])
+    this.write(" × ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpMin(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.write("min ")
+    this.dumpOperand(expr.operands.items[0])
+    this.write(", ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpMax(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.write("max ")
+    this.dumpOperand(expr.operands.items[0])
+    this.write(", ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpRotateLeft(this, expr) {
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.write("rotateleft ")
+    this.dumpOperand(expr.operands.items[0])
+    this.write(", ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpRotateRight(this, expr) {
+    // {dst} ⟵ rotateright {value}, {times}
+    assert expr.operands.length == 2
+    this.dumpDst(expr)
+    this.write("rotateright ")
+    this.dumpOperand(expr.operands.items[0])
+    this.write(", ")
+    this.dumpOperand(expr.operands.items[1])
+  }
+
+
+  fn dumpCall(this, expr) {
+    // {dst} ⟵ call {callee} with {args} and {dstrax}
+    assert expr.operands.length > 0
+    this.dumpDst(expr)
+    this.write("call ")
+    this.dumpOperand(expr.operands.items[0]) // {callee}
+    this.write(" with (")
+    each i, argument in expr.arguments() {
+      if i {
+        this.write(", ")
+      }
+      this.dumpOperand(argument)
+    }
+    this.write(")")
+    if const dstrax = expr.dstrax() {
+      this.write(" and ")
+      this.dumpOperand(dstrax)
+    }
+  }
+
+
+  fn dumpPhi(this, expr) {
+    const block = expr.parent as ssa.Block*
+    assert expr.operands.length == block.uses.length
+    this.dumpDst(expr)
+    this.write("phi(")
+    for i, operand in expr.operands {
+      if i {
+        this.write(", ")
+      }
+      this.dumpOperand(operand)
+      if operand.value.node == expr {
+        this.write(" /*pathological*/")
+        //println("@@*pathological* #{this.function.name} t.#{expr.index}")
+      }
+      const predecessor = block.uses.items[i].user.parent as ssa.Block*
+      this.write(" from bb.").writeInt32(predecessor.index)
+    }
+    this.write(")")
+    if !expr.operands.length {
+      this.write(" /*empty-phi*/")
+      println("@@*empty-phi* #{this.function.name}")
+    }
+  }
+
+
+  //------------------------------------------------------------------------------------------------------
+  fn dumpValueName(this, expr) {
+    if expr.name {
+      this.writeName(expr.name)
+    } else {
+      this.write("t")
+    }
+    this.write(".").writeInt32(expr.index)
+  }
+
+
+  fn dumpDst(this, expr):this {
+    if expr.reg.isValid() {
+      this.dumpRegisterAndName(expr.reg, expr).write(" ⟵ ")
+    } else {
+      this.dumpValueName(expr)
+      switch expr {
+        case ssa.ElementAt  this.write(" · ")
+        default             this.write(" ⟵ ")
+      }
+    }
+  }
+
+
+  fn dumpRegisterAndName(this, reg, expr) {
+    this.dumpRegister(reg, expr.type.size()).write(".")
+    if expr.name {
+      this.write(expr.name).write(".")
+    }
+    this.writeInt32(expr.index)
+  }
+
+
+  fn dumpRegister(this, reg, size):this {
+    import RegKind from ssa
+    switch const kind = reg.regKind() {
+      case RegKind.None {
+        this.write("<reg-error>")
+      }
+      case RegKind.Gpr {
+        this.writeGpr(reg.name(), size)
+      }
+      case RegKind.Xmm {
+        this.writeXmm(reg.name(), size)
+      }
+      case RegKind.Immediate {
+        this.writeHex(reg.immediate())
+      }
+      case RegKind.RipRelative { // [ rip + displacement ]
+        this.write("[rip")
+        if const displacement = reg.displacement() {
+          this.writeDisplacement(displacement)
+        }
+        this.write("]")
+      }
+      case RegKind.RspRelative { // [ rsp + displacement ]
+        this.write("[rsp")
+        if const displacement = reg.displacement() {
+          this.writeDisplacement(displacement)
+        }
+        this.write("]")
+      }
+      case RegKind.HeapAddress {
+        var done = false
+        this.write("[")        
+        if reg.hasBase() {
+          this.writeGpr(reg.base(), SIZE_OF_POINTER)
+          if reg.hasIndex() {
+            this.write(" + ").writeGpr(reg.index(), SIZE_OF_POINTER)
+            if const scale = reg.scale() {
+              this.write(" × ")
+              this.writeScale(scale)              
+            }
+          }
+        } else if reg.hasIndex() {
+          this.writeGpr(reg.index(), SIZE_OF_POINTER)
+          const scale = reg.scale()
+          this.write(" × ").writeScale(scale)
+        } else {
+          this.writeInt32(reg.displacement())
+          done = true
+        }
+        if !done {
+          if const displacement = reg.displacement() {
+            this.write(" + ")
+            this.writeInt32(displacement)
+          }
+        }
+        this.write("]")
+      }
+      default assert with nameof(kind)
+    }
+  }
+
+  fn writeGpr(this, name, size):this {
+    assert name >= 0 && name < ssa.gpr8Names.length
+    switch size {
+      case SIZE_OF_BYTE    this.write(ssa.gpr8Names[name])
+      case SIZE_OF_WORD    this.write(ssa.gpr16Names[name])
+      case SIZE_OF_INT     this.write(ssa.gpr32Names[name])
+      case SIZE_OF_POINTER this.write(ssa.gpr64Names[name])
+      default assert with "#{size}"
+    }
+  }
+
+  fn writeXmm(this, name, size):this {
+    assert name >= 0 && name < ssa.xmmNames.length
+    switch size {
+      case SIZE_OF_FLOAT, SIZE_OF_DOUBLE, SIZE_OF_XMM
+        this.write(ssa.xmmNames[name])
+      case SIZE_OF_YMM
+        this.write(ssa.ymmNames[name])
+      case SIZE_OF_ZMM
+        this.write(ssa.zmmNames[name])
+      default assert with "#{size}"
+    }
+  }
+
+  fn writeScale(this, scale):this {
+    switch scale {
+      case 0b00 this.writeInt32(1)
+      case 0b01 this.writeInt32(2)
+      case 0b10 this.writeInt32(4)
+      case 0b11 this.writeInt32(8)
+      default assert with "#{scale}"
+    }
+  }
+
+  fn writeDisplacement(this, displacement) {    
+    if displacement < 0 {
+      this.write(" - ")
+    } else {
+      this.write(" + ")
+    }
+    this.writeInt32(displacement)
+  }
+
+  fn dumpOperand(this, operand) {
+    const imm = operand.value.immediate
+    if const node = operand.isaNode() {
+      switch node {
+        case ssa.Program     this.write("program")
+        case ssa.DataSection this.write("data")
+        case ssa.CodeSection this.write("code")
+        case ssa.Struct      this.write("<operand-struct>")
+        case ssa.Extern      this.writeName(node.name)
+        case ssa.Array       this.write("<operand-array>")
+        case ssa.Function    this.writeName(node.name).write("@f").writeInt32(node.index)
+        case ssa.StackFrame  this.write("stack")
+
+        case ssa.Field      this.writeName(node.name)
+        case ssa.Global     this.writeName(node.name)
+
+        case ssa.Block      this.write("bb.").writeInt32(node.index)
+
+        case ssa.ElementAt {
+          if operand.reg.isValid() {
+            this.dumpRegisterAndName(operand.reg, node)
+            //this.dumpValueName(node).dumpRegister(operand.reg, node.type.size())
+          } else {
+            this.write("[").dumpValueName(node).write("]")
+          }
+        }
+
+        default {
+          if operand.reg.isValid() {
+            this.dumpRegisterAndName(operand.reg, node)
+          } else {
+            this.dumpValueName(node)
+          }
+        }
+      }
+    } else {
+      this.dumpConstant(imm)
+    }
+  }
+
+  fn dumpConstant(this, imm) {
+    const type = imm.type
+    if type.isVoid() {
+      this.write("void")
+    } else if type.isaPointer() {
+      if imm.value.u64 {
+        this.writeHex(imm.value.u64).write("*")
+      } else {
+        this.write("null")
+      }
+    } else if type.isaFloat() {
+      this.writeSuffixedDouble(imm.value.f32 as Double, type)
+    } else if type.isaDouble() {
+      this.writeSuffixedDouble(imm.value.f64, type)
+    } else if type.isSigned() {
+      this.writeSuffixedInt(imm)
+    } else if type.isUnsigned() {
+      this.writeSuffixedUInt(imm)
+    } else if imm.value.u64 {
+      this.write("unknownconstantof ")
+      this.dumpType(imm.type).write(" ")
+      this.writeHex(imm.value.u64)
+    } else {
+      this.dumpType(imm.type)
+      this.write("{}")
+    }
+  }
+
+  fn dumpType(this, type):this {
+    switch type.kind {
+      case ssa.Kind.Unknown this.write("<error>")
+      case ssa.Kind.Symbol  this.dumpSymbol(type.symbol)
+      default if type.kind >= ssa.Kind.Void && type.kind <= ssa.Kind.Int64x4 {
+        this.write(nameof(type.kind))
+      } else {
+        this.write("<unknown-type-kind> ").write(nameof(type.kind))
+      }
+    }
+    for var i = 0; i < type.ptrs; ++i {
+      this.write("*")
+    }
+  }
+
+  fn dumpSymbol(this, symbol) {
+    assert symbol
+    switch symbol {
+      case ssa.Program     this.write("program")
+      case ssa.DataSection this.write("data")
+      case ssa.CodeSection this.write("code")
+      case ssa.Struct      this.write("struct ").writeName(symbol.name)
+      case ssa.Array {
+        if symbol.string.utf8 {
+          this.write("string")
+        } else if symbol.string.utf16 {
+          this.write("wstring")
+        }
+        this.write("[").writeInt32(symbol.length).write(" × ").dumpType(symbol.element).write("]")
+      }
+      case ssa.Extern {
+        //assert symbol.name
+        this.write("extern ").write(symbol.name).write("(")
+        for i, parameter in symbol.parameters {
+          this.write(", ") if i
+          this.dumpType(parameter)
+        }
+        this.write(") → ").dumpType(symbol.fnreturn)
+      }
+      case ssa.Function {
+        if symbol.isaFile {
+          this.write("file ")
+        } else {
+          this.write("fn ")
+        }
+        //assert symbol.name
+        this.write(symbol.name).write("(")
+        for i, parameter in symbol.parameters {
+          this.write(", ") if i
+          if const name = parameter.name {
+            this.write(name)
+          } else {
+            this.write("<anon-parameter>")
+          }
+          this.write(": ").dumpType(parameter.type)
+        }
+        this.write(") → ").dumpType(symbol.fnreturn)
+      }
+      case ssa.StackFrame {
+        //assert symbol.name
+        this.write("frame ").write(symbol.name)
+      }
+      default this.write(nameof(symbol))
+    }
+  }
+}

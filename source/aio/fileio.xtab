@@ -1,0 +1,360 @@
+import completionPort as iocp from iocp
+
+struct FileView {
+  readonly mappingObject = null
+  readonly baseAddress   = Char*{}
+
+  fn open(this, file, skipByteOrderMark = true) {
+    this.mappingObject = os.CreateFileMappingA(file.handle, null, os.PAGE_READONLY, 0, 0, null)
+    if !this.mappingObject {
+      println("os.CreateFileMappingA failed with #{os.GetLastError()}")
+      return ("", false)
+    }
+    this.baseAddress = Char*{ os.MapViewOfFile(this.mappingObject, os.FILE_MAP_READ, 0, 0, file.size()) }
+    if !this.baseAddress {
+      println("os.MapViewOfFile failed with #{os.GetLastError()}")
+      return ("", false)
+    }    
+    const size = file.size()
+    assert size < 0xFFFFFFFFu64 with "#{size} < #{0xFFFFFFFFu64}"
+    if skipByteOrderMark {
+      const (bomlen, bomkind) = fs.readByteOrderMark(this.baseAddress, size)
+      assert (!bomlen && !bomkind) || (bomlen == 3 && bomkind == fs.UTF8_BYTE_ORDER_MARK)
+      return (string{ text = this.baseAddress + bomlen, length = size - bomlen }, true)
+    }
+    return (string{ text = this.baseAddress, length = size }, true)
+  }
+  fn dispose(this) {
+    if this.mappingObject {
+      assert os.CloseHandle(this.mappingObject) with "os.CloseHandle failed with #{os.GetLastError()}"
+      this.mappingObject = null
+    }
+    if this.baseAddress {
+      assert os.UnmapViewOfFile(this.baseAddress) with "os.UnmapViewOfFile failed with #{os.GetLastError()}"
+      this.baseAddress = null
+    }
+  }
+}
+
+struct File {
+  readonly handle = os.INVALID_HANDLE_VALUE
+  readonly isOverlapped = 0u32
+
+  fn isOpen(this)   = this.handle != os.INVALID_HANDLE_VALUE
+  fn isClosed(this) = this.handle == os.INVALID_HANDLE_VALUE
+
+  fn dispose(this) {
+    if this.handle != os.INVALID_HANDLE_VALUE {
+      assert os.CloseHandle(this.handle) with 
+        "os.CloseHandle failed with #{os.GetLastError()}"
+      this.handle = os.INVALID_HANDLE_VALUE
+      if this.isOverlapped {
+        iocp.disassociate(this.handle)
+      }
+    }
+    this.isOverlapped = false
+  }
+
+
+  fn truncate(this) {
+    if !os.SetFilePointerEx(this.handle, 0i64, null, os.FILE_BEGIN) {
+      println("os.SetFilePointerEx failed with #{os.GetLastError()}")
+      return false
+    } if !os.SetEndOfFile(this.handle) {
+      println("os.SetFilePointerEx failed with #{os.GetLastError()}")
+      return false
+    }
+    return true
+  }
+
+
+  fn flush(this) {
+    assert os.FlushFileBuffers(this.handle) with 
+      "os.FlushFileBuffers failed with #{os.GetLastError()}"
+  }
+
+
+  fn size(this) {
+    const sz = 0i64
+    assert os.GetFileSizeEx(this.handle, &sz) with "os.GetFileSizeEx failed with #{os.GetLastError()}"
+    return sz
+  }
+
+
+  fn name(this) {
+    const s = String{}
+    s.reserve(os.MAX_PATH)
+    const required = os.GetFinalPathNameByHandleA(this.handle, s.text, 0, 0)
+    assert required with "os.GetFinalPathNameByHandleA failed with #{os.GetLastError()}"
+    s.reserve(required)
+    const length = os.GetFinalPathNameByHandleA(this.handle, s.text, s.capacity, 0)
+    assert length == required
+    s.setLength(required)
+    return s
+  }
+
+  fn readAll(this, s) {
+    const sz = this.size()
+    return true if sz <= 0
+    s.reserve(sz)
+    const bytesRead = 0
+    if !os.ReadFile(this.handle, s.text + s.length, sz, &bytesRead, null) {
+      println("os.ReadFile failed with #{os.GetLastError()}")
+      return false
+    }
+    assert bytesRead == sz
+    s.setLength(s.length + sz)
+    return true
+  }
+
+
+  fn readLines(this) {
+    var line      = ""
+    auto view     = FileView{}
+    var  (s, sok) = view.open(this)
+    if !sok {
+      return (&line, false)
+    }
+    const end  = s.end()
+    var   pos  = s.text
+    var   mark = s.text
+    for pos < end {
+      if *pos == '\r' && pos + 1 < end && pos[1] == '\n' {
+        line.setFromRange(mark, pos)
+        yield (&line, true)
+        pos += 2
+        mark = pos
+      } else if *pos == '\n' {
+        line.setFromRange(mark, pos)
+        yield (&line, true)
+        ++pos
+        mark = pos
+      } else {
+        ++pos
+      }
+    }
+    line.setFromRange(mark, pos)
+    yield (&line, true)
+  }
+
+
+  async fn readLinesAsync(this) {
+    assert 0
+  }
+
+
+  fn append(this, buffer) {
+    return this.appendBytes(buffer.text, buffer.length)
+  }
+
+
+  fn appendBytes(this, bytes, length) {
+    assert length >= 0
+    return true if !length
+    assert bytes
+    const bytesWritten = 0
+    if !os.WriteFile(this.handle, bytes, length, &bytesWritten, null) {
+      println("os.WriteFile failed with #{os.GetLastError()}")
+      return false
+    }
+    if bytesWritten != length {
+      println("os.WriteFile failed to write all bytes: bytesWritten = #{bytesWritten}; \
+        requiredToBeWritten = #{length}")
+      return false
+    }
+    return true
+  }
+
+
+  fn appendBytesAsHex(this, bytes, length, bytesPerGroup = 0, groupsPerLine = 0, upper = true) {
+    static hex = [
+      [ '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' ],
+      [ '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' ]
+    ]
+    assert length >= 0
+    return true if !length
+    assert bytes
+    var hilo = Char[ 2 ]
+    var    i = 0
+    if bytesPerGroup > 0 && groupsPerLine > 0 {
+      var bytesWritten = 0
+      var       groups = 0
+      for ; i < length; ++i {
+        const byte = bytes[i] as Byte
+        hilo[0] = hex[upper][(byte >> 4) & 0xF]
+        hilo[1] = hex[upper][byte        & 0xF]
+        break if !this.appendBytes(hilo.text, hilo.length)
+        if ++bytesWritten >= bytesPerGroup {
+          bytesWritten = 0
+          groups++
+          if groups < groupsPerLine {
+            break if !this.append(" ")
+          } else {
+            groups = 0
+            break if !this.append("\r\n")
+          }
+        }
+      }
+    } else for ; i < length; ++i {
+      const byte = bytes[i] as Byte
+      hilo[0] = hex[upper][(byte >> 4) & 0xF]
+      hilo[1] = hex[upper][byte        & 0xF]
+      break if !this.appendBytes(hilo.text, hilo.length)
+    }
+    return i == length
+  }
+
+
+  async fn appendAsync(this, buffer) {
+    fn write(handle, buf, resumable) {
+      return {
+        overlapped = os.OVERLAPPED{},
+        iocallback = fn(self, bytesTransferred, hResult) {
+          if self.isOpen {
+            self.resumable.iocallback(bytesTransferred, hResult)
+          } else {
+            self.isOpen = true
+            self.overlapped.setOffsets(0xFFFFFFFF, 0xFFFFFFFF)
+            const result = os.WriteFile(self.handle, self.buf.text, self.buf.length, null, self)
+            if !result {
+              hResult = os.GetLastError()
+              if hResult != os.ERROR_IO_PENDING {
+                self.resumable.iocallback(bytesTransferred, hResult)
+              }
+            }
+          }
+        },
+        handle = handle,
+        resumable = resumable,
+        buf = buf,
+        isOpen = 0
+      }
+    }
+    for {
+      __ioresult__ = os.S_OK
+      __iotransferred__ = 0
+      if iocp.isClosed() {
+        __ioresult__ = os.WSAESHUTDOWN
+      } else for var written = 0; written < buffer.length; {
+        const buf = string{ text = buffer.text + written, length = buffer.length - written  }
+        const writer = write(this.handle, buf, self)
+        await aio.run(writer)
+        break if __ioresult__
+        written += __iotransferred__
+        assert written <= buffer.length with 
+          "__iotransferred__ = #{__iotransferred__}\r\n\t\
+          __overlapped__.Internal = #{__overlapped__.Internal}\r\n\t\
+          __overlapped__.InternalHigh = #{__overlapped__.InternalHigh}\r\n\t\
+          written = #{written};\r\n\t\
+          buffer.length = #{buffer.length}\r\n\t\
+          buf.length = #{buf.length}\r\n\t\
+          buffer = \r\n#{buffer}\r\n\t\
+          buf = \r\n#{buf}"
+      }
+      if __ioresult__ {
+        assert __iotransferred__ == 0  with
+          "__iotransferred__ = #{__iotransferred__}" // IO failed.
+        println("os.WriteFile failed with #{__ioresult__}")
+        break
+      }
+      yield __iotransferred__
+    }
+  }
+
+
+  fn openWithSystemViewer(this) {
+    auto s = this.name()
+    return os.system(s.text)
+  }
+}
+
+fn createTemporaryFile(isOverlapped, prefix = "tmp") {
+  //const pathText = Char[ os.MAX_PATH + 1 ]
+  //const pathLength = os.GetTempPathA(pathText.pathLength, &pathText[0])
+  //assert pathLength with "os.GetTempPathA failed with #{os.GetLastError()}"
+  const tempNameArray = Char[ os.MAX_PATH]
+  const dot = ""
+  const unique = os.GetTempFileNameA(dot.text, prefix.text, 0, tempNameArray)
+  assert unique with "os.GetTempFileNameA failed with #{os.GetLastError()}"
+  auto path = fs.currentFolderPath()
+  path.append("\\tmp")
+  fs.ensureFolderExists(path)
+  const tempName = string.fromArray(tempNameArray)
+  path.append(tempName)
+  const handle = os.CreateFileA(path.text, 
+                                os.GENERIC_READ_WRITE,
+                                os.FILE_SHARE_READ_WRITE,
+                                null,
+                                os.CREATE_NEW,
+                                os.FILE_ATTRIBUTE_NORMAL | os.FILE_ATTRIBUTE_TEMPORARY 
+                                                         | (os.FILE_FLAG_OVERLAPPED if isOverlapped else 0) 
+                                                         | os.FILE_FLAG_DELETE_ON_CLOSE,
+                                null)
+  assert handle != os.INVALID_HANDLE_VALUE with "os.CreateFile failed with #{os.GetLastError()} for '#{path}'"
+  if isOverlapped {
+    iocp.associate(handle)
+  }
+  return (File{ handle = handle, isOverlapped = isOverlapped }, handle != os.INVALID_HANDLE_VALUE)
+}
+
+fn openTemp(prefix = "tmp") {
+  return createTemporaryFile(false, prefix)
+}
+
+fn openRead(path) {
+  return open(path, 
+              os.OPEN_EXISTING,
+              os.GENERIC_READ,
+              os.FILE_SHARE_READ_WRITE,  
+              os.FILE_ATTRIBUTE_NORMAL)
+}
+
+fn openReadAsync(path) {
+  return open(path, 
+              os.OPEN_EXISTING,
+              os.GENERIC_READ,
+              os.FILE_SHARE_READ_WRITE, 
+              os.FILE_ATTRIBUTE_NORMAL | os.FILE_FLAG_OVERLAPPED)
+}
+
+fn openWrite(path) {
+  return open(path, 
+              os.OPEN_EXISTING,
+              os.GENERIC_WRITE,
+              os.FILE_SHARE_READ_WRITE,  
+              os.FILE_ATTRIBUTE_NORMAL)
+}
+
+fn openTruncated(path) {
+  return open(path, 
+              os.CREATE_ALWAYS,
+              os.GENERIC_WRITE,
+              os.FILE_SHARE_READ_WRITE,  
+              os.FILE_ATTRIBUTE_NORMAL)
+}
+
+fn createIfNotExists(path) {
+  return open(path, 
+              os.CREATE_NEW,
+              os.GENERIC_READ_WRITE,
+              os.FILE_SHARE_READ_WRITE,  
+              os.FILE_ATTRIBUTE_NORMAL)
+}
+
+fn open(path, disposition, accessOpts, shareOpts, flagsAndAttributes) {
+  const handle = os.CreateFileA(path.text, 
+                                accessOpts,
+                                shareOpts,
+                                null,
+                                disposition,
+                                flagsAndAttributes,
+                                null)
+  const isOverlapped = flagsAndAttributes & os.FILE_FLAG_OVERLAPPED
+  assert !isOverlapped
+  if handle == os.INVALID_HANDLE_VALUE {
+    println("os.CreateFile failed with #{os.GetLastError()} for '#{path}'")
+  } else if isOverlapped {
+    iocp.associate(handle)
+  }
+  return (File{ handle = handle, isOverlapped = isOverlapped }, handle != os.INVALID_HANDLE_VALUE)
+}

@@ -1,0 +1,590 @@
+export Type from sqlite
+export BarChart from _bar
+export PointsChart from _points
+export Series from _series
+export Axis from _axis
+
+
+define CHAR_BOX_WIDTH   8f
+define CHAR_BOX_HEIGHT 15f
+
+define MAJOR_TICKS_SIZE 7.5f
+define MINOR_TICKS_SIZE 2.5f
+
+define SIZE_ALLOWANCE 1.0f
+
+define MIN_CHART_SIZE 344f
+
+
+fn computeTextSize(s) {
+  return Size {
+    width  = s.length * CHAR_BOX_WIDTH * SIZE_ALLOWANCE,
+    height = CHAR_BOX_HEIGHT
+  }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+enum Color {
+  Black = 0x0,
+  Red   = 0x00_00_FF,
+
+  fn rgb(this) {
+    return {
+      b = (this >> 0x10) & 0xFF,
+      g = (this >> 0x8) & 0xFF,
+      r = this & 0xFF,
+      format = fn(self, s, fmt = "") {
+        s.append("rgb(#{self.r},#{self.g},#{self.b})")
+      }
+    }
+  },
+
+  fn rgba(this) {
+    return {
+      b = (this >> 0x10) & 0xFF,
+      g = (this >> 0x8) & 0xFF,
+      r = this & 0xFF,
+      a = 1f,
+      format = fn(self, s, fmt = "") {
+        s.append("rgba(#{self.r},#{self.g},#{self.b},#{self.a})")
+      }
+    }
+  }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+enum Location {
+  None,
+  Top,
+  Right,
+  Bottom,
+  Left,
+  Center
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+enum Direction {
+  None,
+  TopToBottom,
+  BottomToTop,
+  LeftToRight,
+  RightToLeft
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+enum Orientation {
+  None,
+  Vertical,
+  Horizontal
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+union Value {
+  const str  = string*{}
+  const i64  = 0i64
+  const f64  = 0.0
+  const date = Date{}
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+struct Data {
+  var value = Value{}
+  var type  = Type{}
+
+  fn invalidate(this) {
+    this.type = Type.Unknown
+  }
+
+  fn isValid(this)   = this.type != Type.Unknown
+  fn isInvalid(this) = this.type == Type.Unknown
+
+  fn fromInt64(n)  = Data{ type = Type.Int64,  value = Value{ i64 = n }}
+  fn fromDouble(n) = Data{ type = Type.Double, value = Value{ f64 = n }}
+
+  fn computeSize(this, s) {
+    if this.type == Type.Int64 {
+      this.value.i64.format(s.clear())
+    } else if this.type == Type.Double {
+      this.value.f64.format(s.clear())
+    } else if this.type == Type.Text {
+      if this.value.str {
+        return computeTextSize(*this.value.str)
+      } else {
+        s.clear()
+      }
+    } else {
+      assert 0
+    }
+    return computeTextSize(s)
+  }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+struct Range {
+  var max  = Value{}
+  var min  = Value{}
+  var type = Type.Unknown
+
+  fn updateMinMax(this, value) {
+    assert this.type
+    if this.type == Type.Int64 {
+      if value.i64 > this.max.i64 {
+        this.max.i64 = value.i64
+      } else if value.i64 < this.min.i64 {
+        this.min.i64 = value.i64
+      }
+    } else if this.type == Type.Double {
+      if value.f64 > this.max.f64 {
+        this.max.f64 = value.f64
+      } else if value.f64 < this.min.i64 {
+        this.min.f64 = value.f64
+      }
+    } else if this.type == Type.Text {
+      // Do nothing.
+    } else if this.type == Type.Date {
+      if value.date > this.max.date {
+        this.max.date = value.date
+      } else if value.date < this.min.date {
+        this.min.date = value.date
+      }
+    } else {
+      assert 0
+    }
+  }
+
+  fn setMinMax(this, min, max) {
+    assert this.type
+    this.min = min
+    this.max = max
+  }
+
+  fn updateToShowZero(this) {
+    if this.type == Type.Int64 {
+      if this.min.i64 < 0 {
+        if this.max.i64 < 0 {
+          this.max.i64 = 0
+        }
+      } else {
+        this.min.i64 = 0
+      }
+    } else if this.type == Type.Double {
+      if this.min.f64 < 0 {
+        if this.max.f64 < 0 {
+          this.max.f64 = 0
+        }
+      } else {
+        this.min.f64 = 0
+      }
+    }
+  }
+
+  fn startsAtZero(this) {
+    if this.type == Type.Int64 || this.type == Type.Double {
+      return this.min.i64 == 0
+    }
+    return true
+  }
+
+  fn endsAtZero(this) {
+    if this.type == Type.Int64 || this.type == Type.Double {
+      return this.max.i64 == 0
+    }
+    return true
+  }
+
+  fn containsZero(this) {
+    if this.type == Type.Int64 || this.type == Type.Double {
+      return true if this.min.i64 <= 0 && this.max.i64 >= 0
+      return false
+    }
+    return true
+  }
+
+  fn containsZeroExclusive(this) {
+    if this.type == Type.Int64 || this.type == Type.Double {
+      return true if this.min.i64 < 0 && this.max.i64 > 0
+      return false
+    }
+    return true
+  }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+struct Point {
+  var x = 0.0f
+  var y = 0.0f
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+struct Size {
+  var width  = 0.0f
+  var height = 0.0f
+
+  fn format(this, s, fmt = "") {
+    s.append("width = #{this.width}, height = #{this.height}")
+  }
+
+  fn isValid(this)      = this.width > 0.0f && this.height > 0.0f
+  fn isNotValid(this)   = this.width <= 0.0f || this.height <= 0.0f
+  fn expand(this, w, h) = Size{ width = this.width + w, height = this.height + h }
+  fn max(this, w, h)    = Size{ width = math.max(this.width, w), height = math.max(this.height, h) }
+  fn flip(this)         = Size{ width = this.height, height = this.width }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+struct Line {
+  var start = Point{}
+  var end   = Point{}
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+struct Rect {
+  var left   = 0.0f
+  var top    = 0.0f
+  var width  = 0.0f
+  var height = 0.0f
+
+  fn format(this, s, fmt = "") {
+    s.append("x = #{this.left}, y = #{this.top}, width = #{this.width}, height = #{this.height}")
+  }
+
+  fn pos(this)        = Point&{ &this.left }
+  fn size(this)       = Size&{ &this.width }
+  fn bottom(this)     = this.top + this.height
+  fn right(this)      = this.left + this.width
+  fn isValid(this)    = this.width > 0.0f && this.height > 0.0f
+  fn isNotValid(this) = this.width <= 0.0f || this.height <= 0.0f
+
+  fn resize(this, w, h) = Rect{ left   = this.left + w,
+                                top    = this.top + h,
+                                width  = this.width - w * 2f,
+                                height = this.height - h * 2f }
+
+  fn contains(this, x, y) = x >= this.x && x <= (this.x + this.width) &&
+                            y >= this.y && y <= (this.y + this.height)
+  fn middle(this) = Point{ x = this.x + this.width / 2f, y = this.y + this.height / 2f }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+abstract struct Chart {
+  var   axisX   = Axis*{}
+  var   axisY   = Axis*{}
+
+
+  fn dispose(this) {
+
+  }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+struct Figure {
+  const series = List(Series*){}
+  const areas  = List(Area*){}
+  const size   = Size{}
+
+  fn dispose(this) {
+    delete this.series with fn(x) = delete x
+    delete this.areas  with fn(x) { delete x }
+  }
+
+  fn createSeries(this, list, type, name) {
+    assert type
+    const series = new Series{ items = Value*{ list.items }, length = list.length }
+    this.series.append(series)
+    series.range.type = type
+    series.name.append(name)
+    series.computeRange()
+    return series
+  }
+
+  fn mainArea(this) {
+    if this.areas.isEmpty() {
+      this.areas.append(new Area{})
+    }
+    return this.areas.last()
+  }
+
+  async fn render(this) {
+    static minSize = Size{ width = MIN_CHART_SIZE, height = MIN_CHART_SIZE }
+    var    size    = { 
+      top    = Size{}, 
+      right  = Size{}, 
+      left   = Size{}, 
+      bottom = Size{}, 
+      center = Size{},
+      compute = fn(self) {
+        var width  = self.left.width + self.center.width + self.right.width
+        var height = self.top.height + self.center.height + self.bottom.height
+        width  = math.max(width, self.top.width)
+        width  = math.max(width, self.bottom.width)
+        height = math.max(height, self.left.height)
+        height = math.max(height, self.bottom.height)
+        return Size{ width = width, height = height }
+      }
+    }
+    for area in this.areas {
+      area.computeSize(size)
+    }
+    size.center = size.center.max(minSize.width, minSize.height)
+    await each chunk in auto render(this, size) {
+      yield chunk
+    }
+
+    define PLOT_PADDING 34f
+
+    html render(plot, size) {
+      #{
+        const svg = size.compute().expand(PLOT_PADDING, PLOT_PADDING)
+        const rect = Rect{ left   = size.left.width + PLOT_PADDING / 2f,
+                           top    = size.top.height + PLOT_PADDING / 2f,
+                           width  = size.center.width,       
+                           height = size.center.height }
+        const center = rect
+        auto s = String{}
+      }
+      <svg fill="none" width="#{svg.width}" height="#{svg.height}" viewBox="0 0 #{svg.width} #{svg.height}" xmlns="http://www.w3.org/2000/svg">
+      <path stroke="black" d="M 0 0 h #{svg.width} v #{svg.height} h -#{svg.width} z" />
+      #{{
+        for area in plot.areas {
+          await each chunk in auto area.render(s, rect, center) {
+            yield chunk
+          }
+        }
+      }}
+      </svg>
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Area {
+  const title    = String{}
+  const axes     = List(Axis*){}
+  const areas    = List(Area*){}
+  const charts   = List(Chart*){}
+  const size     = Size{}
+  const location = Location.Center
+
+  fn dispose(this) {
+    delete this.title
+    delete this.axes   with fn(x) = delete x
+    delete this.areas  with fn(x): void { delete x }
+    delete this.charts with fn(x) {
+      switch x {
+        case PointsChart delete x
+        case BarChart    delete x
+        default {
+          assert 0
+        }
+      }
+    }
+  }
+
+  fn createPointsChart(this, seriesX, seriesY) {
+    var chart = new PointsChart{ seriesX = seriesX, seriesY = seriesY }
+    this.charts.append(chart as Chart*)
+    return chart
+  }
+
+  fn createBarChart(this) {
+    var chart = new BarChart{}
+    this.charts.append(chart as Chart*)
+    return chart
+  }
+
+  async fn render(this, s, rect, center) {
+    for axis in this.axes {
+      continue if axis.crossSize == 0f
+      if axis.isHorizontal() {
+        await each chunk in auto axis.renderHorizontal(s, rect, center)
+          yield chunk
+      } else {
+        await each chunk in auto axis.renderVertical(s, rect, center)
+          yield chunk
+      }
+    }
+    for chart in this.charts {
+      switch chart {
+        case PointsChart {
+          await each chunk in auto chart.render(s, rect, center)
+            yield chunk
+        }
+        case BarChart {
+          await each chunk in auto chart.render(s, rect, center)
+            yield chunk
+        }
+        default {
+          assert 0
+        }
+      }
+    }
+    for area in this.areas {
+      await each chunk in auto area.render(s, rect, center)
+        yield chunk
+    }
+  }
+
+  fn computeSize(this, size) {
+    this.createAxes()
+    this.computeSizes(size)
+    this.computeAxisDirections()
+  }
+
+  fn createAxes(this): void {
+    for area in this.areas {
+      area.createAxes()
+    }
+    for chart in this.charts {
+      switch chart {
+        case PointsChart {
+          chart.createAxes(this)
+        }
+        case BarChart {
+          chart.createAxes(this)
+        }
+        default {
+          assert 0
+        }
+      }
+    }
+    assert this.axes.length
+    this.distributeAxes()
+  }
+
+  fn computeSizes(this, size): void {
+    for area in this.areas {
+      area.computeSizes(size)
+    }
+    for chart in this.charts {
+      switch chart {
+        case PointsChart {
+          chart.computeSize(size)
+        }
+        case BarChart {
+          chart.computeSize(size)
+        }
+        default {
+          assert 0
+        }
+      }
+    }
+  }
+
+  fn distributeAxes(this) {    
+    auto lefts = List(Axis*){}, rights = List(Axis*){}, tops = List(Axis*){}, bottoms = List(Axis*){}
+    for axis in this.axes {
+      continue if axis.show.fixedLocation
+      switch axis.location {
+        case Location.Top    tops.append(axis)
+        case Location.Right  rights.append(axis)
+        case Location.Bottom bottoms.append(axis)
+        case Location.Left   lefts.append(axis)
+      }
+    }
+    var showHorizontalGrid = 0
+    if lefts.length {
+      if rights.isEmpty() {
+        for var i = lefts.length; --i > 0; {
+          const axis = lefts.items[i]
+          if i & 0x1 {
+            axis.flipLocation()
+          }
+          showHorizontalGrid += axis.show.grid
+        }
+      } else for left in lefts {
+        showHorizontalGrid += left.show.grid
+      }
+    } else if rights.length {
+      for var i = rights.length; --i > 0; {
+        const axis = rights.items[i]
+        if i & 0x1 {
+            axis.flipLocation()
+        }
+        showHorizontalGrid += axis.show.grid
+      }
+    }
+    var showVerticalGrid = 0
+    if tops.length {
+      if bottoms.isEmpty() {
+        for var i = tops.length; --i >= 0; {
+          const axis = tops.items[i]
+          if i & 0x1 {
+            axis.flipLocation()
+          }
+          showVerticalGrid += axis.show.grid
+        }
+      } else for top in tops {
+        showVerticalGrid += top.show.grid
+      }
+    } else {
+        for var i = bottoms.length; --i >= 0; {
+          const axis = bottoms.items[i]
+          if i & 0x1 {
+            axis.flipLocation()
+          }
+          showVerticalGrid += axis.show.grid
+        }
+    }
+    if showHorizontalGrid {
+      if lefts.length {
+        for axis in rights {
+          axis.show.grid = false
+        }
+        for var i = 1; i < lefts.length; ++i {
+          lefts.items[i].show.grid = false
+        }
+      } else for var i = 1; i < rights.length; ++i {
+        rights.items[i].show.grid = false
+      }
+    }
+    if showVerticalGrid {
+      if tops.length {
+        for axis in bottoms {
+          axis.show.grid = false
+        }
+        for var i = 0; i < tops.length; ++i {
+          tops.items[i].show.grid = i == 0
+        }
+      } else for var i = 0; i < bottoms.length; ++i {
+        bottoms.items[i].show.grid = i == 0
+      }
+    }
+  }
+
+  fn computeAxisDirections(this): void {
+    for axis in this.axes {
+      axis.computeDirectionPass1()
+      axis.computeDirectionPass2()
+    }
+    for area in this.areas {
+      area.computeAxisDirections()
+    }
+  }
+
+  fn getAxis(this, orientation, location, type, canBeShared = true) {
+    assert type
+    if canBeShared {
+      for axis in this.axes {
+        if axis.orientation == orientation && axis.location == location && axis.range.type == type {
+          return axis
+        }
+      }
+    }
+    const axis = new Axis{ orientation = orientation, location = location }
+    axis.range.type = type
+    return this.axes.append(axis)
+  }
+}

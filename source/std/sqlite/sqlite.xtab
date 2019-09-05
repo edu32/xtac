@@ -1,0 +1,475 @@
+enum Type {
+  Unknown,
+  Int64,
+  Double,
+  Text,
+  Blob,
+  Null,
+  Date,
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Connection {
+  readonly db     = null
+  readonly start  = time.clock()
+  readonly result = Result{}
+  readonly query  = String{}
+
+  fn dispose(this) {
+    delete this.result
+    if this.db {
+      println("Closing #{this} after #{time.elapsed(this.start)}s")   
+      if const error = os.sqlite3_close_v2(this.db) {
+        this.report("sqlite3_close_v2", error)
+      }
+      this.db = null
+    }
+    delete this.query
+  }
+
+  fn name(this) {
+    const name = os.sqlite3_db_filename(this.db, null)
+    return string.fromText(name)
+  }
+
+  fn format(this, stream, fmt = "") {
+    stream.append("SQLite(").append(this.name()).append(")")
+  }
+
+  fn errorMessage(this) {
+    return string.fromText(os.sqlite3_errmsg(this.db))
+  }
+
+  fn userVersion(this) {
+    var version = 0i64
+    const query = "PRAGMA user_version"
+    each result, resulterror in this.executeText(query) {
+      return (0i64, resulterror) if resulterror
+      each row, rowerror in result.rows() {
+        return (0i64, rowerror) if rowerror
+        version = row.cells[0].data
+      }
+    }
+    return (version, os.SQLITE_OK)
+  }
+
+  /*fn executeSql(this, auto query) {
+    this.prepareForResult()
+    each chunk in query
+      this.query.append(chunk)
+    return this.results()
+  }*/
+
+  fn insertSql(this, auto q) {
+    auto query = String{}
+    each chunk in q {
+      query.append(chunk)
+    }
+    const dataset = this.fetch(query)
+    each row, rowerror in dataset {
+      return (0i64, rowerror) if rowerror
+    }
+    return (os.sqlite3_last_insert_rowid(this.db), os.SQLITE_OK)
+  }
+
+  fn updateSql(this, auto q) {
+    auto query = String{}
+    each chunk in q {
+      query.append(chunk)
+    }
+    const dataset = this.fetch(query)
+    each row, rowerror in dataset {
+      return (0, rowerror) if rowerror
+    }
+    return (os.sqlite3_changes(this.db), os.SQLITE_OK)
+  }
+
+  fn fetch(this, query) {
+    this.prepareForResult()
+    this.query.append(query)
+    return {
+      connection = this,
+      next = fn(self) {
+        const connection = self.connection
+        const result = connection.result
+        return (result.row, self.error, true) if self.finished || self.error
+        for {
+          if self.fetchResultOnNext {
+            ++self.resultCount
+            assert result.isReady()
+            var currentQuery = string{}
+            if result.query.isEmpty() {
+              assert result.nextQuery.isEmpty()
+              currentQuery = string.fromBuffer(connection.query)
+            } else if result.nextQuery.length {
+              currentQuery = result.nextQuery
+            } else {
+              self.finished = true
+              break
+              //return (result.row, self.error, self.finished = true)
+            }
+            const statement = null
+            var tail = Char*{}
+            self.error = os.sqlite3_prepare_v2(connection.db, currentQuery.text, currentQuery.length + 1, 
+                                               &statement, &tail)
+            self.hasPrepared = true
+            if self.error || !tail {
+              tail = currentQuery.end()
+            }
+            result.initialize(statement, currentQuery.text, tail, currentQuery.end())
+            if self.error {
+              connection.report("sqlite3_prepare_v2", self.error, result.query)
+              self.finished = true
+              return (result.row, self.error, false)
+            }
+            self.fetchResultOnNext = false
+            self.columnCount = 0
+          }
+          if !self.fetchRowOnNext {
+            result.row.clear()
+            break
+            //return (result.row, self.error, false)
+          }
+          self.error = os.sqlite3_step(result.statement)
+          if self.error == os.SQLITE_ROW {
+            self.error = os.SQLITE_OK
+            self.columnCount = result.fillRow(self.columnCount)
+            break
+            //return (result.row, self.error, false)
+          }
+          if self.error == os.SQLITE_DONE {
+            self.error = os.SQLITE_OK
+          } else {
+            result.connection.report("sqlite3_step", self.error, result.query)
+            self.finished = true
+          }
+          if const error = result.finalizeStatement() {
+            self.error = error
+          }
+          result.row.clear()
+          if self.error {
+            self.finished = true
+            break
+          } else {
+            self.fetchResultOnNext = true
+            continue
+            //return self.next()
+          }
+        }
+        return (result.row, self.error, self.finished)
+        //return (result.row, self.error, false)
+      },
+      columns = fn(self) {
+        const connection = self.connection
+        const result = connection.result
+        self.prepare()
+        return result.columns()
+      },
+      prepare = fn(self) {
+        if !self.hasPrepared {
+          self.fetchRowOnNext = false
+          self.next()
+          self.fetchRowOnNext = true
+        }
+        return self.error
+      },
+      dispose = fn(self) {
+        self.connection.result.dispose()
+      },
+      countRows = fn(self) {
+        var count = 0
+        each row, rowerr in self {
+          ++count
+        }
+        return count
+      },
+      columnCount       = 0,
+      resultCount       = 0,
+      error             = os.SQLITE_OK,
+      hasPrepared       = false, // Has os.sqlite3_prepare_v2() has been called?
+      fetchResultOnNext = true,
+      fetchRowOnNext    = true,
+      finished          = this.query.isEmpty()
+    }
+  }
+
+  fn exec(this, query) {
+    this.prepareForResult()
+    this.query.append(query)
+    if const error = os.sqlite3_exec(this.db, this.query.text, null, null, null) {
+      this.report("sqlite3_exec", error, query)
+      return error
+    }
+    return os.SQLITE_OK
+  }
+
+  fn prepareForResult(this) {
+    assert this.result.isReady()
+    delete this.result
+    delete this.query
+    this.result = Result{ connection = this }
+  }
+
+  fn report(this, sqlite3FunctionName, error, query = "") {
+    //const err = os.sqlite3_errcode(this.db)
+    //const msg = string.fromText(os.sqlite3_errmsg(this.db))
+    const text = os.sqlite3_errstr(error)
+    const msg  = string.fromText(text)
+    if query.isEmpty() {
+      println("os.#{sqlite3FunctionName} failed with ##{error}: #{msg}")
+    } else if query.length > 0x400 {
+      const q = string.fromTextAndLength(query.text, 0x400)
+      println("os.#{sqlite3FunctionName} failed with ##{error}: #{msg}\r\n\t#{q}...")
+    } else {
+      println("os.#{sqlite3FunctionName} failed with ##{error}: #{msg}\r\n\t#{query}")
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Result {
+  readonly statement  = null
+  readonly connection = Connection*{}
+  readonly query      = string{}
+  readonly nextQuery  = string{}
+  readonly row        = Row{}
+  readonly column     = Column{}
+
+  fn dispose(this) {
+    if this.statement {
+      if const error = os.sqlite3_finalize(this.statement) {
+        this.connection.report("sqlite3_finalize", error)
+      }
+      this.statement = null
+    }
+    delete this.query
+    delete this.nextQuery
+    delete this.row
+    delete this.column
+  }
+
+  fn finalizeStatement(this) {
+    if this.statement {
+      const error = os.sqlite3_finalize(this.statement)
+      if error {
+        this.connection.report("sqlite3_finalize", error, this.query)
+      }
+      this.statement = null
+      return error
+    }
+    return os.SQLITE_OK
+  }
+
+  fn isReady(this) = this.statement == null
+
+  fn initialize(this, statement, queryStart, nextQueryStart, nextQueryEnd) {
+    assert this.statement == null
+    this.statement = statement
+    this.query = string.fromRange(queryStart, nextQueryStart)
+    this.nextQuery = string.fromRange(nextQueryStart, nextQueryEnd)
+    this.row.clear()
+    this.column.clear()
+    this.nextQuery.trim()
+  }
+
+  fn columns(this) {
+    return {
+      result = this,
+      pos = 0,
+      count = os.sqlite3_column_count(this.statement),
+      next = fn(self) {
+        return (&self.result.column, /* done = */ true) if self.pos == self.count
+        assert self.pos < self.count
+        self.result.column.clear()
+        if const name = os.sqlite3_column_name(self.result.statement, self.pos) {
+          self.result.column.name.appendTextAndLength(name, os.strlen(name))
+        } else {
+          self.result.connection.report("os.sqlite3_column_name", os.SQLITE_NOTFOUND)
+        }
+        self.result.column.type = Type{ os.sqlite3_column_type(self.result.statement, self.pos) }
+        ++self.pos
+        return (&self.result.column, /* done = */ false)
+      }
+    }
+  }
+
+  fn fillRow(this, columnCount) {
+    if !columnCount {
+      columnCount = os.sqlite3_column_count(this.statement)
+      assert columnCount
+      this.row.cells.setLengthWith(columnCount, fn(x) = delete x)
+    }
+    ++this.row.number
+    for var i = 0; i < columnCount; ++i {
+      this.fillCell(this.row.cells[i], i)
+    }
+    return columnCount
+  }
+
+  fn fillCell(this, cell, i) {
+    define SQLITE_INTEGER 1
+    define   SQLITE_FLOAT 2
+    define    SQLITE_TEXT 3
+    define    SQLITE_BLOB 4
+    define    SQLITE_NULL 5
+    cell.value.clear()
+    const type = os.sqlite3_column_type(this.statement, i)
+    if type == SQLITE_INTEGER {
+      cell.data = os.sqlite3_column_int64(this.statement, i)
+      cell.type = Type.Int64
+    } else if type == SQLITE_FLOAT {
+      const dbl = os.sqlite3_column_double(this.statement, i)
+      cell.data = dbl to Int64
+      cell.type = Type.Double
+    } else if type == SQLITE_TEXT {
+      const length = os.sqlite3_column_bytes(this.statement, i)
+      cell.value.appendTextAndLength(os.sqlite3_column_text(this.statement, i), length)
+      cell.data = Int64{ &cell.value }
+      cell.type = Type.Text
+    } else if type == SQLITE_BLOB {
+      const length = os.sqlite3_column_bytes(this.statement, i)
+      cell.value.appendTextAndLength(Char*{ os.sqlite3_column_text(this.statement, i) }, length)
+      cell.data = Int64{ &cell.value }
+      cell.type = Type.Blob
+    } else if type == SQLITE_NULL {
+      cell.data = 0
+      cell.type = Type.Null
+    } else {
+      assert 0
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Row {
+  readonly cells = List(Cell){}
+  var number = 0
+
+  fn dispose(this) {
+    delete this.cells with fn(x) = delete x
+  }
+
+  fn clear(this) {
+    this.cells.clearWith(fn(x) = delete x)
+    this.number = 0
+  }
+
+  fn format(this, stream, fmt = "") {
+    stream.append("{ ")
+    for var i = 0; i < this.cells.length; ++i {
+      stream.append(", ") if i
+      this.cells[i].format(stream)
+    }
+    stream.append(" }")
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Column {
+  var name = String{}
+  var type = Type.Unknown
+
+  fn dispose(this) {
+    delete this.name
+  }
+
+  fn clear(this) {
+   this.name.clear()
+   this.type = Type.Unknown
+  }
+
+  fn format(this, stream, fmt = "") {
+    stream.append(this.name)
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Cell {
+  var value = String{}
+  var data  = 0i64
+  var type  = Type.Unknown
+
+  fn dispose(this) {
+    delete this.value
+  }
+
+  fn format(this, stream, fmt = "") {
+    if this.type == Type.Int64 {
+      this.data.format(stream, fmt)
+    } else if this.type == Type.Double {
+      (this.data to Double).format(stream, fmt)
+    } else if this.type == Type.Text || this.type == Type.Blob || this.type == Type.Date {
+      this.value.format(stream, fmt)
+    } else if this.type == Type.Null {
+      stream.append("NULL")
+    } else {
+      assert 0
+      stream.append("<untyped-data-cell>")
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn open(path) {
+  return connect(path, /* createIfNotExist = */ false)
+}
+
+fn create(path) {
+  return connect(path, /* createIfNotExist = */ true)
+}
+
+fn connect(path, createIfNotExists) {
+  fn report(db, path, err, sqlite3FunctionName, query) {
+    if err {
+      const msg = string.fromText(os.sqlite3_errmsg(db))
+      println("#{sqlite3FunctionName} failed with ##{err}: #{msg} for '#{path}' with '#{query}'")
+    }
+    return err
+  }
+  fn configure(db, path) {
+    var query = ""
+    var err = os.SQLITE_OK
+
+    query = "PRAGMA journal_mode = WAL"
+    err = os.sqlite3_exec(db, query.text, null, null, null)
+    return err if report(db, path, err, "os.sqlite3_exec", query)
+
+    query = "PRAGMA synchronous = OFF"
+    err = os.sqlite3_exec(db, query.text, null, null, null)
+    return err if report(db, path, err, "os.sqlite3_exec", query)
+
+    query = "PRAGMA temp_store = MEMORY"
+    err = os.sqlite3_exec(db, query.text, null, null, null)
+    return err if report(db, path, err, "os.sqlite3_exec", query)
+
+    return err
+  }
+  const db = null
+  var err = os.sqlite3_open_v2(path.text, &db, 
+                               os.SQLITE_OPEN_NOMUTEX | os.SQLITE_OPEN_READWRITE | 
+                                  (os.SQLITE_OPEN_CREATE if createIfNotExists else 0),
+                               null)
+  assert db with "os.sqlite3_open_v2 failed catastrophically"
+  if err {
+    report(db, path, err, "os.sqlite3_open_v2", "os.sqlite3_open_v2")
+  } else {
+    println("SQLite(#{path}) opened")
+    err = configure(db, path)
+  }
+  return (Connection{ db = db }, err)
+}
+
+/*fn makeQueryString(start, end) {
+  if start {
+    assert end
+    for ; start < end && *start == ';' || 
+          *start == ' ' || 
+          *start == 'r' || 
+          *start == '\n' || 
+          *start == '\t'
+        ; ++end {}
+  } else {
+    assert !end
+  }
+  return string.fromRange(start, end)
+}*/

@@ -1,0 +1,77 @@
+struct Binary {
+  var  bytes = Byte*{}
+  var   code = { bytes = Byte*{}, length = 0 }
+  var   data = { bytes = Byte*{}, length = 0 }
+  var  entry = Byte*{}
+  var length = 0
+
+
+  fn dispose(this) {
+    if this.bytes {
+      os.VirtualFree(this.bytes, dwSize = 0, dwFreeType = os.MEM_RELEASE)
+    }
+  }
+
+
+  fn run(this) {
+
+  }
+
+
+  fn saveEXE(this, folderName, appName) {
+    var    ok = false
+    auto path = String{}    
+    for var i = 0; ; ++i {
+      var canWrite = true
+      path.append(folderName).append("\\").append(appName)
+      if i {
+        i.format(path)
+      }
+      path.append(".exe")
+      if fs.isaFilePath(path) {
+        canWrite = fs.deleteFile(path)
+      }
+      if canWrite {
+        auto (file, fileok) = fio.createIfNotExists(path)
+        if fileok {
+          ok = file.appendBytes(this.bytes, this.length)
+          break
+        }
+      }
+      path.clear()
+    }
+    if !ok {
+      println("could not write '#{path}' to disk")
+    }
+    return ok
+  }
+
+
+  fn saveHEX(this, folderName, appName) {
+    var    ok = false
+    auto path = String{}    
+    for var i = 0; ; ++i {
+      var canWrite = true
+      path.append(folderName).append("\\").append(appName)
+      if i {
+        i.format(path)
+      }
+      path.append(".hex")
+      if fs.isaFilePath(path) {
+        canWrite = fs.deleteFile(path)
+      }
+      if canWrite {
+        auto (file, fileok) = fio.createIfNotExists(path)
+        if fileok {
+          ok = file.appendBytesAsHex(this.code.bytes, this.code.length, bytesPerGroup = 8, groupsPerLine = 2)
+          break
+        }
+      }
+      path.clear()
+    }
+    if !ok {
+      println("could not write '#{path}' to disk")
+    }
+    return ok
+  }
+}

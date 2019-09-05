@@ -1,0 +1,231 @@
+fn run(context, symbol) {
+  const  pass = Shaper{
+        typer = context.typer,
+      structs = context.structs,
+       unions = context.unions,
+       arrays = context.arrays
+    }
+  pass.run(symbol)
+}
+
+
+struct MergeList {
+  const list = List(ast.Symbol*){}
+  var  total = 0
+
+  fn dispose(this) {
+    delete this.list
+  }
+}
+
+
+struct Shaper {
+  const     typer = Typer&{}
+  const   structs = MergeList*{}
+  const    unions = MergeList*{}
+  const    arrays = MergeList*{}
+  const lhsFields = List(ast.Symbol*){}
+  const rhsFields = List(ast.Symbol*){}
+
+
+  fn run(this, symbol) {
+    if symbol.layoutStatus.isNotDone() {
+      this.cberr(symbol.instance.pos, symbol) with {
+        println("symbol requires layout\r\n\t\
+          → symbol: #{nameof(it.instance)}\r\n\t\
+          →   type: #{it.instance.type}\r\n\t\
+          → status: #{nameof(it.layoutStatus)}")
+      }
+      return
+    }
+    const instance = symbol.instance
+    switch instance {
+      case ast.Struct     this.mergeStruct(symbol)
+      case ast.Union      this.mergeUnion(symbol)
+      case ast.Array      this.mergeArray(symbol)
+      case ast.Object     this.mergeObject(symbol) if instance.kind != instance.Kind.Generator
+      case ast.FixedArray this.mergeFixedArray(symbol)
+    }
+    delete this.lhsFields
+    delete this.rhsFields
+  }
+
+
+  fn mergeStruct(this, symbol) {
+    assert !symbol.replacedBy
+    ++this.structs.total
+    // @@TODO: Why do we fail if we remove this check?
+    const st = symbol.instance as ast.Struct*
+    if st.name.isNotRandom() || st.typeid {
+      return
+    }
+    for item in this.structs.list {
+      if item.alignment == symbol.alignment {
+        if this.compareStructs(item.instance, symbol.instance as ast.Struct*) {
+          assert !symbol.replacedBy
+          symbol.replacedBy = item
+          return
+        }
+      }
+    }
+    this.structs.list.append(symbol)
+  }
+
+
+  fn mergeUnion(this, symbol) {
+    assert !symbol.replacedBy
+    ++this.unions.total
+    // @@TODO: Why do we fail if we remove this check?
+    const un = symbol.instance as ast.Union*
+    if un.name.isNotRandom() {
+      return
+    }
+    for item in this.unions.list {
+      if item.alignment == symbol.alignment {
+        if this.compareUnions(item.instance, symbol.instance as ast.Union*) {
+          assert !symbol.replacedBy
+          symbol.replacedBy = item
+          return
+        }
+      }
+    }
+    this.unions.list.append(symbol)
+  }
+
+
+  fn mergeObject(this, symbol) {
+    assert !symbol.replacedBy
+    ++this.structs.total
+    for item in this.structs.list {
+      if item.alignment == symbol.alignment {
+        if this.compareStructs(item.instance, symbol.instance as ast.Object*) {
+          assert !symbol.replacedBy
+          symbol.replacedBy = item
+          return
+        }
+      }
+    }
+    this.structs.list.append(symbol)
+  }
+
+
+  fn mergeArray(this, symbol) {
+    assert !symbol.replacedBy
+    ++this.arrays.total
+    for item in this.arrays.list {
+      if item.alignment == symbol.alignment {
+        if this.compareArrays(item.instance, symbol.instance as ast.Array*) {
+          assert !symbol.replacedBy
+          symbol.replacedBy = item
+          return
+        }
+      }
+    }
+    this.arrays.list.append(symbol)
+  }
+
+
+  fn mergeFixedArray(this, symbol) {
+    assert !symbol.replacedBy
+    ++this.arrays.total
+    for item in this.arrays.list {
+      if item.alignment == symbol.alignment {
+        if this.compareArrays(item.instance, symbol.instance as ast.FixedArray*) {
+          assert !symbol.replacedBy
+          symbol.replacedBy = item
+          return
+        }
+      }
+    }
+    this.arrays.list.append(symbol)
+  }
+
+
+  fn compareStructs(this, instance, rhs) {
+    switch instance {
+      case ast.Struct return this.compareStructFields(instance, rhs)
+      case ast.Object return this.compareStructFields(instance, rhs)
+      default this.cberr(instance.pos, rhs) with {
+        println("wrong list for struct")
+      }
+    }
+    return false
+  }
+
+
+  fn compareStructFields(this, lhs, rhs) {
+    collectFieldsOf(lhs.scope, this.lhsFields)
+    collectFieldsOf(rhs.scope, this.rhsFields)
+    return false if this.lhsFields.length != this.rhsFields.length
+    for i, lhsField in this.lhsFields {
+      const rhsField = this.rhsFields.items[i]
+      return false if lhsField.name != rhsField.name ||
+                      lhsField.offset != rhsField.offset ||
+                      !compareTypes(lhsField.instance.type, rhsField.instance.type)
+    }
+    return true
+  }
+
+
+  fn collectFieldsOf(scope, list) {
+    list.clear()
+    for item in scope.symbols {
+      const symbol = item.value
+      if symbol.instance is ast.Field {
+        list.append(symbol)
+      }
+    }
+  }
+
+
+  fn compareUnions(this, instance, rhs) {
+    switch instance {
+      case ast.Union return this.compareUnionFields(instance, rhs)
+      default this.cberr(instance.pos, rhs) with {
+        println("wrong list for union")
+      }
+    }
+    return false
+  }
+
+
+  fn compareUnionFields(lhs, rhs) {
+    return compareTypes(lhs.type, rhs.type)
+  }
+
+
+  fn compareTypes(lhs, rhs) {
+    return lhs == rhs
+  }
+
+
+  fn compareArrays(this, lhs, rhs) {
+    switch lhs {
+      case ast.Array {
+        switch rhs {
+          case ast.Array      return lhs.children.length == rhs.children.length &&
+                                     this.compareTypes(lhs.element(), rhs.element())
+          case ast.FixedArray return lhs.children.length == rhs.length &&
+                                this.compareTypes(lhs.element(), rhs.element)
+        }
+      }
+      case ast.FixedArray {
+        switch rhs {
+          case ast.Array      return lhs.length == rhs.children.length &&
+                                     this.compareTypes(lhs.element, rhs.element())
+          case ast.FixedArray return lhs.length == rhs.length &&
+                                this.compareTypes(lhs.element, rhs.element)
+        }
+      }
+    }
+    this.cberr(lhs.pos, null) with {
+      println("wrong list for array")
+    }
+    return false
+  }
+
+
+  fn cberr(this, pos, ctx, cb) {
+    this.typer.cberr(pos, ctx, cb)
+  }
+}

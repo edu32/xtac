@@ -1,0 +1,137 @@
+import Type from sqlite
+
+struct Cell {
+  var value = ""
+  var data = 0i64
+  var type = Type.Unknown
+
+  fn isNull(this) = this.type == Type.Null
+  fn isNotNull(this) = this.type != Type.Null
+}
+
+fn isaCsv(stream) {
+  var  separator = ''
+  auto row       = List(Cell){}
+  var  cells     = 0
+  var  lines     = 0
+
+  each line, lineok in stream {
+    assert lineok
+    continue if line.isEmpty()
+    
+    if !separator {
+      separator = detectSeparatorFromLine(line)
+    }
+    parseLine(row, line, separator)
+    if lines {
+      assert row.length == cells with "row.length = #{row.length}; cells = #{cells}; #{line}"
+      return false if row.length != cells
+    } else {
+      cells = row.length
+    }
+    ++lines
+  }
+  return true
+}
+
+fn read(stream) {
+  var  separator = ''
+  auto row       = List(Cell){}
+
+  each line, lineok in stream {
+    assert lineok
+    continue if line.isEmpty()
+
+    if !separator {
+      separator = detectSeparatorFromLine(line)
+    }
+    parseLine(row, line, separator)
+    yield *&row
+  }
+}
+
+fn detectSeparatorFromLine(line) {
+  const end    = line.end()
+  var   tabs   = 0
+  var   commas = 0
+  var   mark   = line.text
+  for var pos = line.text; pos < end; ++pos {
+    if *pos == ',' {
+      ++commas
+      mark = pos + 1
+    } else if *pos == '\t' {
+      ++tabs
+      mark = pos + 1
+    } else if (*pos == '\'' || *pos == '"') && !tabs {
+      continue if hasNonSpacesBetween(mark, pos)    
+      const quote = *pos
+      for ++pos; pos < end && *pos != quote; ++pos {}
+      return '' if pos == end
+    }
+  }
+  return ','  if commas
+  return '\t' if tabs
+  return ''
+
+  fn hasNonSpacesBetween(lo, hi) {
+    for ; lo < hi && char.isaSpace(*lo); ++hi {}
+    return lo < hi
+  }
+}
+
+fn parseLine(row, line, separator) {
+  const end   = line.end()
+  var   mark  = line.text
+  var   pos   = line.text
+  var   isquoted = false
+
+  row.clear()
+
+  for ; pos < end; ++pos {
+    if (*pos == '\'' || *pos == '"') && separator != '\t' {
+      continue if hasNonSpacesBetween(mark, pos)
+      isquoted = true
+      const quote = *pos
+      for ++pos; pos < end && *pos != quote; ++pos {}
+      return false if pos == end
+    } else if *pos == separator {      
+      const cell = row.append(Cell{ value = string.fromRange(mark, pos).trim().unquote() })
+      cell.type = parseType(cell.value)
+      mark = pos + 1
+    }
+  }
+  const cell = row.append(Cell{ value = string.fromRange(mark, pos).trim().unquote() })
+  cell.type = parseType(cell.value)
+  return true
+
+  fn hasNonSpacesBetween(lo, hi) {
+    for ; lo < hi && char.isaSpace(*lo); ++hi {}
+    return lo < hi
+  }
+}
+
+fn parseType(s) {
+  import char
+  const end = s.end()
+  var   pos = s.text
+  var   dot = Char*{}
+  return Type.Null if pos == end
+  for ; pos < end; ++pos {
+    if *pos == '.' {
+      break if dot
+      dot = pos
+    } else if *pos < '0' || *pos > '9' {
+      break
+    }
+  }
+  return Type.Text   if pos < end
+  if dot {
+    return Type.Double if dot && dot > s.text && pos > dot
+    return Type.Text
+  }
+  return Type.Int64
+}
+
+async fn readAsync(asyncStream) {
+  assert 0
+}

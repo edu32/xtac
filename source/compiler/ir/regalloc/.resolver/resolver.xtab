@@ -1,0 +1,1064 @@
+fn run(allocator, ids) {
+  auto pass = Resolver{ function = allocator.function }
+  pass.run(allocator.defs, ids)
+}
+
+import interference
+
+//---------------------------------------------------------------------------------------------------------
+abstract struct Move {
+}
+
+//  dst ⟵ src
+struct Transfer : Move {
+  const dst = UseRange*{}
+  const src = UseRange*{}
+}
+
+//  dst ⟵⟶ src
+struct Exchange : Move {
+  const dst = UseRange*{}
+  const src = UseRange*{}
+}
+
+//  dst ⟵ *
+struct Fill : Move {
+  const dst = UseRange*{}
+}
+
+//  * ⟵ src
+struct Spill : Move {
+  const src = UseRange*{}
+}
+
+//---------------------------------------------------------------------------------------------------------
+struct Group {
+  readonly moves = List(Move*){}
+  const      pos = Definition*{}
+  const   parent = MoveBlock*{}
+
+
+  fn dispose(this) {
+    delete this.moves with fn(x) = delete x
+  }
+
+
+  fn appendMove(this, dst, src) {
+    assert dst.slot || src.slot
+    assert dst.slot != src.slot
+    assert dst.owner == src.owner
+    if dst.slot {
+      if src.slot {
+        return this.transfer(dst, src)
+      }
+      return this.fill(dst)
+    }
+    return this.spill(src)
+  }
+
+
+  fn transfer(this, dst, src) {
+    const isTop = this.pos == this.parent.span.top
+    if isTop && this.parent.predecessors.length > 1 {
+      return // Don't transfer at the top of a block with multiple predecessors.
+    }
+    if !this.findSameTransfer(dst, src) {
+      this.resolveMove(new Transfer{ dst = dst, src = src })
+    }
+  }
+
+
+  fn findSameTransfer(this, dst, src) {
+    for move in this.moves {
+      switch move {
+        case Transfer {
+          return move if move.dst.slot.reg == dst.slot.reg && move.src.slot.reg == src.slot.reg &&
+                         move.dst.owner == dst.owner
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn fill(this, dst) {
+    if !this.findFillOf(dst) {
+      this.resolveMove(new Fill{ dst = dst })
+    }
+  }
+
+  fn findFillOf(this, dst) {
+    for move in this.moves {
+      switch move {
+        case Fill {
+          return move if move.dst.slot.reg == dst.slot.reg && move.dst.owner == dst.owner
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn spill(this, src) {
+    if !this.findSpillOf(src) {
+      this.resolveMove(new Spill{ src = src })
+    }
+  }
+
+
+  fn findSpillOf(this, src) {
+    for move in this.moves {
+      switch move {
+        case Spill {
+          return move if move.src.slot.reg == src.slot.reg && move.src.owner == src.owner
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn dump(this, toResolve) {    
+    println("#{this.parent.resolver.function.name} bb.#{this.parent.block.index} pos.#{this.pos.value.index} \
+      isTop = #{this.pos == this.parent.span.top} isBottom = #{this.pos == this.parent.span.bottom}")
+    for i, move in this.moves {
+      this.dumpMove(i, move)
+    }
+    if const move = toResolve {
+      this.dumpMove(-1, move)
+    }
+  }
+
+
+  fn dumpMove(this, i, move) {
+    switch move {
+      case Transfer {
+        println("\t#{i}. def.#{move.dst.owner.value.index} \
+          [#{move.dst.start.value.index}-#{move.dst.end.value.index}].#{move.dst.slot.reg} ← \
+          [#{move.src.start.value.index}-#{move.src.end.value.index}].#{move.src.slot.reg}")
+      }
+      case Exchange {
+        println("\t#{i}. def.#{move.dst.owner.value.index}\
+          [#{move.dst.start.value.index}-#{move.dst.end.value.index}].#{move.dst.slot.reg} ←→ \
+          def.#{move.src.owner.value.index}\
+          [#{move.src.start.value.index}-#{move.src.end.value.index}].#{move.src.slot.reg}")
+      }
+      case Fill {
+        println("\t#{i}. def.#{move.dst.owner.value.index}\
+          [#{move.dst.start.value.index}-#{move.dst.end.value.index}].#{move.dst.slot.reg} ← *")
+      }
+      case Spill {
+        println("\t#{i}. def.#{move.src.owner.value.index} * ← \
+          def.#{move.src.owner.value.index}\
+          [#{move.src.start.value.index}-#{move.src.end.value.index}].#{move.src.slot.reg}")
+      }
+    }
+  }
+
+
+  fn resolveMove(this, move) {
+    const it = interference.compute(this.moves, move)
+    if it.sameDst >= 0 {
+      if it.exchange >= 0 {
+        this.dump(move)
+        assert 0
+      } else if it.follows >= 0 {
+        if it.leads >= 0 {
+          this.dump(move)
+          assert 0
+        } else if it.same >= 0 {
+          this.dump(move)
+          assert 0
+        } else if it.sameDst < it.follows {
+          this.dump(move)
+          assert 0
+        } else {
+          this.dump(move)
+          assert 0
+        }
+      } else if it.leads >= 0 {
+        if it.same >= 0 {
+          this.dump(move)
+          assert 0
+        } else if it.sameDst < it.leads {
+          this.resolveSameDst(move, it.sameDst)
+        } else if it.sameDst > it.leads {
+          this.dump(move)
+          assert 0
+        } else {
+          this.dump(move)
+          assert 0
+        }
+      } else if it.same >= 0 {
+        this.dump(move)
+        assert 0
+      } else {
+        this.resolveSameDst(move, it.sameDst)
+      }
+    } else if it.exchange >= 0 {
+      if it.sameSrc >= 0 {
+          this.dump(move)
+          assert 0
+      } else if it.follows >= 0 {
+        if it.leads >= 0 {
+          this.dump(move)
+          assert 0
+        } else if it.same >= 0 {
+          this.dump(move)
+          assert 0
+        } else if it.exchange < it.follows {
+          //   other:   b ⟵ a
+          //  leader: x/* ⟵ a
+          //
+          //    move:   a ⟵ b
+          this.dump(move)
+          assert 0
+        } else {
+          this.resolveExchange(move, it.exchange)
+        }
+      } else if it.leads >= 0 {
+        this.dump(move)
+        assert 0
+      } else if it.same >= 0 {
+        this.dump(move)
+        assert 0
+      } else {
+        this.resolveExchange(move, it.exchange)
+      }
+    } else if it.follows >= 0 {
+      if it.leads >= 0 {
+        if it.same >= 0 {
+          this.dump(move)
+          assert 0
+        } else if it.follows < it.leads {
+          //    leader: y/* ⟵ dst
+          //  follower: src ⟵ x/*
+          //
+          //      move: dst ⟵ src
+          this.resolveFollower(move, it.leads)
+        } else {
+          //  follower: src ⟵ x/*
+          //    leader: y/* ⟵ dst
+          //
+          //      move: dst ⟵ src
+          this.resolveFollowerThenLeader(move, it.follows, it.leads)
+        }
+      } else if it.same >= 0 {
+        this.dump(move)
+        assert 0
+      } else {
+        this.resolveLeader(move, it.follows)
+      }
+    } else if it.leads >= 0 {
+      if it.same >= 0 {
+        this.dump(move)
+        assert 0
+      } else {
+        this.resolveFollower(move, it.leads)
+      }
+    } else if it.same >= 0 {
+      this.dump(move)
+      assert 0
+    } else {
+      this.moves.append(move)
+    }
+  }
+
+
+  fn resolveSameDst(this, move, index) {
+    const    isTop = this.pos == this.parent.span.top
+    const isBottom = this.pos == this.parent.span.bottom
+    const    other = this.moves.items[index]
+    assert other !is Exchange
+    assert isTop || isBottom
+    if interference.isSameOwner(move, other) {
+      this.resolveSameDstSameOwner(move, index)
+    } else {
+      this.resolveSameDstDifferentOwners(move, index)
+    }
+  }
+
+
+  fn resolveSameDstSameOwner(this, move, index) {
+    const    isTop = this.pos == this.parent.span.top
+    const isBottom = this.pos == this.parent.span.bottom
+    const    other = this.moves.items[index]
+    switch move {
+      case Transfer {
+        switch other {
+          case Transfer {
+            this.dump(move)
+            assert 0
+          }
+          case Fill {
+            //  Problem 🡓
+            //    move: a ⟵ b  ; problematic move
+            //    fill: a ⟵ *
+            //  Solution 🡓
+            //    ...predecessors...  ; spill in predecessors
+            //    fill: a ⟵ *       ; don't spill in predecessors because it has already been done.
+            //    ...successors...    ; do nothing
+            delete move
+          }
+          default assert with nameof(other)
+        }
+      }
+      case Fill {
+        switch other {
+          case Transfer {
+            //  Problem 🡓
+            //     move: a ⟵ *  ; problematic move
+            //    other: a ⟵ y
+            if isTop {
+              //  Solution 🡓
+              //    ...predecessors...  ; spill in predecessors
+              //    move: a ⟵ *       ; replace (other: a ⟵ y) with (move: a ⟵ *)
+              //    ...successors...    ; do nothing
+              this.moves.items[index] = move
+              this.parent.spillInPredecessors(move.dst.owner)
+              delete other
+            } else {
+              //  Solution 🡓
+              //    ...predecessors...  ; do nothing
+              //    move: a ⟵ *       ; replace (other: a ⟵ y) with (move: a ⟵ *)
+              //    ...successors...    ; do nothing
+              this.moves.items[index] = move
+              delete other
+            }
+          }
+          default assert with nameof(other)
+        }
+      }
+      default assert with nameof(move)
+    }
+  }
+
+
+  fn resolveSameDstDifferentOwners(this, move, index) {
+    const    isTop = this.pos == this.parent.span.top
+    const isBottom = this.pos == this.parent.span.bottom
+    const    other = this.moves.items[index]
+    switch move {
+      case Transfer {
+        //  Problem 🡓
+        //     move: a ⟵ b
+        //    other: a ⟵ y
+        //  Solution 🡓
+        //    ...predecessors...  ; do nothing
+        //    spill: * ⟵ b
+        //    other: a ⟵ y
+        //    ...successors...    ; fill in successors
+        this.moves.insert(index, new Spill{ src = move.src })
+        this.parent.fillInSuccessors(move.src.owner) if isBottom
+        delete move
+      }
+      case Fill {
+        switch other {
+          case Transfer {
+            //  Problem 🡓
+            //     move: a ⟵ *
+            //    other: a ⟵ y
+          }
+          case Fill {
+            //  Problem 🡓
+            //     move: a ⟵ *
+            //    other: a ⟵ *
+          }
+          default assert with nameof(other)
+        }
+        this.dump(move)
+        assert 0
+      }
+      default assert with nameof(move)
+    }
+  }
+
+
+  fn resolveFollower(this, move, index) {
+    //  Problem 🡓
+    //        move: a/* ⟵ b     ; transfer/spill from {b} should come before {follower}
+    //    follower:   b ⟵ y/*   ; transfer/fill overwrites {b}
+    const isBottom = this.pos == this.parent.span.bottom
+    switch move {
+      case Transfer {
+        //  Solution 🡓
+        //    ...predecessors...    ; do nothing
+        //        move: a ⟵ b
+        //    follower: b ⟵ x/*
+        //    ...successors...      ; do nothing
+        this.moves.insert(index, move)
+      }
+      case Spill {
+        //  Solution 🡓
+        //    ...predecessors...    ; do nothing
+        //        move: * ⟵ b
+        //    follower: b ⟵ x/*
+        //    ...successors...      ; fill in successors
+        this.moves.insert(index, move)
+        this.parent.fillInSuccessors(move.src.owner) if isBottom
+      }
+      default assert with nameof(move)
+    }
+  }
+
+
+  fn resolveLeader(this, move, index) {
+    //  Problem 🡓
+    //    leader: x/* ⟵ y
+    //      move:   y ⟵ b/*
+    const isTop = this.pos == this.parent.span.top
+    switch move {
+      case Transfer {
+        //  Solution 🡓
+        //    ...predecessors...    ; do nothing
+        //    leader: x/* ⟵ y
+        //      move:   y ⟵ b
+        //    ...successors...      ; do nothing
+        this.moves.insert(index + 1, move)
+      }
+      case Fill {
+        //  Solution 🡓
+        //    ...predecessors...    ; spill in predecessors
+        //    leader: x/* ⟵ y
+        //      move:   y ⟵ *
+        //    ...successors...      ; do nothing
+        this.moves.insert(index + 1, move)
+        this.parent.spillInPredecessors(move.dst.owner) if isTop
+      }
+      default assert with nameof(move)
+    }
+  }
+
+
+  fn resolveExchange(this, m, index) {
+    //  Problem 🡓
+    //     move: x ⟵ y
+    //    other: y ⟵ x
+    const  move = m is Transfer
+    const other = this.moves.items[index] is Transfer
+    assert move && other
+    const    isTop = this.pos == this.parent.span.top
+    const isBottom = this.pos == this.parent.span.bottom
+    const isMiddle = !isTop && !isBottom
+    if isMiddle {
+      //  Solution 🡓
+      //    exchange: x ⟵⟶ y
+      this.moves.items[index] = new Exchange{ dst = move.dst, src = other.dst }
+      delete move
+      delete other
+      return
+    }
+    //  Solution 🡓
+    //    ...predecessors...    ; do nothing
+    //    spill: * ⟵ y
+    //    other: y ⟵ x
+    //    ...successors...      ; fill in successors
+    this.moves.insert(index, new Spill{ src = move.src })
+    this.parent.fillInSuccessors(move.dst.owner) if isBottom
+    delete move
+  }
+
+
+  fn resolveFollowerThenLeader(this, m, follows, leads) {
+    //  Problem 🡓
+    //    follower: b ⟵ y/*   ; {move} should come before {follower}.
+    //      leader: x/* ⟵ a   ; {move} should come after {leader}.
+    //
+    //        move: a ⟵ b     ; the problematic move.
+    const isBottom = this.pos == this.parent.span.bottom
+    const     move = m is Transfer
+    assert move
+    //  Solution 🡓
+    //    ...predecessors...    ; do nothing
+    //       spill:   * ⟵ b
+    //    follower:   b ⟵ y/*
+    //      leader: x/* ⟵ a
+    //       fill:    a ⟵ *   ; if top/middle
+    //    ...successors...      ; fill in successors
+    this.moves.insert(leads, move) // Inserts before {follower}.
+    if isBottom {
+      this.parent.fillInSuccessors(move.dst.owner)
+    } else {
+      //  +2 because after the spill, {follows} is incremented and we want to insert after it.
+      this.moves.insert(follows + 2, new Fill{ dst = move.dst })
+    }
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+struct MoveBlock {
+  const        block = ssa.Block*{}
+  const     resolver = Resolver&{}
+  const predecessors = List(MoveBlock*){}
+  const   successors = List(MoveBlock*){}
+  const      liveins = List(UseRange*){}
+  const     liveouts = List(UseRange*){}
+  const       groups = List(Group){}
+  const         phis = { first = Definition*{},   last = Definition*{} }
+  const         span = {   top = Definition*{}, bottom = Definition*{} }
+
+
+  fn dispose(this) {
+    delete this.predecessors
+    delete this.successors
+    delete this.groups with fn(x) = delete x
+    delete this.liveins
+    delete this.liveouts
+  }
+
+
+  fn ==(this, other) = this.block == other.block
+  fn !=(this, other) = this.block != other.block
+
+
+  fn setup(this, defs) {
+    each value in this.block.values() {
+      switch value {
+        case ssa.Phi {
+          if !this.phis.first {
+            this.phis.first = defs.items[value.index]
+          }
+          this.phis.last = defs.items[value.index]
+        }
+        default break
+      }
+    }
+       this.span.top = defs.items[this.block.body.first.index]
+    this.span.bottom = defs.items[this.block.body.last.index]
+  }
+
+
+  fn appendMove(this, dst, src, pos) {
+    const group = this.groupAt(pos)
+    group.appendMove(dst, src)
+  }
+
+
+  fn top(this) {
+    const pos = this.span.top
+    if this.groups.isEmpty() {
+      return this.groups.append(Group{ pos = pos, parent = this })
+    }
+    const first = this.groups.first()
+    return first if first.pos == pos
+    assert pos < first.pos
+    return this.groups.prepend(Group{ pos = pos, parent = this })
+  }
+
+
+  fn bottom(this) {
+    const pos = this.span.bottom
+    if this.groups.isEmpty() {
+      return this.groups.append(Group{ pos = pos, parent = this })
+    }
+    const last = this.groups.last()
+    return last if last.pos == pos
+    assert pos > last.pos
+    return this.groups.append(Group{ pos = pos, parent = this })
+  }
+
+
+  fn groupAt(this, pos) {
+    if this.groups.isEmpty() {
+      return this.groups.append(Group{ pos = pos, parent = this })
+    }
+    for var i = 0; i < this.groups.length; ++i {
+      const group = this.groups.items[i]
+      if pos < group.pos {
+        return this.groups.insert(i, Group{ pos = pos, parent = this })
+      }
+      return group if group.pos == pos
+    }
+    return this.groups.append(Group{ pos = pos, parent = this })
+  }
+
+
+  fn fillInSuccessors(this, def): void {
+    for successor in this.successors {
+      if successor.shouldInsertFill(def) {
+        successor.insertFill(def)
+      }
+    }
+  }
+
+
+  fn shouldInsertFill(this, def) {
+    const variables = this.resolver.variables
+    const  variable = variables.items[def.value.index]
+    const  lifetime = variable.lifetimes.items[this.block.index]
+    const     range = lifetime.start
+    return false if !range      // Don't fill if {def} is not used in this block.
+    return false if !range.slot // Don't fill if {def} is already in a spill slot.
+    return this.top().findSpillOf(range) != null // Otherwise fill if {def} has not been filled yet.
+  }
+
+
+  fn insertFill(this, def): void {
+    const variables = this.resolver.variables
+    const  variable = variables.items[def.value.index]
+    const  lifetime = variable.lifetimes.items[this.block.index]
+    const       dst = lifetime.start
+    this.top().resolveMove(new Fill{ dst = dst })
+  }
+
+
+  fn spillInPredecessors(this, def): void {
+    for predecessor in this.predecessors {
+      if predecessor.shouldInsertSpill(def) {
+        predecessor.insertSpill(def)
+      }
+    }
+  }
+
+
+  fn shouldInsertSpill(this, def) {    
+    const variables = this.resolver.variables
+    const  variable = variables.items[def.value.index]
+    const  lifetime = variable.lifetimes.items[this.block.index]
+    const     range = lifetime.end
+    return false if !range      // Don't spill if {def} is not used in this block.
+    return false if !range.slot // Don't spill if {def} is already in a spill slot.
+    return this.bottom().findSpillOf(range) != null // Otherwise spill if {def} has not been filled yet.
+  }
+
+
+  fn insertSpill(this, def): void {
+    const variables = this.resolver.variables
+    const  variable = variables.items[def.value.index]
+    const  lifetime = variable.lifetimes.items[this.block.index]
+    const       src = lifetime.end
+    this.bottom().resolveMove(new Spill{ src = src })
+  }
+
+
+  fn insertTransferOrSpill(this, def): void {
+    const variables = this.resolver.variables
+    const  variable = variables.items[def.value.index]
+    const  lifetime = variable.lifetimes.items[this.block.index]
+    const     range = lifetime.end
+  }
+
+
+  fn findBottomSpillOf(this, def) {
+    if this.groups.length {
+      const bottom = this.groups.items[this.groups.length - 1]
+      if bottom.pos == this.span.bottom {
+        for move in bottom.moves {
+          switch move {
+            case Spill {
+              return move if move.src.owner == def
+            }
+          }
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn findTopFillOf(this, def) {
+    if this.groups.length {
+      const top = this.groups.items[0]
+      if top.pos == this.span.top {
+        for move in top.moves {
+          switch move {
+            case Fill {
+              return move if move.dst.owner == def
+            }
+          }
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn findBottomClobberOf(this, dst): Move* {
+    if this.groups.length {
+      const bottom = this.groups.items[this.groups.length - 1]
+      if bottom.pos == this.span.bottom {
+        for i, move in bottom.moves {
+          switch move {
+            case Transfer {
+              if move.dst.owner != dst.owner && move.dst.slot.reg == dst.slot.reg {
+                if !this.dstIsSavedBeforeClobber(bottom.moves, i, dst) {
+                  return move
+                }
+              }
+            }
+            case Fill {
+              if move.dst.owner != dst.owner && move.dst.slot.reg == dst.slot.reg {
+                if !this.dstIsSavedBeforeClobber(bottom.moves, i, dst) {
+                  return move
+                }
+              }
+            }
+            case Spill {}
+            default assert with nameof(move)
+          }
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn dstIsSavedBeforeClobber(this, moves, i, dst): Move* {
+    //  {dst} is clobbered at {i}.
+    //  See if there is a transfer or spill before {i} that has {dst} as the source.
+    for var j = i; --i >= 0; {
+      const move = moves.items[j]
+      switch move {
+        case Transfer {
+          if move.src.owner == dst.owner && move.src.slot.reg == dst.slot.reg {
+            return move
+          }
+        }
+        case Spill {
+          if move.src.owner == dst.owner && move.src.slot.reg == dst.slot.reg {
+            return move
+          }
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn findTopClobberOf(this, dst): Move* {
+    if this.groups.length {
+      const top = this.groups.items[0]
+      if top.pos == this.span.top {
+        for move in top.moves {
+          switch move {
+            case Transfer {
+              return move if move.dst.owner != dst.owner && move.dst.slot.reg == dst.slot.reg
+            }
+            case Fill {
+              return move if move.dst.owner != dst.owner && move.dst.slot.reg == dst.slot.reg
+            }
+            case Spill {}
+            default assert with nameof(move)
+          }
+        }
+      }
+    }
+    return null
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+struct Variable {
+  const lifetimes = List(LifeTime){}
+  const  interval = { first = -1, last = -1 }
+
+  fn dispose(this) {
+    delete this.lifetimes
+  }
+}
+
+
+struct LifeTime {
+  var start = UseRange*{}
+  var   end = UseRange*{}
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+struct Resolver {
+  const  function = ssa.Function*{}
+  const    blocks = List(MoveBlock){}
+  const variables = List(Variable){}
+  const       ids = Identifiers&{}
+
+
+  fn dispose(this) {
+    delete this.blocks with fn(x) = delete x
+    delete this.variables with fn(x) = delete x
+  }
+
+
+  fn run(this, defs, ids) {
+    this.setupBlocks(defs)
+    this.setupLifeTimes(defs)
+    this.transfer(defs)
+    this.resolveMoves(defs)
+    import Inserter from inserter
+    auto inserter = Inserter{ resolver = this, ids = ids }
+    inserter.run(defs)
+  }
+
+
+  fn setupBlocks(this, defs) {
+    each block in this.function.blocks() {
+      assert block.index == this.blocks.length
+      this.blocks.append(MoveBlock{ block = block, resolver = this })
+    }
+
+    for bb in this.blocks {
+      bb.setup(defs)
+      switch bb.block.body.last {
+        case ssa.Yield {} // Do nothing.
+
+        case term: ssa.Jump {
+          const target = term.target()
+          assert target.index >= 0 && target.index < this.blocks.length
+          const targetBlock = this.blocks.items[target.index]
+          targetBlock.predecessors.append(&bb)
+          bb.successors.append(&targetBlock)
+        }
+
+        case term: ssa.JumpIf {
+          const iftrue = term.iftrue()
+          const ifalse = term.ifalse()
+          assert iftrue.index >= 0 && iftrue.index < this.blocks.length
+          assert ifalse.index >= 0 && ifalse.index < this.blocks.length
+          const iftrueBlock = this.blocks.items[iftrue.index]
+          const ifalseBlock = this.blocks.items[ifalse.index]
+          iftrueBlock.predecessors.append(&bb)
+          ifalseBlock.predecessors.append(&bb)
+          bb.successors.append(&iftrueBlock)
+          bb.successors.append(&ifalseBlock)
+        }
+
+        case ssa.Return {}  // Do nothng.
+
+        default assert with nameof(bb.block.body.last)
+      }
+    }
+  }
+
+
+  fn setupLifeTimes(this, defs) {
+    for def in defs {
+
+      const variable = this.createVariable(def)
+
+      continue if def.ranges.isEmpty()
+
+      var firstLifeTime = -1
+      var  lastLifeTime = -1
+
+      /*const xxxx = this.function.name.textIs("std.collections.list.List.disposeWith") && def.value.index == 0
+      if xxxx {
+        println("@@@#{this.function.name} #{def.value.name}")
+      }*/
+
+      for var range = def.ranges.first; range; range = range.qnext {
+
+        /*if xxxx {
+          println("\tbb.[#{range.start.value.parent.index}-#{range.end.value.parent.index}] \
+            range[#{range.start.value.index}-#{range.end.value.index}] #{range.slot.reg}")
+        }*/
+
+        const start = this.blocks.items[range.start.value.parent.index]
+        const   end = this.blocks.items[range.end.value.parent.index]
+
+        assert start.block.index <= end.block.index
+
+        const rangeStart = range.start
+        const   rangeEnd = range.end
+
+        for var i = start.block.index; i <= end.block.index; ++i {
+          const    current = this.blocks.items[i]
+          const   lifetime = variable.lifetimes.items[i]            
+          const blockStart = &defs.items[current.block.body.first.index]
+          const   blockEnd = &defs.items[current.block.body.last.index]
+
+          if rangeStart <= blockStart {
+            assert !lifetime.start
+            lifetime.start = range
+            current.liveins.append(range)
+          }
+          if rangeEnd >= blockEnd {
+            assert !lifetime.end
+            lifetime.end = range
+            current.liveouts.append(range)
+          }
+
+          if firstLifeTime < 0 {
+            firstLifeTime = i
+          }
+          lastLifeTime = i
+        }
+      }
+      assert firstLifeTime >= 0 && lastLifeTime >= 0
+      variable.interval.first = firstLifeTime
+      variable.interval.last = lastLifeTime
+    }
+  }
+
+
+  fn createVariable(this, def) {
+    const variable = this.variables.appendOne()
+    if def.ranges.first {
+      variable.lifetimes.setLength(this.blocks.length)
+    }
+    return variable
+  }
+
+
+  fn transfer(this, defs) {
+    for def in defs {
+      continue if def.ranges.isEmpty()
+      for var   range = def.ranges.first; range; range = range.qnext {
+        if const next = range.qnext {
+          if range.slot != next.slot {
+            const block = this.blocks.items[next.start.value.parent.index]
+            block.appendMove(dst = next, src = range, pos = next.start)
+          }
+        }
+      }
+    }
+  }
+
+  fn resolveMoves(this, defs) {
+    var last = 0
+    for {
+      var changes = 0
+      for block in this.blocks {      
+        changes += this.ensureLiveInsAreFilled(block)
+        changes += this.ensureLiveInsAreNotClobbered(block)
+      }
+      break if changes == last
+      last = changes
+    }
+  }
+
+
+  fn ensureLiveInsAreFilled(this, successor) {
+    const variables = this.variables
+    var     changes = 0
+    for livein in successor.liveins {
+      const      def = livein.owner
+      const variable = variables.items[def.value.index]
+      const   insucc = variable.lifetimes.items[successor.block.index]
+
+      assert insucc.start == livein
+
+      for predecessor in successor.predecessors {
+        const  inpred = variable.lifetimes.items[predecessor.block.index]
+        const liveout = inpred.end
+        const   spill = predecessor.findBottomSpillOf(def)
+        const    fill = successor.findTopFillOf(def)
+        continue if !liveout
+
+        /*  At bottom of predecessor, insert either:
+              · livein ⟵ liveout
+              ·  spill ⟵ liveout
+              · nothing
+            At the top of succesor, insert either:
+              · livein ⟵ spill
+              · nothing
+        */
+        if spill {
+          if livein.slot && !fill {
+            successor.insertFill(def)
+            ++changes
+          }
+        } else if fill {
+          if liveout.slot {
+            predecessor.insertSpill(def)
+            ++changes
+          }
+        } else if liveout.slot {
+          if livein.slot {
+            if liveout.slot.reg != livein.slot.reg {
+              predecessor.insertTransferOrSpill(def, livein.slot)
+              //predecessor.appendMove(livein, liveout, predecessor.span.bottom)
+              ++changes
+            }
+          } else {
+            predecessor.insertSpill(def)
+            ++changes
+          }
+        } else if livein.slot {
+          successor.insertFill(def)
+          ++changes
+        }
+      }
+    }
+
+    return changes
+  }
+
+
+  fn ensureLiveInsAreNotClobbered(this, successor) {
+    const variables = this.variables
+    var     changes = 0
+    for livein in successor.liveins {
+      const      def = livein.owner
+      const variable = variables.items[def.value.index]
+      const   insucc = variable.lifetimes.items[successor.block.index]
+
+      assert insucc.start == livein
+
+      for predecessor in successor.predecessors {
+        const  inpred = variable.lifetimes.items[predecessor.block.index]
+        const liveout = inpred.end
+        const   spill = predecessor.findBottomSpillOf(def)
+        const    fill = successor.findTopFillOf(def)
+        continue if !liveout
+
+        if spill {
+          // {liveout} was spilled at bottom of {predecessor}.
+          // There should be a fill at the top of {successor} or {livein} should be a spill slot.
+          assert fill || !livein.slot
+        } else if fill {
+          //  {livein} was filled at top of {successor}.
+          //  {liveout} should be a spill slot because there's no spill at bottom of {predecessor}.
+          if liveout.slot {
+            println("@@#{this.function.name} liveout @ bb.#{predecessor.block.index} \
+              livein @ bb.#{successor.block.index}")
+            for i, lifetime in variable.lifetimes {
+              const bb = this.blocks.items[i]
+              if lifetime.start {
+                if lifetime.end {
+                  if lifetime.start.slot {
+                    if lifetime.end.slot {
+                      println("bb.#{i} start: #{lifetime.start.slot.reg}; end: #{lifetime.end.slot.reg}")
+                    } else {
+                      println("bb.#{i} start: #{lifetime.start.slot.reg}; end: SPILL")
+                    }
+                  } else if lifetime.end.slot {
+                    println("bb.#{i} start: SPILL; end: #{lifetime.end.slot.reg}")
+                  } else {
+                    println("bb.#{i} start: SPILL; end: SPILL")
+                  }
+                } else if lifetime.start.slot {
+                  println("bb.#{i} start: #{lifetime.start.slot.reg}; end: DEAD")
+                } else {
+                  println("bb.#{i} start: SPILL; end: DEAD")
+                }
+              } else if lifetime.end {
+                if lifetime.end.slot {
+                  println("bb.#{i} start: DEAD; end: #{lifetime.end.slot.reg}")
+                } else {
+                  println("bb.#{i} start: DEAD; end: SPILL")
+                }
+              } else {
+                println("bb.#{i} DEAD")
+              }
+              for gg in bb.groups {
+                for j, mm in gg.moves {
+                  gg.dumpMove(j, mm)
+                }
+              }
+            }
+          }
+          assert !liveout.slot
+        } else if livein.slot {
+          if const move = predecessor.findBottomClobberOf(livein) {
+            //  Found a {move} that clobbers {livein} at the bottom of {predecessor}.
+            //  Spill {liveout} at bottom of {predecessor}, then fill in successors.
+            predecessor.insertSpill(def)
+            ++changes
+          }
+        }
+      }
+    }
+    return changes
+  }
+}

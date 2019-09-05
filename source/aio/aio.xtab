@@ -1,0 +1,111 @@
+export std
+export atomic, fs, os, math, sys from std
+export string, String, collections.List from std
+export time from std
+
+export Object, ObjectList from _handle
+
+export ip, net, fileio
+import iocp
+
+//-------------------------------------------------------------------------------
+readonly anyIPv4 = ip.Address{}
+readonly anyIPv6 = ip.Address{}
+
+//-------------------------------------------------------------------------------
+fn startup {
+  import malloc, mfree from std.memory
+  malloc(null, 0)
+  mfree(null)
+
+  println("Starting #{__file__}")
+  ip.startup()
+  anyIPv4.setFamily(os.AF_INET)
+  println("\tanyIPv4 address = #{anyIPv4}")
+  anyIPv6.setFamily(os.AF_INET6)
+  println("\tanyIPv6 address = #{anyIPv6}")
+  iocp.startup()
+  net.startup()
+}
+
+fn shutdown {
+  println("Stopping #{__file__}")
+  net.shutdown()
+  iocp.shutdown()
+  ip.shutdown()
+  anyIPv4.setFamily(os.AF_UNSPEC)
+  anyIPv6.setFamily(os.AF_UNSPEC)
+}
+
+  //-------------------------------------------------------------------------------------------------------
+struct Task {
+  /* Can run asynchronously. */
+  readonly overlapped = os.OVERLAPPED{}
+  var iocallback      = fn(self, bytesTransferred, hResult) { assert 0 }
+}
+
+  //-------------------------------------------------------------------------------------------------------
+struct Resumable(T) {
+  /* Can run asynchronously. */
+  readonly overlapped = os.OVERLAPPED{}
+  var iocallback = fn(self, bytesTransferred, hResult) { assert 0 }
+  /* Can store IO status. */
+  readonly __iotransferred__ = 0
+  readonly __ioresult__ = 0
+  /* Can be awaited on i.e. can resume {awaiter}. */
+  readonly __awaiter__ = null
+  /* Can await i.e. can be {awaited}'s {awaiter}. */
+  readonly __awaited__ = null
+  /* Can yield values. */
+  readonly next = fn(self) { assert 0 }
+  /* Can be disposed. */
+  readonly dispose = fn(self): self { assert 0 }
+  /* Function to extract result. */
+  readonly __get_ioreturn__ = fn(self): T& { assert 0 const x = T{} return *&x }
+  /* Can be resumed */
+  readonly __resume__ = 0
+  /* Can be stopped */
+  readonly __stopped__ = false
+}
+
+  //-------------------------------------------------------------------------------------------------------
+fn run(task, bytesTransferred = 0) {
+  if !task.iocallback {
+    task.iocallback = task.iocallback{ task, 0, 0 }
+  }
+  assert iocp.completionPort.handle
+  assert os.PostQueuedCompletionStatus(iocp.completionPort.handle, bytesTransferred, null, task) with
+    "os.PostQueuedCompletionStatus failed with #{os.GetLastError()}"
+}
+
+async fn sleep(task, timeoutInMilliseconds) {
+  assert timeoutInMilliseconds >= 0
+  const timer = {
+    task = task,
+    pti = null,
+    tmcallback = fn(Instance, /* pv = */ Context, /* pti = */ Timer) {
+      Context.task.iocallback(0, 0)
+    }
+  }
+  if !task.iocallback {
+    task.iocallback = task.iocallback{ task, 0, 0 }
+  }
+  timer.tmcallback = timer.tmcallback{ null, timer, timer.pti }
+  const lpTimer = Void*{ &timer }
+  timer.pti = os.CreateThreadpoolTimer(/* pfnti = */ timer.tmcallback,
+                                       /* pv    = */ lpTimer, 
+                                       /* pcbe  = */ null)
+  assert timer.pti with "os.CreateThreadpoolTimer failed with #{os.GetLastError()}"
+  const ticks = time.millisecondsToTicks(timeoutInMilliseconds)
+  const ft = os.FILETIME.fromTicks(Int64(-ticks))
+  defer os.SetThreadpoolTimer(/* pti            = */ timer.pti, 
+                              /* pftDueTime     = */ null, 
+                              /* msPeriod       = */ 0, 
+                              /* msWindowLength = */ 0)
+  for {
+    await os.SetThreadpoolTimer(/* pti            = */ timer.pti, 
+                                /* pftDueTime     = */ ft, 
+                                /* msPeriod       = */ 0, 
+                                /* msWindowLength = */ 0)
+  }
+}

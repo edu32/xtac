@@ -1,0 +1,173 @@
+define SPACE_TO_LABEL 5F
+
+enum Marker {
+  None,
+  Circle,
+  Square
+}
+
+struct PointsChart : Chart {
+  const seriesX = Series*{}
+  const seriesY = Series*{}
+  var marker = {
+    shape  = Marker.Circle,
+    radius = 1.25f
+  }
+
+  fn dispose(this) {
+    super.dispose()
+  }
+
+
+  fn createAxes(this, area) {
+    if const axis = this.axisX {
+      if const series = this.seriesX {
+        assert axis.type() == series.type()
+      } else if const series = this.seriesY {
+        assert axis.type() == Type.Int64
+        axis.range.updateMinMax(Value{ i64 = series.length })
+      } else {
+        assert 0
+      }
+    } else if const series = this.seriesX {
+      this.axisX = area.getAxis(Orientation.Horizontal, Location.Bottom, series.type())
+    } else if const series = this.seriesY {
+      this.axisX = area.getAxis(Orientation.Horizontal, Location.Bottom, Type.Int64, false)
+      this.axisX.range.max.i64 = series.length
+      this.axisX.show.labels = false
+      //this.axisX.show.majorTicks = false
+      //this.axisX.show.minorTicks = false
+    } else {
+      assert 0
+    }
+
+    if const axis = this.axisY {
+      if const series = this.seriesY {
+        assert axis.type() == series.type()
+      } else if const series = this.seriesX {
+        assert axis.type() == Type.Int64
+        axis.range.updateMinMax(Value{ i64 = series.length })
+      } else {
+        assert 0
+      }
+    } else if const series = this.seriesY {
+      this.axisY = area.getAxis(Orientation.Vertical, Location.Left, series.type())
+    } else if const series = this.seriesX {
+      this.axisY = area.getAxis(Orientation.Vertical, Location.Left, Type.Int64, false)
+      this.axisY.range.max.i64 = series.length
+      this.axisY.show.labels = false
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn computeSize(this, size) {
+    this.axisY.computeSize(this.axisX, [ this.seriesY ], size)
+    this.axisX.computeSize(this.axisY, [ this.seriesX ], size)
+    size.center = size.center.max(MIN_CHART_SIZE, MIN_CHART_SIZE)
+  }
+
+
+  html render(this, s, rect, center) {
+    #{{
+      assert this.marker.shape && this.marker.radius
+      s.clear().append("<g fill='#{Color.Black.rgb()}'>")
+      each x, y in auto this.mapValues(s, center) {
+        if this.marker.shape == Marker.Square {
+          const diameter = this.marker.radius * 2f
+          s.append("<path d='M #{x - this.marker.radius} #{y - this.marker.radius}\
+                             h #{diameter}v #{diameter}h -#{diameter}'/>")
+        } else {
+          s.append("<circle cx='#{x}' cy='#{y}' r='#{this.marker.radius}'/>")
+        }
+      }
+      s.append("</g>")
+      yield string.fromBuffer(s)
+      s.clear()
+      auto label = String{}
+      auto s2 = String{}
+      each px, on in auto this.mapSpecials(label, center) {
+        s.append("<g stroke-width='2' stroke='red'><path d='") if s.isEmpty()
+        s2.append("<g fill='green'>") if s2.isEmpty()
+        if on == Orientation.Horizontal {
+          s.append("M #{px} #{center.top} v #{center.height}")
+          s2.append("<text x='#{px}' y='#{center.top + CHAR_BOX_HEIGHT}'>#{label}</text>")
+        } else {
+          s.append("M #{center.left} #{px} h #{center.width}")
+          s2.append("<text x='#{center.left}' y='#{px - SPACE_TO_LABEL}'>#{label}</text>")
+        }
+      } if s.length {
+        s.append("'/></g>")
+        yield string.fromBuffer(s)
+        s2.append("</g>")
+        yield string.fromBuffer(s2)
+      }
+    }}
+  }
+
+
+  fn mapSpecials(this, s, rect) {
+    if this.seriesY {
+      for special in this.seriesY.specials {
+        const y = this.axisY.map(s, special, rect, true)
+        yield (y, Orientation.Vertical)
+      }
+    }
+    if this.seriesX {
+      for special in this.seriesX.specials {
+        const x = this.axisX.map(s, special, rect, true)
+        yield (x, Orientation.Horizontal)
+      }
+    }
+  }
+
+
+  fn mapValues(this, s, rect) {
+    if this.seriesY {
+      if this.seriesX {     
+        for var i = 0; ; ++i {
+          var hasY = true
+          var hasX = true
+          var valueY = Value{}
+          var valueX = Value{}
+          if i < this.seriesX.length {
+            valueX = this.seriesX.items[i]
+            if i < this.seriesY.length {
+              valueY = this.seriesY.items[i]
+            } else {
+              valueY = Value{ i64 = i }
+              hasY = false
+            }
+          } else if i < this.seriesY.length {
+            hasX = false
+            valueY = this.seriesY.items[i]
+            valueX = Value{ i64 = i }
+          } else {
+            return
+          }
+          const x = this.axisX.map(s, valueX, rect)
+          const y = this.axisY.map(s, valueY, rect)
+          yield (x, y)
+        }
+      } else {     
+        for var i = 0; i < this.seriesY.length; ++i {
+          const valueY = this.seriesY.items[i]
+          const valueX = Value{ i64 = i }
+          const x = this.axisX.map(s, valueX, rect)
+          const y = this.axisY.map(s, valueY, rect)
+          yield (x, y)
+        }
+      }
+    } else {
+      assert this.seriesX      
+      for var i = 0; i < this.seriesX.length; ++i {
+        const valueX = this.seriesX.items[i]
+        const valueY = Value{ i64 = i }
+        const x = this.axisX.map(s, valueX, rect)
+        const y = this.axisY.map(s, valueY, rect)
+        yield (x, y)
+      }
+    }
+  }
+}

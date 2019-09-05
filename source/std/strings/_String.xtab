@@ -1,0 +1,529 @@
+struct String {
+  readonly text     = Char*{}
+  readonly length   = 0
+  readonly capacity = 0
+
+
+  fn dispose(this) {
+    import mfree from memory
+    this.text = mfree(this.text)
+    this.length = 0
+    this.capacity = 0
+  }
+
+
+  fn clear(this): this {
+    this.length = 0
+    if this.text {
+      this.text[0] = ''
+    }
+  }
+
+
+  fn fromArray(array) {
+    return fromTextAndLength(Char*{ &array[0] }, strlen(&array[0]))
+  }
+
+
+  fn fromArrayAndLength(array, length) {
+    return fromTextAndLength(&array[0], length)
+  }
+
+
+  fn fromText(text) {
+    const chars = Char*{ text }
+    var  length = 0
+    if chars {
+      length = strlen(chars)
+    }
+    return fromTextAndLength(chars, length)
+  }
+
+
+  fn fromTextAndLength(text, length): String {
+    define MAX_TEXT_LENGTH 0xFFFF
+    assert length >= 0 && length <= MAX_TEXT_LENGTH
+    var str = String{}
+    if length {
+      assert text
+      str.reserve(length)
+      mcopy(str.text, text, length)
+      str.text[str.length = length] = ''
+    }
+    return str
+  }
+
+
+  fn fromRange(textBegin, textEnd) {
+    return fromTextAndLength(textBegin, textEnd - textBegin)
+  }
+
+
+  fn fromBuffer(buffer) {
+    return fromTextAndLength(buffer.text, buffer.length)
+  }
+
+
+  fn fromUtf16(text, length) {
+    var s = String{}
+    s.decodeUtf16(text, length)
+    return s
+  }
+
+
+  fn fromPercentEncoded(text, length) {
+    const s = String{}
+    const ok = s.decodePercentEncoded(text, length)
+    return (s, ok)
+  }
+
+
+  fn begin(this) = this.text
+  fn end(this)   = this.text + this.length
+
+
+  fn startsWithChar(this, ch, caseSensitive = true) {
+    if caseSensitive {
+      return this.length && this.text[0] == ch
+    }
+    return this.length && char.toLowerCase(this.text[0]) == char.toLowerCase(ch)
+  }
+
+
+  fn beginsWithChar(this, ch, caseSensitive = true) {
+    if caseSensitive {
+      return this.length && this.text[0] == ch
+    }
+    return this.length && char.toLowerCase(this.text[0]) == char.toLowerCase(ch)
+  }
+
+
+  fn endsWithChar(this, ch, caseSensitive = true) {
+    if caseSensitive {
+      return this.length && this.text[this.length - 1] == ch
+    }
+    return this.length && char.toLowerCase(this.text[this.length - 1]) == char.toLowerCase(ch)
+  }
+
+  fn setLength(this, length) {
+    assert length >= 0 && length <= this.capacity
+    this.length = length
+    if this.text {
+      this.text[this.length] = ''
+    }
+    return this
+  }
+
+
+  fn terminate(this, length) {
+    return this.setLength(length)
+  }
+
+
+  fn == (this, other) {
+    return this.compare(other) == 0
+  }
+
+
+  fn != (this, other) {
+    return this.compare(other) != 0
+  }
+
+
+  fn [](this, index) {
+    // assert index >= 0 && index <= this.length with "index out of bounds"
+    return *&this.text[index]
+  }
+
+
+  fn isEmpty(this) = this.length == 0
+
+
+  fn indexOfChar(this, ch, caseSensitive = true) {
+    const lower = char.toLowerCase(ch)
+    for var i = 0; i < this.length; ++i {
+      const curr = this.text[i]
+      if caseSensitive {
+        return i if ch == curr
+      } else {
+        return i if char.toLowerCase(curr) == lower
+      }
+    }
+    return -1
+  }
+
+
+  fn lastIndexOfChar(this, ch, caseSensitive = true) {
+    const lower = char.toLowerCase(ch)
+    for var i = this.length; --i >= 0; {
+      const curr = this.text[i]
+      if caseSensitive {
+        return i if ch == curr
+      } else {
+        return i if char.toLowerCase(curr) == lower
+      }
+    }
+    return -1
+  }
+
+
+  fn containsChar(this, ch, caseSensitive = true) = this.indexOfChar(ch, caseSensitive) >= 0
+
+
+  fn indexOf(this, s, caseSensitive = true) {
+    const part = ""
+    for var i = 0; i < this.length; ++i {
+      const end = i + s.length
+      break if end > this.length
+      part.setFromTextAndLength(this.text + i, s.length)
+      return i if part.compare(s, caseSensitive) == 0
+    }
+    return -1
+  }
+
+
+  fn lastIndexOf(this, s, caseSensitive = true) {
+    const part = ""
+    for var i = this.length; --i >= 0; {
+      const start = i - s.length
+      break if start < 0
+      part.setFromTextAndLength(this.text + start, s.length)
+      return i if part.compare(s, caseSensitive) == 0
+    }
+    return -1
+  }
+
+
+  fn contains(this, s, caseSensitive = true) = this.indexOf(s, caseSensitive) >= 0
+
+
+  fn beginsWith(this, s, caseSensitive = true) {
+    if s.length <= this.length {
+      const part = string.fromTextAndLength(this.text, s.length)
+      return part.compare(s, caseSensitive) == 0
+    }
+    return false
+  }
+
+
+  fn endsWith(this, s, caseSensitive = true) {
+    const i = this.length - s.length
+    if i >= 0 {
+      const part = string.fromTextAndLength(this.text + i, s.length)
+      return part.compare(s, caseSensitive) == 0
+    }
+    return false
+  }
+
+
+  fn reserved(this) = this.capacity - this.length
+
+
+  fn reserve(this, length): this {
+    import malloc from memory
+    assert length >= 0
+    if length {
+      const cap = this.length + length
+      return this if cap <= this.capacity
+      if this.capacity {
+        for this.capacity < cap
+          this.capacity <<= 1
+      } else {
+        this.capacity = length
+      }
+      this.text = malloc(this.text, this.capacity + 1)
+    }
+    return this
+  }
+
+
+  fn append(this, other): this {
+    return this.appendTextAndLength(other.text, other.length)
+  }
+
+
+  /*fn appendChar(this, ch): this {
+    return this.appendTextAndLength(&ch, 1)
+  }*/
+
+
+  fn appendTextAndLength(this, text, length): this {
+    assert length >= 0
+    if length {
+      assert text with "#{length}"
+      this.reserve(length)
+      mcopy(this.text + this.length, text, length)
+      this.text[this.length += length] = ''
+    }
+  }
+
+
+  fn appendRange(this, rangeBegin, rangeEnd): this {
+    this.appendTextAndLength(rangeBegin, rangeEnd - rangeBegin)
+  }
+
+
+  fn appendUpperCase(this, other) {
+    return this if other.isEmpty()
+    this.reserve(other.length)
+    for var i = 0; i < other.length; ++i {
+      this.text[this.length++] = char.toUpperCase(other.text[i])
+    }
+    this.text[this.length] = ''
+    return this
+  }
+
+
+  fn appendLowerCase(this, other) {
+    return this if other.isEmpty()
+    this.reserve(other.length)
+    for var i = 0; i < other.length; ++i {
+      this.text[this.length++] = char.toLowerCase(other.text[i])
+    }
+    this.text[this.length] = ''
+    return this
+  }
+
+
+  fn appendTitleCase(this, other) {
+    return this if other.isEmpty()
+    this.reserve(other.length)
+    var last = ''
+    for var i = 0; i < other.length; ++i {
+      const ch = other.text[i]
+      if char.isaWordBoundary(last) {
+        this.text[this.length++] = char.toUpperCase(ch)
+      } else {
+        this.text[this.length++] = char.toLowerCase(ch)
+      }
+      last = ch
+    }
+    this.text[this.length] = ''
+    return this
+  }
+
+
+  fn appendHtml(this, other) {
+    import escapeHtml from formatter
+    return this if other.isEmpty()
+    each escaped in escapeHtml(other) {
+      this.append(escaped)
+    }
+    return this
+  }
+
+
+  fn insert(this, index, other) {
+    if index == this.length
+      return this.append(other)
+    assert index >= 0 && index < this.length
+    return this if other.isEmpty()
+    this.reserve(other.length)
+    mmove(this.text + index + other.length, this.text + index, this.length - index)
+    mcopy(this.text + index, other.text, other.length)
+    this.text[this.length += other.length] = ''
+    return this
+  }
+
+
+  fn removeUpto(this, end) {
+    assert end >= 0 && end <= this.length
+    return this.remove(0, end)
+  }
+
+
+  fn removeFrom(this, startPos) {
+    assert startPos >= 0 && startPos <= this.length
+    return this.remove(startPos, this.length - startPos)
+  }
+
+
+  fn remove(this, startPos, length) {
+    assert length >= 0
+    if startPos == this.length {
+      assert length == 0
+      return this.clear()
+    }
+    assert this.text && this.length
+    assert startPos >= 0 && startPos < this.length
+    const endPos = startPos + length
+    assert endPos <= this.length
+    if endPos == this.length {
+      return this.clear() if startPos == 0
+      this.text[this.length = startPos] = ''
+      return this
+    }
+    assert endPos < this.length
+    const rem = this.length - endPos
+    mcopy(this.text + startPos, this.text + endPos, rem)
+    this.text[this.length = startPos + rem] = ''
+    return this
+  }
+
+
+  fn parseInt(this, base = 10) {
+    const (n, nok) = _tryParseInt(this, base)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseInt(this, base = 10) {
+    return _tryParseInt(this, base)
+  }
+
+
+  fn parseUInt(this, base = 10) {
+    const (n, nok) = _tryParseUInt(this, base)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseUInt(this, base = 10) {
+    return _tryParseUInt(this, base)
+  }
+
+
+  fn parseFloat(this) {
+    const (n, nok) = _tryParseFloat(this)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseFloat(this) {
+    return _tryParseFloat(this)
+  }
+
+
+  fn parseDouble(this) {
+    const (n, nok) = _tryParseDouble(this)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseDouble(this) {
+    return _tryParseDouble(this)
+  }
+
+
+  fn parseFraction(this, base = 10) {
+    const (n, nok) = _tryParseFraction(this, base)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseFraction(this, base = 10) {
+    return _tryParseFraction(this, base)
+  }
+
+
+  fn format(this, stream, fmt = ""): Void {
+    import builtins from formatter
+    const options = builtins.parseOptions(fmt)
+    formatStr(this, stream, options)
+  }
+
+
+  fn compare(this, other, caseSensitive = true) {
+    return 1  if this.length > other.length
+    return -1 if this.length < other.length
+    return 0 if this.length == 0
+    if caseSensitive
+      return os.strncmp(this.text, other.text, this.length)
+    return os._strnicmp(this.text, other.text, this.length)
+  }
+
+
+  fn compareLexicographically(this, other, caseSensitive = true) {
+    return _compareLexicographically(this, other, caseSensitive)
+  }
+
+
+  fn toLowerCase(this): this {
+    for var i = 0; i < this.length; ++i {
+      this.text[i] = char.toLowerCase(this.text[i])
+    }
+  }
+
+
+  fn toUpperCase(this): this {
+    for var i = 0; i < this.length; ++i {
+      this.text[i] = char.toUpperCase(this.text[i])
+    }
+  }
+
+
+  fn decodeUtf16(this, text, length): this {
+    import malloc from memory
+    assert length >= 0 with "Invalid length: #{length}"
+    if length {
+      assert text
+      // Calculate #utf8 required for {text}.
+      const required = os.WideCharToMultiByte(os.CP_UTF8, 0, text, length, null, 0, null, null)
+      assert required with "os.WideCharToMultiByte failed with #{os.GetLastError()}"
+      // Make space for {required}.
+      this.reserve(required + 1)
+      // Now actually convert.
+      const copied = os.WideCharToMultiByte(os.CP_UTF8, 0, text, length, this.text + this.length, required, null, null)
+      assert copied == required
+        with "os.WideCharToMultiByte failed with #{os.GetLastError()} for required = #{required}; copied = #{copied}"
+      this.text[this.length += copied] = ''
+    }
+  }
+
+
+  fn encodeBase16(this, arg, length): this {
+    assert length >= 0 with "Invalid length: #{length}"
+    if length {
+      assert arg
+      const text = arg as Char*
+      this.reserve((length << 1) + 1)
+      for var i = 0; i < length; ++i {
+        const hex = char.encodeBase16(text[i])
+        this.text[this.length++] = hex[0]
+        this.text[this.length++] = hex[1]
+      }
+      this.text[this.length] = ''
+    }
+  }
+
+
+  fn decodePercentEncoded(this, text, length) {
+    assert length >= 0
+    var errors = 0
+    if length {
+      var pos = text, mark = text, end = text + length
+      for ; pos < end; ++pos {
+        if *pos == '+' {
+          this.appendRange(mark, pos)
+          mark = pos + 1
+          this.append(" ")
+          continue
+        }
+        continue if *pos != '%'
+        this.appendRange(mark, pos)
+        mark = pos
+        if pos + 2 >= end {
+          ++errors
+        } else if char.isHex(pos[1]) && char.isHex(pos[2]) {
+          const (ch, ok) = char.decodeBase16(pos[1], pos[2])
+          if ok {
+            this.appendTextAndLength(&ch, 1)
+            mark = pos + 3
+            pos += 2 // Because of ++pos above.
+          } else {
+            ++errors
+          }
+        } else {
+          ++errors
+        }
+      }
+      this.appendRange(mark, pos)
+    }
+    return errors == 0
+  }
+}

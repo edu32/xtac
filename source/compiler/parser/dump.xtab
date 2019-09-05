@@ -1,0 +1,414 @@
+import File from fio
+
+define      DUMP_PATH "src-dump.txt"
+define MAX_BUF_LENGTH 0x8000
+
+fn dump(folder) {
+  auto path = String.fromBuffer(folder.path)
+  const idx = path.lastIndexOfChar('\\')
+  if idx >= 0 {
+    path.setLength(idx + 1)
+    path.append(DUMP_PATH)
+  } else {
+    path.append('\\').append(DUMP_PATH)
+  }
+  auto (file, fok) = fio.openTruncated(path)
+  if fok {
+    import time from std
+    const start = time.clock()
+    auto w = Writer{ file = file }
+    w.run(folder)
+    w.flush()
+    const elapsed = time.elapsed(start)
+    println("#{path}\r\n    \
+             #{'size'}#[%wl7]: #{w.size}#[%y%,%<gray>] (#{w.size}#[%,%<gray>] B)\r\n    \
+             #{'nodes'}#[%wl7]: #{w.nodes}#[%,%<gray>]\r\n    \
+             #{'flushes'}#[%wl7]: #{w.flushes}#[%,%<gray>]\r\n    \
+             #{'time'}#[%wl7]: #{elapsed}#[%<green>] s\r\n    \
+             #{'speed'}#[%wl7]: #{w.nodes/elapsed}#[%,%<gray>] nodes/s")
+  } else {
+    println("Could not open #{path} to dump 'src'")
+  }
+}
+
+struct Writer {
+  const buffer = String{}
+  const   file = File&{}
+  var    nodes = 0
+  var     size = 0
+  var  flushes = 0
+
+  fn dispose(this) {
+    delete this.buffer
+  }
+
+  fn run(this, folder) {
+    this.buffer.reserve(MAX_BUF_LENGTH)
+    this.write("root: ").writeln(folder.path)
+    for file in folder.files {
+      this.dumpFile(file.value, 1)
+    }
+    for child in folder.folders {
+      this.dumpFolder(child.value, 1)
+    }
+  }
+
+  fn dumpFolder(this, folder, tabs): void {
+    this.indent(tabs)
+    this.write("folder: ").writeln(folder.path)
+    for file in folder.files {
+      this.dumpFile(file.value, tabs + 1)
+    }
+    for child in folder.folders {
+      this.dumpFolder(child.value, tabs + 1)
+    }
+  }
+
+  fn dumpFile(this, file, tabs) {
+    this.indent(tabs)
+    this.writeln("file: #{file.name}")
+    if file.block {
+      this.dump(file.block, tabs + 1)
+    }
+  }
+
+  fn dump(this, stmt, tabs, suffix = ""): this {
+    return this if !stmt
+    ++this.nodes
+    this.indent(tabs++)
+    const range = Range {
+      start = stmt.pos.range.start,
+      end = src.nlastpos(stmt).range.end
+    }
+    /*this.write("#{nameof(stmt)} @#{range}")  
+    this.write("#{nameof(stmt)}")   
+    this.write(" @#{range}")
+    if suffix.length {
+      this.write(" : ").write(suffix)
+    }
+    this.ln()*/
+    switch stmt {
+      case src.Block {
+        this.write("Block").suffixln(suffix)
+        for child in stmt.children {
+          this.dump(child, tabs)
+        }
+      }
+      case src.If {
+        this.write("If").suffixln(suffix)
+        this.dump(stmt.condition, tabs, "if-condition")
+        this.dump(stmt.iftrue, tabs, "if-true")
+        this.dump(stmt.ifalse, tabs, "if-false")
+      }
+      case src.For {
+        this.write("For").suffixln(suffix)
+        this.dump(stmt.initializer, tabs, "for-initializer")
+        this.dump(stmt.condition, tabs, "for-condition")
+        this.dump(stmt.increment, tabs, "for-increment")
+        this.dump(stmt.block, tabs, "for-block")
+      }
+      case src.ForIn {
+        this.write("ForIn").suffixln(suffix)
+        this.dump(stmt.lhs, tabs, "forin-lhs")
+        this.dump(stmt.rhs, tabs, "forin-rhs")
+        this.dump(stmt.block, tabs, "forin-block")
+      }
+      case src.Each {
+        this.write("Each").suffixln(suffix)
+        this.dump(stmt.lhs, tabs)
+        this.dump(stmt.rhs, tabs)
+        this.dump(stmt.block, tabs)
+      }
+      case src.Switch {
+        this.write("Switch").suffixln(suffix)
+        this.dump(stmt.condition, tabs)
+        this.dump(stmt.block, tabs)
+      }
+      case src.Case {
+        this.write("Case").suffixln(suffix)
+        this.dump(stmt.condition, tabs)
+        this.dump(stmt.block, tabs)
+      }
+      case src.FlowControl {
+        this.write("FlowControl").suffixln(suffix)
+        this.dump(stmt.value, tabs)
+      }
+      case src.Assert {
+        this.write("Assert").suffixln(suffix)
+        this.dump(stmt.condition, tabs, "assert-condition")
+        this.dump(stmt.withPart, tabs, "assert-with")
+      }
+      case src.Import {
+        this.write("Import").suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.alias, tabs)
+        this.dump(stmt.source, tabs)
+      }
+      case src.Variable {
+        this.write("Variable: ").writeModifiers(stmt.modifiers).suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        if stmt.rhs {
+          this.dumpStr("=", tabs)
+          this.dump(stmt.rhs, tabs)
+        }
+      }
+      case src.Struct {
+        this.write("Struct").suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.parameters, tabs)
+        this.dump(stmt.supers, tabs)
+        this.dump(stmt.block, tabs)
+      }
+      case src.Union {
+        this.write("Union").suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.parameters, tabs)
+        this.dump(stmt.block, tabs)
+      }
+      case src.Enum {
+        this.write("Enum").suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.parameters, tabs)
+        this.dump(stmt.block, tabs)
+      }
+      case src.Function {
+        this.write("Function").writeln(": #{nameof(stmt.keyword)}")
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.parameters, tabs, "parameters")
+        this.dump(stmt.fnreturn, tabs)
+        this.dump(stmt.block, tabs)
+      }
+      case src.CommaList {
+        this.write("CommaList").suffixln(suffix)
+        for child in stmt.children {
+          this.dump(child, tabs)
+        }
+      }
+      case src.IfExpr {
+        this.write("IfExpr").suffixln(suffix)
+        this.dump(stmt.condition, tabs)
+        this.dump(stmt.iftrue, tabs)
+        this.dump(stmt.ifalse, tabs)
+      }
+      case src.Auto {
+        this.write("Auto").suffixln(suffix)
+        this.dump(stmt.value, tabs)
+      }
+      case src.Binary {
+        this.write("Binary").suffixln(suffix)
+        this.dump(stmt.lhs, tabs)
+        this.token(stmt.op.token, tabs)
+        this.dump(stmt.rhs, tabs)
+      }
+      case src.UnaryPrefix {
+        this.write("UnaryPrefix").suffixln(suffix)
+        this.token(stmt.op.token, tabs)
+        this.dump(stmt.rhs, tabs)
+      }
+      case src.UnarySuffix {
+        this.write("UnarySuffix").suffixln(suffix)
+        this.dump(stmt.lhs, tabs)
+        this.token(stmt.op.token, tabs)
+      }
+      case src.MemberName {
+        this.write("MemberName").suffixln(suffix)
+        this.dump(stmt.lhs, tabs)
+        this.dump(stmt.rhs, tabs)
+      }
+      case src.Initializer {
+        this.write("Initializer").suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.arguments, tabs)
+      }
+      case src.Call {
+        this.write("Call").suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.arguments, tabs)
+      }
+      case src.ArrayIndex {
+        this.write("ArrayIndex").suffixln(suffix)
+        this.dump(stmt.name, tabs)
+        this.dump(stmt.arguments, tabs)
+      }
+      case src.Tuple {
+        this.write("Tuple(children = ").dec(stmt.children.length).write(")").suffixln(suffix)
+        for child in stmt.children {
+          this.dump(child, tabs)
+        }
+      }
+      case src.Array {
+        this.write("Array").suffixln(suffix)
+        for child in stmt.children {
+          this.dump(child, tabs)
+        }
+      }
+      case src.Object {
+        this.write("Object").suffixln(suffix)
+        for child in stmt.children {
+          this.dump(child.value, tabs)
+        }
+      }
+      case src.NameValue {
+        this.write("NameValue").suffix(suffix).textln(stmt.name)
+        this.dump(stmt.value, tabs)
+      }
+      case src.Name {
+        this.write("Name: ").text(stmt.value).suffixln(suffix)
+      }
+      case src.InterpolationItem {
+        this.write("InterpolationItem").suffix(suffix).textln(stmt.fmt)
+        this.dump(stmt.value, tabs)
+      }
+      case src.Interpolation {
+        this.write("Interpolation").suffixln(suffix)
+        for child in stmt.children {
+          this.dump(child, tabs)
+        }
+      }
+      case src.Text {
+        this.write("Text").suffixln(suffix)
+      }
+      case src.Quoted {
+        this.write("Quoted").suffixln(suffix)
+      }
+      case src.Character {
+        this.write("Character: '").write(stmt.value).write("'").suffixln(suffix)
+      }
+      case src.Constant {
+        this.write("Constant").suffixln(suffix)
+      }
+      default {
+        assert with "#{nameof(stmt)}"
+      }
+    }
+  }
+
+  fn writeModifiers(this, modifiers): this {
+    var i = 0
+    if modifiers.isStatic {
+      this.write(" ") if i++
+      this.write("static")
+    }
+    if modifiers.isConst {
+      this.write(" ") if i++
+      this.write("const")
+    }
+    if modifiers.isReadOnly {
+      this.write(" ") if i++
+      this.write("readonly")
+    }
+    if modifiers.isAuto {
+      this.write(" ") if i++
+      this.write("auto")
+    }
+    if modifiers.isSynchronized {
+      this.write(" ") if i++
+      this.write("synchronized")
+    }
+    if modifiers.isAsync {
+      this.write(" ") if i++
+      this.write("async")
+    }
+    if modifiers.isAbstract {
+      this.write(" ") if i++
+      this.write("abstract")
+    }
+  }
+
+  fn dumpStr(this, str, tabs): this {
+    this.indent(tabs + 1)
+    this.writeln(str)
+  }
+
+  fn suffix(this, suffix): this {
+    if suffix.length {
+      this.write(" [").write(suffix).write("]")
+    }
+  }
+
+  fn suffixln(this, suffix): this {
+    if suffix.length {
+      this.write(": ").writeln(suffix)
+    } else {
+      this.ln()
+    }
+  }
+
+  fn text(this, value): this {
+    if value {
+      this.write('"').write(value).write('"')
+    }
+  }
+
+  fn textln(this, value): this {
+    this.text(value)
+    this.ln()
+  }
+
+  fn token(this, token, tabs): this {
+    this.indent(tabs + 1)
+    switch token {
+      case Tok.Assign                   this.writeln("=")
+      case Tok.OrAssign                 this.writeln("|=")
+      case Tok.XOrAssign                this.writeln("^=")
+      case Tok.AndAssign                this.writeln("&=")
+      case Tok.LeftShiftAssign          this.writeln("<<=")
+      case Tok.RightShiftAssign         this.writeln(">>=")
+      case Tok.UnsignedRightShiftAssign this.writeln(">>>=")
+      case Tok.PlusAssign               this.writeln("+=")
+      case Tok.MinusAssign              this.writeln("-=")
+      case Tok.RemainderAssign          this.writeln("%=")
+      case Tok.DivideAssign             this.writeln("/=")
+      case Tok.MultiplyAssign           this.writeln("*=")
+      default this.writeln("#{nameof(token)}")
+    }
+  }
+
+  fn flush(this): this {
+    if this.buffer.length {
+      ++this.flushes
+      this.size += this.buffer.length
+      this.file.append(this.buffer)
+      this.buffer.clear()
+    }
+  }
+
+  fn indent(this, tabs): this {
+    for var i = 0; i < tabs; ++i {
+      this.write("|  ")
+    }
+  }
+
+  fn ln(this): this {
+    this.write("\r\n")
+  }
+
+  fn dec(this, value): this {
+    this.flush()  if this.buffer.length + 0x20 >= this.buffer.capacity
+    value.format(this.buffer)
+  }
+
+  fn writeln(this, s): this {
+    this.write(s)
+    this.write("\r\n")
+  }
+
+  fn write(this, s): this {
+    assert this.buffer.capacity <= MAX_BUF_LENGTH with "#{this.buffer.capacity}"
+    var written = 0
+    for {
+      const available = this.buffer.capacity - this.buffer.length
+      const remaining = s.length - written
+      break if remaining == 0
+      assert remaining > 0
+      if remaining <= available {
+        this.buffer.appendTextAndLength(s.text + written, remaining)
+        break
+      }
+      //assert with "#{available}; #{remaining}; #{this.buffer.capacity}"
+      this.buffer.appendTextAndLength(s.text + written, available)
+      written += available
+      this.flush()
+    }
+  }
+}

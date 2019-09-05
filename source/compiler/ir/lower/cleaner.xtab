@@ -1,0 +1,440 @@
+fn run(ctx) {
+  checkBlocks(ctx)
+  checkSymbols(ctx)
+}
+
+
+fn checkBlocks(ctx) {  
+  import worker
+  const provider = worker.BatchProvider{ program = ctx.ssa }
+  const    start = time.clock()
+  auto generator = provider.functions()
+  const  context = {
+             srw = atomic.ExclusiveLock{},
+       generator = generator,
+    singleThread = false,
+         visited = { functions = 0, blocks = 0, values = 0 },
+         removed = { elems = 0, trampolines = 0, fallthroughs = 0 },
+    update = synchronized fn(self, pass) {
+            self.visited.blocks += pass.visited.blocks
+            self.visited.values += pass.visited.values
+             self.removed.elems += pass.removed.elems
+       self.removed.trampolines += pass.removed.trampolines
+      self.removed.fallthroughs += pass.removed.fallthroughs
+      ++self.visited.functions
+    }
+  }
+  threads.run(context) with {
+    auto batch = List(ssa.Function*){}
+    for it.generator.fill(batch) {
+      for function in batch {
+        auto pass = BlocksChecker{ function = function }
+        pass.run()
+        it.update(pass)
+      }
+    }
+  }
+
+  const elapsed = time.elapsed(start)
+  println("#{'cleaner'}#[%<darkblue|cyan>]: {\r\n\
+    #{'purpose'}#[%wl12]: #{'removes unused blocks and removes redundant memory-accesses in the (non-ssa) ir'}#[%<darkyellow>],\r\n\
+    #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+    #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+    #{'visited'}#[%wl12]: { functions: #{context.visited.functions}#[%<gray>%,], \
+                               blocks: #{context.visited.blocks}#[%<gray>%,], \
+                               values: #{context.visited.values}#[%<gray>%,] },\r\n\
+    #{'removed'}#[%wl12]: { elems: #{context.removed.elems}#[%,%<gray>] (#{100.0 * context.removed.elems / context.visited.values}#[%d2%<gray>]%), \
+                      trampolines: #{context.removed.trampolines}#[%,%<gray>] (#{100.0 * context.removed.trampolines / context.visited.blocks}#[%d2%<gray>]%), \
+                     fallthroughs: #{context.removed.fallthroughs}#[%,%<gray>] (#{100.0 * context.removed.fallthroughs / context.visited.blocks}#[%d2%<gray>]%) },\r\n\
+    #{'memory'}#[%wl12]: #{memory.mformat()} }")
+}
+
+
+struct BlocksChecker {
+  const function = ssa.Function*{}
+  const  visited = { blocks = 0, values = 0 }
+  const  removed = {
+           elems = 0,
+     trampolines = 0,
+    fallthroughs = 0
+  }
+
+
+  fn run(this) {
+    var replaced = 0
+    each block in this.function.blocks() {
+      block.index = this.visited.blocks++
+      for var value = block.body.first; value; value = value.qnext {
+        value.index = this.visited.values++
+        if const elem = value is ssa.ElementAt {
+          if !this.tryExpandElementAtOperands(elem) {
+            this.tryReplaceDuplicatesOfElementAt(elem)
+          }
+        }
+      }
+    }
+    for var block = this.function.body.first; block;  {
+      var qnext = block.qnext
+      this.removeUnusedElementAts(block)
+      if !this.tryRemoveTrampoline(block) {
+        this.tryRemoveFallThrough(block)
+      }
+      block = qnext
+    }
+  }
+
+
+  fn tryReplaceDuplicatesOfElementAt(this, elem) {
+    each value in this.function.flattenFrom(elem) {
+      continue if value == elem
+      switch value {
+        case ssa.ElementAt {
+          if elem.operands == value.operands {
+            if !elem.operands.anyIsWrittenTo() {
+              value.replace(elem)
+            }
+          }
+        }
+      }
+    }
+  }
+
+
+  fn tryExpandElementAtOperands(this, elem) {
+    /*  Find the pattern:
+          prior · base[ ...immediate or field indices... ]
+          address ⟵ & prior
+          elem · address[ 0 ][ ...immediate or field indices... ]
+        Replace it with:
+          result · base[ ...immediate or field indices of prior... ][ ...immediate or field indices of elem...]
+    */
+    assert elem.operands.length > 1
+
+    //  1st operand of {elem} is an address.
+    const address = elem.operands.items[ssa.op1].isaNode() is ssa.Address
+    return false if !address
+
+    //  2nd operand of {elem} is 0
+    return false if elem.operands.items[ssa.op2].isNotAnImmediate()
+    return false if elem.operands.items[ssa.op2].value.immediate.value.i64 != 0i64
+
+    const prior = address.operands.items[ssa.op1].isaNode() is ssa.ElementAt
+    assert prior
+
+    //  Both {prior} and {elem} are indexed by immediates and/or fields.
+    return false if !operandsAreImmediatesOrFields(prior) || !operandsAreImmediatesOrFields(elem)
+
+    //  The {result} will have all the operands of {prior} and the operands of {elem} less the 1st 2:
+    //    · The {address} operand and
+    //    · The 1st 0 index which just dereferences {address}.
+    const result = new ssa.ElementAt{ pos = elem.pos, parent = elem.parent, type = elem.type }
+    const operands = prior.operands.length + (elem.operands.length - 1)
+    result.initialize(operands = prior.operands.length + (elem.operands.length - 2))
+
+    var i = 0
+    for ; i < prior.operands.length; ++i {
+      const operand = prior.operands.items[i]
+      if const node = operand.isaNode() {
+        result.operands.set(i, node)
+      } else if const immediate = operand.isanImmediate() {
+        result.operands.imm(i, immediate)
+      } else {
+        assert 0
+      }
+    }
+
+    for var j = 2; j < elem.operands.length; ++j {
+      const operand = elem.operands.items[j]
+      if const node = operand.isaNode() {
+        result.operands.set(i, node)
+      } else if const immediate = operand.isanImmediate() {
+        result.operands.imm(i, immediate)
+      } else {
+        assert 0
+      }
+      ++i
+    }
+
+    //  Insert {result} and replace all occurrences of {elem} with {result}.
+    elem.parent.body.insertAfter(result, elem)
+    elem.replace(result)
+
+    return true
+
+    fn operandsAreImmediatesOrFields(elem) {
+      for var i = 1; i < elem.operands.length; ++i {
+        const operand = elem.operands.items[i]
+        continue if operand.isanImmediate()
+        if const node = operand.isaNode() {
+          return false if node !is ssa.Field
+        } else {
+          return false
+        }
+      }
+      return true
+    }
+  }
+
+
+  fn removeUnusedElementAts(this, block) {    
+    for var value = block.body.first; value; {
+      var qnext = value.qnext
+      switch value {
+        case ssa.ElementAt {
+          if value.uses.isEmpty() {
+            value.operands.clear()
+            block.body.remove(value)
+            delete value
+            ++this.removed.elems
+          }
+        }
+      }
+      value = qnext
+    }
+  }
+
+  /*  "the trampoline"
+        bb.x {
+          ...
+          goto bb.y
+        }
+        ...
+        bb.y {
+          goto bb.z
+        }
+        ...
+        bb.z {
+          ...
+        }
+      Let {bb.x} jump to {bb.z} directly i.e. remove bb.y.
+  */
+
+  fn tryRemoveTrampoline(this, block) {
+    if block.body.first == block.body.last {
+      switch block.body.first {
+        case term: ssa.Jump {
+          const successor = term.target()
+          if successor.index > block.index {
+            return this.removeTrampoline(block, successor)
+          }
+        }
+      }
+    } 
+    return false
+  }
+
+
+  fn removeTrampoline(this, block, successor) {
+    // Visit each predecessor of {block} and make the term point to {succssor}.
+    for var i = block.uses.length; --i >= 0; {
+      const  use = block.uses.items[i]
+      const term = use.user // Term of predecessor.
+      switch term {
+        case ssa.Jump {
+          const target = term.target()
+          if target == block {
+            term.operands.set(0, successor)
+          } else {
+            println("<#{'removeTrampoline'}#[%<red>]> jump not targeting block")
+          }
+        }
+        case ssa.JumpIf {
+          const iftrue = term.iftrue()
+          const ifalse = term.ifalse()
+          if iftrue == block {
+            term.operands.set(0, successor)
+          } else if ifalse == block {
+            // Do nothing
+          } else {
+            println("<#{'removeTrampoline'}#[%<red>]> jumpif to neither iftrue nor ifalse block")
+          }
+        }
+        default assert with nameof(term)
+      }
+    }
+    if block.doesNotHavePredecessors() {
+      successor.removePredecessor(block)
+      this.function.body.remove(block)
+      delete block
+      ++this.removed.trampolines
+      return true
+    }
+    return false
+  }
+
+  /*  "the fallthrough"
+        bb.x {
+          ...
+          goto bb.y
+        }
+        bb.y {
+          ...
+        }
+      Move the contents of {bb.y} to just before the terminator of {bb.x} IF AND ONLY IF {bb.y}'s has {bb.x}
+      as its only predecessor
+  */
+  fn tryRemoveFallThrough(this, block) {
+    if block.uses.length == 1 { // {block} has 1 predecessor.
+      const             use = block.uses.items[0]
+      const predecessorTerm = use.user
+      const     predecessor = predecessorTerm.parent
+      switch predecessorTerm {
+        case term: ssa.Jump {
+          if term.target() == block { // {block} is the 1 and only target of {predecessor}.
+            if block.qprev == predecessor { // {block} occurs immediately after {predecessor}.
+              this.merge(predecessor, block) // Merge and eliminate.
+              return true
+            }
+          } else {
+            println("<#{'tryRemoveFallThrough'}#[%<red>]> jump not targeting block")
+          }
+        }
+      }
+    }
+    return false
+  }
+
+
+  fn merge(this, predecessor, block) {
+    // Remove the 1 and only reference to {block}.
+    block.removePredecessor(predecessor)
+
+    // Kill term of {predecessor.}
+    var term = predecessor.body.removeLast() as ssa.Jump*
+    delete term
+
+    // Move the body of {block} to {predecessor}.
+    for const expr = block.body.removeFirst() {
+       expr.parent = predecessor
+      predecessor.body.append(expr)
+    }
+
+    // Kill {block}.
+    assert block.uses.isEmpty() && block.body.isEmpty()
+    this.function.body.remove(block)
+    delete block
+    ++this.removed.fallthroughs
+  }
+}
+
+
+fn checkSymbols(ctx) {
+  import worker
+  {
+    const provider = worker.BatchProvider{ program = ctx.ssa }
+    const    start = time.clock()
+    auto generator = provider.symbolsUsed()
+    const  context = {
+               srw = atomic.ExclusiveLock{},
+         generator = generator,
+      singleThread = false
+    }
+
+    threads.run(context) with {
+      auto batch = List(ssa.Symbol*){}
+      for it.generator.fill(batch) {
+        for symbol in batch {
+          atomic.increment(&symbol.uses)
+        }
+      }
+    }
+
+    const elapsed = time.elapsed(start)
+    println("#{'typeUsageAnalaysis'}#[%<darkblue|cyan>]: {\r\n\
+      #{'purpose'}#[%wl12]: #{'computes the usage of types by values in the (non-ssa) ir for removal'}#[%<darkyellow>],\r\n\
+      #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+      #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+      #{'memory'}#[%wl12]: #{memory.mformat()} }")
+  }
+
+  {
+    const    start = time.clock()
+    const  context = {
+               srw = atomic.ExclusiveLock{},
+      singleThread = false,
+           program = ctx.ssa,
+                id = 0,
+           visited = { structs = 0, arrays = 0, externs = 0, globals = 0, functions = 0 },
+           removed = { structs = 0, arrays = 0, externs = 0, globals = 0, functions = 0 }
+    }
+
+    threads.run(context) with {
+      for {        
+        switch const id = atomic.increment(&it.id) {
+          case 1 removeUnused(it, it.program.data.structs)
+          case 2 removeUnused(it, it.program.data.arrays)
+          case 3 removeUnused(it, it.program.data.externs)
+          case 4 removeUnused(it, it.program.data.globals)
+          case 5 removeUnused(it, it.program.code.functions)
+          default break
+        }
+      }
+    }
+
+    const elapsed = time.elapsed(start)
+    println("#{'typesRemover'}#[%<darkblue|cyan>]: {\r\n\
+      #{'purpose'}#[%wl12]: #{'removes unused types in the (non-ssa) ir'}#[%<darkyellow>],\r\n\
+      #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+      #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+      #{'visited'}#[%wl12]: { structs: #{context.visited.structs}#[%<gray>], \
+                               arrays: #{context.visited.arrays}#[%,%<gray>], \
+                              externs: #{context.visited.externs}#[%,%<gray>], \
+                              globals: #{context.visited.globals}#[%,%<gray>], \
+                            functions: #{context.visited.functions}#[%,%<gray>] },\r\n\
+      #{'removed'}#[%wl12]: { structs: #{context.removed.structs}#[%<gray>] (#{ 0.0 if !context.visited.structs else 100.0 * context.removed.structs / context.visited.structs }#[%d2%<gray>]%), \
+                               arrays: #{context.removed.arrays}#[%,%<gray>] (#{ 0.0 if !context.visited.arrays else 100.0 * context.removed.arrays / context.visited.arrays }#[%d2%<gray>]%), \
+                              externs: #{context.removed.externs}#[%,%<gray>] (#{ 0.0 if !context.visited.externs else 100.0 * context.removed.externs / context.visited.externs }#[%d2%<gray>]%), \
+                              globals: #{context.removed.globals}#[%,%<gray>] (#{ 0.0 if !context.visited.globals else 100.0 * context.removed.globals / context.visited.globals }#[%d2%<gray>]%), \
+                            functions: #{context.removed.functions}#[%,%<gray>] (#{ 0.0 if !context.visited.functions else 100.0 * context.removed.functions / context.visited.functions }#[%d2%<gray>]%) },\r\n\
+      #{'memory'}#[%wl12]: #{memory.mformat()} }")
+  }
+}
+
+
+fn removeUnused(ctx, list) {
+  for i, symbol in list {
+    switch symbol {
+      case ssa.Struct {
+        atomic.increment(&ctx.visited.structs)
+        continue if symbol.uses
+        atomic.increment(&ctx.removed.structs)
+        list.removeAt(i)
+        delete symbol
+        --i // Because of ++i above
+      }
+      case ssa.Extern {
+        atomic.increment(&ctx.visited.externs)
+        continue if symbol.uses
+        atomic.increment(&ctx.removed.externs)
+        list.removeAt(i)
+        delete symbol
+        --i // Because of ++i above
+      }
+      case ssa.Array {
+        atomic.increment(&ctx.visited.arrays)
+        continue if symbol.uses
+        atomic.increment(&ctx.removed.arrays)
+        list.removeAt(i)
+        delete symbol
+        --i // Because of ++i above
+      }
+      case ssa.Function {
+        continue if symbol.isaFile
+        atomic.increment(&ctx.visited.functions)
+        continue if symbol.uses
+        atomic.increment(&ctx.removed.functions)
+        list.removeAt(i)
+        delete symbol
+        --i // Because of ++i above
+      }
+      case ssa.Global {        
+        atomic.increment(&ctx.visited.globals)
+        continue if symbol.uses
+        atomic.increment(&ctx.removed.globals)
+        list.removeAt(i)
+        delete symbol
+        --i // Because of ++i above
+      }
+    }
+  }
+}

@@ -1,0 +1,400 @@
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+define NANOSECONDS_PER_TICK                       100u64
+define TICKS_PER_MICROSECOND                       10u64
+define TICKS_PER_MILLISECOND                   10_000u64
+define TICKS_PER_SECOND                    10_000_000u64
+define TICKS_PER_MINUTE                   600_000_000u64
+define TICKS_PER_HOUR                  36_000_000_000u64
+define TICKS_PER_DAY                  864_000_000_000u64
+define TICKS_PER_WEEK               6_048_000_000_000u64
+define TICKS_PER_MONTH             26_297_460_000_000u64
+define TICKS_PER_YEAR             315_569_520_000_000u64
+
+define AVERAGE_DAYS_IN_MONTH      30.436875
+define AVERAGE_DAYS_IN_YEAR       365.24250 // 30.436875 * 12.0
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+readonly dayOfWeekNames = [
+  "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+]
+
+readonly monthNames = [
+  "", "January", "February", "March",    "April",    "May",      "June",
+      "July",    "August",   "September", "October", "November", "December"
+]
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn nanosecondsToTicks(n)  = UInt64(n) * NANOSECONDS_PER_TICK
+fn microsecondsToTicks(n) = UInt64(n) * TICKS_PER_MICROSECOND
+fn millisecondsToTicks(n) = UInt64(n) * TICKS_PER_MILLISECOND
+fn secondsToTicks(n)      = UInt64(n) * TICKS_PER_SECOND
+fn minutesToTicks(n)      = UInt64(n) * TICKS_PER_MINUTE
+fn hoursToTicks(n)        = UInt64(n) * TICKS_PER_HOUR
+fn daysToTicks(n)         = UInt64(n) * TICKS_PER_DAY
+fn weeksToTicks(n)        = UInt64(n) * TICKS_PER_WEEK
+fn monthsToTicks(n)       = UInt64(n) * TICKS_PER_MONTH
+fn yearsToTicks(n)        = UInt64(n) * TICKS_PER_YEAR
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn now() {
+  return Date.now()
+}
+
+fn timeStamp() {
+  return Date.now().timeStamp()
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Date {
+  readonly ticks = 0u64
+
+  fn now() {
+    const st = os.SYSTEMTIME{}
+    os.GetSystemTime(st)
+    return Date{ ticks = SystemTimeToTicks(st) }
+  }
+  
+  fn timeStamp(this) {
+    define EPOCH_DIFFERENCE_IN_SECONDS               11_644_473_600u64
+    define EPOCH_DIFFERENCE_IN_MILLISECONDS      11_644_473_600_000u64
+    define EPOCH_DIFFERENCE_IN_TICKS        116_444_736_000_000_000u64
+    return (this.ticks - EPOCH_DIFFERENCE_IN_TICKS) / TICKS_PER_SECOND
+  }
+
+  fn fromSystemTime(st) {
+    return Date{ ticks = SystemTimeToTicks(st)  }
+  }
+
+  fn fromFileTime(ft) {
+    return Date{ ticks = ft.ticks() }
+  }
+
+  fn -(this, other) {
+    const lhs = Int64(this.ticks)
+    const rhs = Int64(other.ticks)
+    return TimeSpan{
+      ticks = lhs - rhs
+    }
+  }
+
+  fn >(this, other) = this.ticks > other.ticks
+  fn <(this, other) = this.ticks < other.ticks
+  fn ==(this, other) = this.ticks == other.ticks
+  fn !=(this, other) = this.ticks != other.ticks
+
+  fn formatLocal(this, stream, fmt = "%Www, %dd %Mmm %yyyy %HH:%ii:%ss GMT") {
+    return this.format(stream, fmt, /* convertToLocalTime = */ true)
+  }
+
+  fn format(this, stream, fmt = "%Www, %dd %Mmm %yyyy %HH:%ii:%ss GMT", convertToLocalTime = false) {
+    fn tokenizer(fmt) {
+      return {
+        pos = fmt.text,
+        end = fmt.end(),
+        next = fn(self) {
+          return ('', "", /* done = */ true) if self.pos == self.end
+          assert self.pos < self.end
+          const mark = self.pos
+          if *self.pos == '%' {
+            ++self.pos // Past '%'
+            return ('', string.fromRange(mark, self.pos), false) if self.pos == self.end
+            if *self.pos == '%' {
+              ++self.pos
+              return ('', "%", false)
+            }
+            const token = *self.pos
+            const upperCase = char.toUpperCase(token)
+            for ++self.pos < self.end {
+              break if *self.pos != token && char.toUpperCase(*self.pos) != upperCase
+            }
+            return (token, string.fromRange(mark + 1, self.pos), false)
+          } 
+          for ; self.pos < self.end && *self.pos != '%'; ++self.pos {}
+          return ('', string.fromRange(mark, self.pos), false)
+        }
+      }
+    }
+    const st = TicksToLocalSystemTime(this.ticks) if convertToLocalTime else TicksToSystemTime(this.ticks)
+    each token, value in tokenizer(fmt) {
+      if token {
+        assert value.length
+        if token == 'W' || token == 'w' {
+          appendNameOfDayOfWeek(stream, st.wDayOfWeek, value)
+        } else if token == 'M' || token == 'm' {
+          appendNameOfMonth(stream, st.wMonth, value)
+        } else if token == 'N' || token == 'n' {
+          appendNumber(stream, st.wMonth, value)  
+        } else if token == 'D' || token == 'd' {
+          appendNumber(stream, st.wDay, value)
+        } else if token == 'H' {
+          appendNumber(stream, st.wHour, value)
+        } else if token == 'h' {
+          if st.wHour <= 12 {
+            appendNumber(stream, st.wHour, value)
+          } else {
+            appendNumber(stream, st.wHour - 12, value)
+          }
+        } else if token == 'i' {
+          appendNumber(stream, st.wMinute, value)
+        } else if token == 's' {
+          appendNumber(stream, st.wSecond, value)
+        } else if token == 'Y' || token == 'y' {
+          appendNumber(stream, st.wYear, value)
+        } else if token == 'x' {
+          appendNumber(stream, st.wMilliseconds, value)
+        } else {
+          stream.append("%").append(value)
+        }
+      } else {
+        stream.append(value)
+      }
+    }
+    fn appendNameOfDayOfWeek(stream, n, fmt) {
+      if n >= dayOfWeekNames.length {
+        stream.append("!invalid day-of-week index = ")
+        n.format(stream)
+      } else if fmt.length == 1 {
+        var ch = dayOfWeekNames[n].text[1]
+        if char.isLowerCase(*fmt.text) {
+          ch = char.toLowerCase(ch)
+        }
+        stream.append(string.fromTextAndLength(&ch, 1))
+      } else if fmt.length == 3 {
+        var array = [
+          dayOfWeekNames[n].text[0],
+          dayOfWeekNames[n].text[1],
+          dayOfWeekNames[n].text[2]
+        ]
+        for var i = 1; i < fmt.length; ++i {
+          if char.isUpperCase(fmt.text[i]) {
+            array[i] = char.toUpperCase(array[i])
+          }
+        }
+        stream.append(string.fromArrayAndLength(array, array.length))
+      } else {
+        stream.append(dayOfWeekNames[n])
+      } 
+    }    
+    fn appendNameOfMonth(stream, n, fmt) {
+      if n == 0 || n >= monthNames.length {
+        stream.append("!invalid month-of-year index = ")
+        n.format(stream)
+      } else if fmt.length == 1 {
+        var ch = monthNames[n].text[1]
+        if char.isLowerCase(*fmt.text) {
+          ch = char.toLowerCase(ch)
+        }
+        stream.append(string.fromTextAndLength(&ch, 1))
+      } else if fmt.length == 3 {
+        var array = [
+          monthNames[n].text[0],
+          monthNames[n].text[1],
+          monthNames[n].text[2]
+        ]
+        for var i = 1; i < fmt.length; ++i {
+          if char.isUpperCase(fmt.text[i]) {
+            array[i] = char.toUpperCase(array[i])
+          }
+        }
+        stream.append(string.fromArrayAndLength(array, array.length))
+      } else {
+        stream.append(monthNames[n])
+      } 
+    }
+    fn appendNumber(stream, n, fmt) {
+      if fmt.length == 1 {
+        n.format(stream)
+      } else {
+        auto temp = String{}
+        n.format(temp)
+        for var i = temp.length; i < fmt.length; ++i {
+          stream.append("0")
+        }
+        stream.append(temp)
+      }
+    }
+  }
+  fn parseHttpDate(s) {
+    const dt = Date{}
+    return dt
+  }
+  fn parseSqlDate(s) {
+    var   dt    = Date{}
+    const end   = s.end()
+    var   mark  = s.text
+    var   pos   = mark
+    return (dt, false) if pos == end
+
+    // yyyy
+    for ; pos < end && *pos != '-'; ++pos {}
+    return (dt, false) if pos == end || pos - mark != 4
+    var s = string.fromRange(mark, pos)
+    const (year, yearok) = s.tryParseInt()
+    return (dt, false) if !yearok || year < 0 || year >= 0xFFFF
+
+    // mm
+    for mark = ++pos; pos < end && *pos != '-'; ++pos {}
+    return (dt, false) if pos == end || pos - mark != 2
+    s = string.fromRange(mark, pos)
+    const (month, monthok) = s.tryParseInt()
+    return (dt, false) if !monthok || month < 1 || month > 12
+
+    // dd
+    for mark = ++pos; pos < end && *pos != ' '; ++pos {}
+    return (dt, false) if pos - mark != 2
+    s = string.fromRange(mark, pos)
+    const (day, dayok) = s.tryParseInt()
+    return (dt, false) if !day || day < 1 || day > 31
+
+    var hour = 0, minute = 0, second = 0, millisecond = 0, ok = false
+    if pos < end {
+      // HH
+      for mark = ++pos; pos < end && *pos != ':'; ++pos {}
+      return (dt, false) if pos == end || mark - pos != 2
+      s = string.fromRange(mark, pos)
+      (hour, ok) = s.tryParseInt()
+      return (dt, false) if !ok || hour < 0 || hour > 23
+
+      // ii
+      for mark = ++pos; pos < end && *pos != ':'; ++pos {}
+      return (dt, false) if pos == end || mark - pos != 2
+      s = string.fromRange(mark, pos)
+      (minute, ok) = s.tryParseInt()
+      return (dt, false) if !ok || minute < 0 || minute > 59
+
+      if pos < end {
+        // ss
+        for mark = ++pos; pos < end && *pos != ':'; ++pos {}
+        return (dt, false) if pos == end || mark - pos != 2
+        s = string.fromRange(mark, pos)
+        (second, ok) = s.tryParseInt()
+        return (dt, false) if !ok || second < 0 || second > 60
+
+        if pos < end {
+          // xx
+          for mark = ++pos; pos < end; ++pos {}
+          return (dt, false) if pos == end || mark - pos > 3
+          s = string.fromRange(mark, pos)
+          (millisecond, ok) = s.tryParseInt()
+          return (dt, false) if !ok || millisecond < 0 || millisecond > 999
+        }
+      }
+    }
+    const st = os.SYSTEMTIME{
+      wYear         = year,
+      wMonth        = month,
+      wDay          = day,
+      wHour         = hour,
+      wMinute       = minute,
+      wSecond       = second,  
+      wMilliseconds = millisecond    
+    }
+    const ft = os.FILETIME{}
+    return (dt, false) if !os.SystemTimeToFileTime(st, ft)
+    dt.ticks = ft.ticks()
+    return dt
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct TimeSpan {
+  readonly ticks = 0i64
+
+  fn microseconds(this) = Double(this.ticks) / Double(TICKS_PER_MICROSECOND)
+  fn milliseconds(this) = Double(this.ticks) / Double(TICKS_PER_MILLISECOND)
+  fn seconds(this)      = Double(this.ticks) / Double(TICKS_PER_SECOND)
+  fn minutes(this)      = Double(this.ticks) / Double(TICKS_PER_MINUTE)
+  fn hours(this)        = Double(this.ticks) / Double(TICKS_PER_HOUR)
+  fn days(this)         = Double(this.ticks) / Double(TICKS_PER_DAY)
+  fn weeks(this)        = Double(this.ticks) / Double(TICKS_PER_WEEK)
+  fn months(this)       = Double(this.ticks) / Double(TICKS_PER_MONTH)
+  fn years(this)        = Double(this.ticks) / Double(TICKS_PER_YEAR)
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn clock() {
+  /*onst precise = 0u64
+  os.GetSystemTimePreciseAsFileTime(&precise)
+  return precise*/
+  const performanceCount = 0i64
+  assert os.QueryPerformanceCounter(&performanceCount) with "os.QueryPerformanceCounter failed with #{os.GetLastError()}"
+  return performanceCount
+}
+
+fn elapsed(start) {
+  /*const end      = clock()
+  const duration = end - start
+  return Double(duration) / TICKS_PER_SECOND*/
+  const end         = clock()
+  const duration    = end - start
+  const frequency   = 0i64
+  assert os.QueryPerformanceFrequency(&frequency) with "os.QueryPerformanceFrequency failed with #{os.GetLastError()}"
+  return Double(duration) / frequency
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+/*fn TicksToUtcSystemTime(ticks) {
+  const fileTime = os.FILETIME.fromTicks(ticks)
+  const utcTime = os.SYSTEMTIME{}
+  assert os.FileTimeToSystemTime(fileTime, utcTime) with
+    "os.FileTimeToSystemTime failed with #{os.GetLastError()}"
+  return utcTime
+}
+
+fn UtcSystemTimeToTicks(utcTime) {
+  const fileTime = os.FILETIME{}
+  assert os.SystemTimeToFileTime(utcTime, fileTime) with
+    "os.SystemTimeToFileTime failed with #{os.GetLastError()}"
+  return fileTime.ticks()
+}*/
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn TicksToLocalSystemTime(ticks) {
+  const utc = TicksToSystemTime(ticks)
+  const local = os.SYSTEMTIME{}
+  assert os.SystemTimeToTzSpecificLocalTime(null, utc, local) with
+    "os.SystemTimeToTzSpecificLocalTime failed with #{os.GetLastError()}"
+  return local
+}
+
+fn LocalSystemTimeToTicks(local) {
+  const utc = os.SYSTEMTIME{}
+  assert os.TzSpecificLocalTimeToSystemTime(null, local, utc) with
+    "os.TzSpecificLocalTimeToSystemTime failed with #{os.GetLastError()}"
+  return SystemTimeToTicks(utcTime)
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn TicksToFileTime(ticks) {
+  return os.FILETIME.fromTicks(ticks)
+}
+
+fn FileTimeToTicks(ft) {
+  return ft.ticks()
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn SystemTimeToFileTime(st) {
+  const ft = os.FILETIME{}
+  assert os.SystemTimeToFileTime(st, ft) with
+    "os.SystemTimeToFileTime failed with #{os.GetLastError()}"
+  return ft
+}
+
+fn FileTimeToSystemTime(ft) {
+  const st = os.SYSTEMTIME{}
+  assert os.FileTimeToSystemTime(ft, st) with
+    "os.FileTimeToSystemTime failed with #{os.GetLastError()}"
+  return st
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn TicksToSystemTime(ticks) {
+  const ft = TicksToFileTime(ticks)
+  return FileTimeToSystemTime(ft)
+}
+
+fn SystemTimeToTicks(st) {
+  const ft = SystemTimeToFileTime(st)
+  return FileTimeToTicks(ft)
+}

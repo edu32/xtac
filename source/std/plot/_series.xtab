@@ -1,0 +1,85 @@
+struct Series {
+  readonly name     = String{}
+  const    items    = Value*{}
+  const    length   = 0
+  readonly range    = Range{}
+  var      fill     = Color.Black
+  var      stroke   = Color.Black
+  var      specials = List(Value){}
+
+
+  fn dispose(this) {
+    delete this.name
+    delete this.specials
+  }
+
+
+  fn type(this) = this.range.type
+
+
+  fn computeRange(this) {
+    assert this.range.type && this.length
+
+    this.range.min = Value{}
+    this.range.max = Value{}
+
+    if this.range.type == Type.Int64 {
+      for var i = 0; i < this.length; ++i {
+        const d = this.items[i]
+        if i {
+          if d.i64 > this.range.max.i64 {
+            this.range.max.i64 = d.i64
+          } else if d.i64 < this.range.min.i64 {
+            this.range.min.i64 = d.i64
+          }
+        } else {
+          this.range.max.i64 = d.i64
+          this.range.min.i64 = d.i64
+        }
+      }
+      return
+    }
+    
+    if this.range.type == Type.Double {
+      for var i = 0; i < this.length; ++i {
+        const d = this.items[i]
+        if i {
+          if d.f64 > this.range.max.f64 {
+            this.range.max.f64 = d.f64
+          } else if d.f64 < this.range.min.f64 {
+            this.range.min.f64 = d.f64
+          }
+        } else {
+          this.range.max.f64 = d.f64
+          this.range.min.f64 = d.f64
+        }
+      }
+      return
+    }
+    
+    if this.range.type == Type.Date {
+      for var i = 0; i < this.length; ++i {
+        const d = this.items[i]
+        if i {
+          if d.date > this.range.max.date {
+            this.range.max.date = d.date
+          } else if d.date < this.range.min.date {
+            this.range.min.date = d.date
+          }
+        } else {
+          this.range.max.date = d.date
+          this.range.min.date = d.date
+        }
+      }
+      return
+    }
+
+    if this.range.type == Type.Text {
+      this.range.min.str = this.items[0].str
+      this.range.max.str = this.items[this.length - 1].str
+      return
+    }
+
+    assert with "#{nameof(this.range.type)}(#{Int32(this.range.type)})"
+  }
+}

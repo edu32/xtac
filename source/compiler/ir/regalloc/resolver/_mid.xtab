@@ -1,0 +1,262 @@
+struct MidBundle {
+  const bundle = Bundle&{}
+
+  fn append(this, dst, src): void {
+    assert dst.slot || src.slot
+    assert dst.slot != src.slot
+    assert dst.owner == src.owner
+    if dst.slot {
+      if src.slot {
+        return this.transfer(dst, src)
+      }
+      return this.fill(dst)
+    }
+    return this.spill(src)
+  }
+
+  //⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+  fn transfer(this, dst, src): void {
+    const it = this.computeIntereferenceDueToTransfer(dst, src)
+    if it.follows >= 0 {
+      if it.leads >= 0 {
+        if it.follows < it.leads {
+          if it.exchange >= 0 {
+            assert 0
+          } else {
+            //  xxx ⟵ dst   ; leader
+            //  dst ⟵ src   ; move
+            //  src ⟵ xxx   ; follower
+            this.bundle.insertBefore(new Transfer{ dst = dst, src = src }, it.leads)
+          }
+        } else if it.follows > it.leads {
+            //    * ⟵ src   ; spill
+            //  src ⟵ xxx   ; follower
+            //  xxx ⟵ dst   ; leader
+            //  dst ⟵ *     ; fill
+            this.bundle.insertBefore(new Spill{ src = src }, it.leads)
+            this.bundle.insertBefore(new Fill{ dst = dst }, it.follows + 1)
+        } else {
+          assert 0
+        }
+      } else if it.exchange >= 0 {
+        assert 0  
+      } else {
+        //  xxx ⟵ dst   ; leader
+        //  dst ⟵ src   ; move
+        this.bundle.insertAfter(new Transfer{ dst = dst, src = src }, it.follows)
+      }
+    } else if it.leads >= 0 {
+      if it.exchange >= 0 {
+        assert 0
+      } else {
+        //  dst ⟵ src   ; move
+        //  src ⟵ xxx   ; follower
+        this.bundle.insertBefore(new Transfer{ dst = dst, src = src }, it.leads)
+      }
+    } else if it.exchange >= 0 {
+      this.exchange(dst, src, it.exchange)
+    } else {
+      this.bundle.append(new Transfer{ dst = dst, src = src })
+    }
+  }
+
+
+  fn computeIntereferenceDueToTransfer(this, dst, src) {
+    const it = {
+       follows = -1,
+         leads = -1,
+      exchange = -1
+    }
+    for i, move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move.dst.slot == dst.slot {
+            if move.src.slot == src.slot {
+              assert 0
+            } else {
+              assert 0
+            }
+          } else if move.dst.slot == src.slot {
+            if move.src.slot == dst.slot {
+              assert it.exchange < 0
+              it.exchange = i
+            } else if it.leads < 0 {
+              it.leads = i  // (dst ⟵ src) should come BEFORE {move} because {move} clobbers {src}.
+            }
+          } else if move.src.slot == dst.slot {
+            // (dst ⟵ src) should come AFTER {move} because {move.src} is clobbered by {dst}.
+            assert it.follows < 0
+            it.follows = i
+          } else if move.src.slot == src.slot {
+            assert 0
+          }
+        }
+        case Exchange {
+          if move.dst.slot == dst.slot {
+            if move.src.slot == src.slot {
+              assert 0
+            } else {
+              assert 0
+            }
+          } else if move.dst.slot == src.slot {
+            if move.src.slot == dst.slot {
+              assert 0
+            } else {
+              assert 0
+            }
+          } else if move.src.slot == dst.slot {
+              assert 0
+          } else if move.src.slot == src.slot {
+            assert 0
+          }
+        }
+        case Fill {
+          if move.dst.slot == dst.slot {
+            assert 0
+          } else if move.dst.slot == src.slot {
+            // (dst ⟵ src) should come BEFORE {move} because {move} clobbers {src}.
+            if it.leads < 0 {
+              it.leads = i
+            }
+          }
+        }
+        case Spill {
+          if move.src.slot == dst.slot {
+            // (dst ⟵ src) should come AFTER {move} because {move.src} is clobbered by {src}.
+            if it.leads < 0 {
+              it.leads = i
+            }
+          } else if move.src.slot == src.slot {
+            assert 0
+          }
+        }
+      }
+    }
+    return it
+  }
+
+
+  fn exchange(this, dst, src, index) {
+    /*  Problem:
+          move.x ⟵ move.y  ; Existing move.
+           new.y ⟵ new.x   ; New move.
+
+        Naive solution:
+           new.* ⟵ new.x   ; Spill new move.
+          move.x ⟵ move.y  ; Keep existing move.
+           new.y ⟵ new.*   ; Fill new move.
+
+        Actual solution:
+           x ⟵⟶ y
+
+    */
+    //this.bundle.insertBefore(new Spill{ src = src }, index)
+    //this.bundle.insertAfter(new Fill{ dst = dst }, index + 1)
+    const transfer = this.bundle.moves.items[index] as Transfer*
+    const exchange = new Exchange{ dst = dst, src = transfer.dst }
+    delete transfer
+    this.bundle.moves.items[index] = exchange
+  }
+
+
+  //⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+  fn fill(this, dst): void {
+    const follows = this.computeIntereferenceDueToFill(dst)
+    if follows >= 0 {
+      //  xxx ⟵ dst ; leader
+      //  dst ⟵ *   ; move
+      this.bundle.insertAfter(new Fill{ dst = dst }, follows)
+    } else {
+      this.bundle.append(new Fill{ dst = dst })
+    }
+  }
+
+
+  fn computeIntereferenceDueToFill(this, dst) {
+    var follows = -1
+    for i, move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move.dst.slot == dst.slot {
+            assert 0
+          } else if move.src.slot == dst.slot {
+            // (dst ⟵ *) should come AFTER {move} because {move.src} is clobbered by {dst}.
+            assert follows < 0
+            follows = i
+          }
+        }
+        case Exchange {
+          if move.dst.slot == dst.slot {
+             assert 0
+          } else if move.src.slot == dst.slot {
+            assert 0
+          }
+        }
+        case Fill {
+          if move.dst.slot == dst.slot {
+            assert 0
+          }
+        }
+        case Spill {
+          if move.src.slot == dst.slot {
+            // (dst ⟵ *) should come AFTER {move} because {move.src} is clobbered by {dst}.
+            assert follows < 0
+            follows = i
+          }
+        }
+      }
+    }
+    return follows
+  }
+
+
+  //⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+  fn spill(this, src): void {
+    const leads = this.computeIntereferenceDueToSpill(src)
+    if leads >= 0 {
+      //    * ⟵ src   ; move
+      //  src ⟵ xxx   ; follower
+      this.bundle.insertBefore(new Spill{ src = src}, leads)
+    } else {
+      this.bundle.append(new Spill{ src = src })
+    }
+  }
+
+
+  fn computeIntereferenceDueToSpill(this, src) {
+    var leads = -1
+    for i, move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move.dst.slot == src.slot {
+            // (* ⟵ src) should come BEFORE {move} because {move} clobbers {src}.
+            assert leads < 0
+            leads = i
+          } else if move.src.slot == src.slot {
+            assert 0
+          }
+        }
+        case Exchange {
+          if move.dst.slot == src.slot {
+             assert 0
+          } else if move.src.slot == src.slot {
+            assert 0
+          }
+        }
+        case Fill {
+          if move.dst.slot == src.slot {
+            // (* ⟵ src) should come BEFORE {move} because {move} clobbers {src}.
+            assert leads < 0
+            leads = i
+          }
+        }
+        case Spill {
+          if move.src.slot == src.slot {
+            assert 0
+          }
+        }
+      }
+    }
+    return leads
+  }
+}

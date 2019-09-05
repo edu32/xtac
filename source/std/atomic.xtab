@@ -1,0 +1,227 @@
+// Emits the x86 "pause" instruction.
+fn pause() = __atomic_pause__()
+
+// Increments {pointer} by 1 and returns the incremented value with the guarantee that it is the current
+// thread that caused the increment.
+fn increment(pointer) = __atomic_increment__(pointer)
+
+// Decrements {pointer} by 1 and returns the decremented value with the guarantee that it is the current
+// thread that caused the increment.
+fn decrement(pointer) = __atomic_decrement__(pointer)
+
+// Adds {value} to {pointer} and returns the result with the guarantee that it is the current
+// thread that caused the addition.
+fn add(pointer, value) = __atomic_add__(pointer, value)
+
+// Subtracts {value} from {pointer} and returns the result with the guarantee that it is the current
+// thread that caused the subtraction.
+fn subtract(pointer, value) = __atomic_subtract__(pointer, value)
+
+// Writes {value} to the memory pointed to by {pointer}.
+// Returns the last value of the memory pointed to by {pointer} before setting to {value}.
+fn set(pointer, value) = __atomic_set__(pointer, value)
+
+// Attempts to write {value} to the memory pointed to by {pointer} if the value in
+// the memory pointed to by {pointer} is {comparand}.
+// Returns true if the value of the memory pointed {pointer} was set to {value}.
+fn cmpxchg(lhs, rhs, exchange) = __atomic_cmpxchg__(lhs, rhs, exchange)
+
+// Causes the current thread to sleep for {timeout} milliseconds. If {altertable}
+// then the thread may be awoken for reasons other than timeout expired.
+fn sleep(timeout, alertable = false) = os.SleepEx(timeout, Int32(alertable))
+
+// Causes the current thread to atomically increment the value pointed to by {pointer} and wakes 1 or 
+// more threads waiting on the {pointer} with os.WaitOnAddress.
+fn incrementAndAwake(pointer, all = true) {
+  const result = increment(pointer)
+  if all {
+    os.WakeByAddressAll(pointer)
+  } else {
+    os.WakeByAddressSingle(pointer)
+  }
+  return result
+}
+
+// Causes the current thread to atomically decrement the value pointed to by {pointer} and wakes 1 or 
+// more threads waiting on the {pointer} with os.WaitOnAddress.
+fn decrementAndAwake(pointer, all = true) {
+  const result = decrement(pointer)
+  if all {
+    os.WakeByAddressAll(pointer)
+  } else {
+    os.WakeByAddressSingle(pointer)
+  }
+  return result
+}
+
+// Causes the current thread to wait on {pointer} until it is signalled using {incrementAndAwake} or
+// {decrementAndAwake}.
+fn waitOnAddress(pointer, milliseconds = os.INFINITE_TIMEOUT) {
+  if !os.WaitOnAddress(pointer, pointer, sizeof(*pointer), milliseconds) {
+    const hResult = os.GetLastError()
+    assert hResult == os.ERROR_TIMEOUT with "os.WaitOnAddress failed with #{hResult}"
+  }
+}
+
+// Causes the current thread to wait until the value pointed to by {pointer} equals {target}.
+fn waitOnAddressUntil(pointer, target, milliseconds = os.INFINITE_TIMEOUT) {
+  assert sizeof(*pointer) == sizeof(target)
+  for !__atomic_cmpxchg__(pointer, target, target) {
+    if !os.WaitOnAddress(pointer, pointer, sizeof(target), milliseconds) {
+      const hResult = os.GetLastError()
+      assert hResult with "os.WaitOnAddress failed with #{hResult}"
+    }
+  }
+  assert *pointer == target
+}
+
+//-------------------------------------------------------------------------------
+// Keeps track of references to a resource.
+struct RefCount {
+  readonly    count = 0   // {this} refcount's {count}.
+  readonly comparand = 0  // Used by {this} refcount's 'wait' method.
+
+  // {this} refcount is empty if {count} is zero.
+  fn isZero(this) = this.count == 0
+
+  // Increments {this} refcount's {count} and causes one or more threads waiting on {this} to run.
+  fn increment(this) {
+    assert this.count >= 0 with "Count = #{this.count}"
+    const result = __atomic_increment__(&this.count)
+    return result
+  }
+
+  // Decrements {this} refcount's {count} and causes one or more threads waiting on {this} to run.
+  fn decrement(this, wakeAll = true) {
+    assert this.count >= 0 with "Count = #{this.count}"
+    const result = __atomic_decrement__(&this.count)
+    if wakeAll
+      os.WakeByAddressAll(&this.count)
+    else
+      os.WakeByAddressSingle(&this.count)
+    return result
+  }
+
+  // Waits for {this} refcount's {count} to get to zero for some {milliseconds}.
+  // Returns true if this condition is met.
+  fn wait(this, milliseconds = os.INFINITE_TIMEOUT) {
+    return this.waitUntil(0, milliseconds)
+  }
+
+  // Waits for {this} refcount's {count} to get to a {comparand} value for some {milliseconds}.
+  // Returns true if this condition is met.
+  fn waitUntil(this, comparand, milliseconds = os.INFINITE_TIMEOUT) {
+    assert this.count >= 0 && comparand >= 0 with "Count = #{this.count}, comparand = #{comparand}"
+    // We break the wait if {hResult} is anything but S_Ok.
+    var hResult = os.S_OK
+    // Loop until {this} refcount's {count} gets to zero or {hResult} is anything but S_OK.
+    for this.count != comparand && hResult == os.S_OK {
+      // Put the current {references} in comparand.
+      this.comparand = this.count
+      // Wait for {this} refcount's {count} to differ from {this} refcount's {comparand}.
+      if !os.WaitOnAddress(&this.count, &this.comparand, sizeof(this.count), milliseconds) {
+        hResult = os.GetLastError()
+        assert hResult == os.ERROR_TIMEOUT with "os.WaitOnAddress failed with #{hResult}"
+      } else {
+        hResult = os.S_OK
+      }
+    }
+    assert this.count >= 0
+    return this.count == comparand
+  }
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Lock {
+  readonly srw = os.SRWLOCK{}
+
+  fn acquireExclusive(this) = os.AcquireSRWLockExclusive(&this.srw)
+  fn releaseExclusive(this) = os.ReleaseSRWLockExclusive(&this.srw)
+
+  fn tryAcquireExclusive(this) = os.TryAcquireSRWLockExclusive(&this.srw)
+
+  fn acquireShared(this) = os.AcquireSRWLockShared(&this.srw)
+  fn releaseShared(this) = os.ReleaseSRWLockShared(&this.srw)
+
+  fn tryAcquireShared(this) = os.TryAcquireSRWLockShared(&this.srw)
+}
+
+
+struct ExclusiveLock {
+  readonly srw = Lock{}
+
+  fn lock(this)   = this.srw.acquireExclusive()
+  fn unlock(this) = this.srw.releaseExclusive()
+
+  fn tryLock(this)   = this.srw.tryAcquireExclusive()
+}
+
+
+struct SharedLock {
+  readonly srw = Lock{}
+
+  fn lock(this)   = this.srw.acquireShared()
+  fn unlock(this) = this.srw.releaseShared()
+
+  fn tryLock(this)   = this.srw.tryAcquireShared()
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct RecursiveExclusiveLock {
+  readonly   srw = Lock{}
+  readonly owner = 0u32
+  readonly count = 0i32
+
+
+  fn tryLock(this) {
+    const currentThread = os.GetCurrentThreadId()
+    if __atomic_cmpxchg__(&this.owner, currentThread, this.owner) {
+      ++this.count
+    } else {
+      if this.srw.tryAcquireExclusive() {
+        this.owner = currentThread
+        ++this.count
+      } else {
+        return false
+      }
+    }
+    return true
+  }
+
+
+  fn lock(this): void {
+    /*  ƒ( lhs = &this.owner, rhs = currentThread, exchange = this.owner ) {
+          if *lhs == rhs {
+            *lhs = exchange
+            return true
+          } else {
+            rhs = exchange
+            return false
+          }
+    */
+    const currentThread = os.GetCurrentThreadId()
+    if __atomic_cmpxchg__(&this.owner, currentThread, this.owner) {
+      ++this.count
+    } else {
+      this.srw.acquireExclusive()
+      this.owner = currentThread
+      ++this.count
+    }
+  }
+
+  fn unlock(this): void {
+    const currentThread = os.GetCurrentThreadId()
+    if __atomic_cmpxchg__(&this.owner, currentThread, this.owner) {
+      if --this.count == 0 {
+        this.owner = 0
+        this.srw.releaseExclusive()
+      } else {
+        assert this.count > 0
+      }
+    } else {
+      assert with "bad locking"
+    }
+  }
+}

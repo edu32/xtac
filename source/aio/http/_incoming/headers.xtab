@@ -1,0 +1,175 @@
+async fn requests(byteStream, request, response) {
+  const buffer = byteStream.buffer
+  for {    
+    var status = STATUS_MORE_DATA
+    for status == STATUS_MORE_DATA {
+      status = readRequestLine(buffer, request)
+      break if status != STATUS_MORE_DATA
+      const (bytesReceived, done) = await byteStream
+      if !bytesReceived || done {
+        status = STATUS_CONNECTION_CLOSED
+        break
+      }
+    }
+    break if status != STATUS_OK
+    //println("Request url: #{request.url}")
+    for status = STATUS_MORE_DATA; status == STATUS_MORE_DATA; {
+      status = readHeaders(buffer, request)
+      break if status != STATUS_MORE_DATA
+      const (bytesReceived, done) = await byteStream
+      if !bytesReceived || done {
+        status = STATUS_CONNECTION_CLOSED
+        break
+      }
+    }
+    break if status != STATUS_OK
+    yield status
+    request.dispose()
+  }
+}
+
+fn readRequestLine(buffer, request) {
+  const end = buffer.end()
+  var pos = buffer.text,
+      mark = buffer.text,
+      method = "",
+      url = "",
+      version = ""
+  for {
+    // Consume SPs upto METHOD.
+    pos = skipSpaces(pos, end)
+    break if pos == end
+    // Consume METHOD.
+    mark = pos
+    pos = skipToSpace(pos, end)
+    break if pos == end
+    method = string.fromRange(mark, pos)
+    // Consume SPs upto URL.
+    pos = skipSpaces(pos, end)
+    break if pos == end
+    // Consume URL.
+    mark = pos
+    pos = skipToSpace(pos, end)
+    break if pos == end
+    url = string.fromRange(mark, pos)
+    // Consume SPs upto VERSION.
+    pos = skipSpaces(pos, end)
+    break if pos == end
+    // Consume VERSION.
+    mark = pos
+    pos = skipToCRLF(pos, end)
+    break if pos == end
+    version = string.fromRange(mark, pos)
+    break
+  }
+  if pos == end {
+    const length = end - mark
+    return STATUS_URI_TOO_LONG if length > MAX_REQUEST_LINE_LENGTH 
+      else STATUS_MORE_DATA
+  }
+  if pos + 1 < end && *pos == '\r' && pos[1] == '\n' {
+    println("REQUEST = #{method} #{url} #{version}")
+    return STATUS_NOT_IMPLEMENTED if !request.setMethod(method)
+    return STATUS_BAD_REQUEST if !request.setUrlEncodedUrl(url)
+    return STATUS_HTTP_VERSION_NOT_SUPPORTED if !request.setVersion(version)
+    // Consume CRLF.
+    pos += 2
+    buffer.removeUpto(pos - buffer.text)
+    return STATUS_OK
+  }
+  return STATUS_BAD_REQUEST
+}
+
+fn readHeaders(buffer, message) {
+  var pos = buffer.text,
+      mark = buffer.text,
+      end = buffer.end()
+  var name = "",
+      value = ""
+  for {
+    // Consume SPs.
+    pos = skipSpaces(pos, end)
+    break if pos == end
+    // Consume NAME.
+    mark = pos
+    pos = skipToSpaceOrColon(pos, end)
+    break if pos == end
+    name = string.fromRange(mark, pos)
+    // Consume SPs.
+    pos = skipSpaces(pos, end)
+    break if pos == end
+    // Consume COLON.
+    return STATUS_BAD_REQUEST if *pos != ':'
+    ++pos
+    break if pos == end
+
+    // Consume SPs.
+    pos = skipSpaces(pos, end)
+    break if pos == end
+    // Consume VALUE.
+    mark = pos
+    pos = skipToCRLF(pos, end)
+    break if pos == end
+    value = string.fromRange(mark, pos)
+    // Consume SPs.
+    pos = skipSpaces(pos, end)
+    break if pos == end
+    // Consume CR.
+    break if *pos != '\r'
+    ++pos
+    break if pos == end
+    // Consume LF.
+    break if *pos != '\n'
+    ++pos
+    break if pos + 2 > end // Because we want to check for terminating CRLF
+
+    //println("name = #{name}; value = #{value}")
+
+    const header = message.appendHeader(name, value)
+    //println("#{header}")
+
+    break if *pos == '\r' && pos[1] == '\n'
+  }
+  if pos == end {
+    return STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE if buffer.length > MAX_HEADERS_LENGTH 
+      else STATUS_MORE_DATA
+  } 
+  if pos + 1 < end && *pos == '\r' && pos[1] == '\n' {
+    // Consume CRLF.
+    pos += 2
+    buffer.removeUpto(pos - buffer.text)
+    return STATUS_OK
+  }
+  return STATUS_BAD_REQUEST
+}
+
+//-------------------------------------------------------------------------------
+fn skipToSpace(pos, end) {
+  for ; pos < end; ++pos {
+    break if *pos == ' '
+  }
+  return pos
+}
+
+fn skipToCRLF(pos, end) {
+  for ; pos < end; ++pos {
+    if *pos == '\r' {
+      break if pos + 1 < end && pos[1] == '\n'
+    }
+  }
+  return pos
+}
+
+fn skipToSpaceOrColon(pos, end) {
+  for ; pos < end; ++pos {
+    break if *pos == ' ' || *pos == ':'
+  }
+  return pos
+}
+
+fn skipSpaces(pos, end) {
+  for ; pos < end; ++pos {
+    break if *pos != ' '
+  }
+  return pos
+}

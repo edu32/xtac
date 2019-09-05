@@ -1,0 +1,649 @@
+import char
+
+struct Cursor(T, U) {
+  const    tokens = T{}
+  const    dst    = U{}
+  readonly pos    = Token*{}
+  var      errors = List(String){}
+
+  fn dispose(this) {
+    delete this.errors with fn(x) = delete x
+  }
+
+  fn advance(this) {
+    var done = false
+    (this.pos, done) = this.tokens.next()
+    return this.pos
+  }
+
+  fn expectKeyword(this, keyword, keywordText) {
+    if this.pos.keyword == keyword {
+      this.advance()
+      return true
+    }
+    this.err(this.pos, "expected #{keywordText}, not #{this.pos.value}")
+    this.advance()
+    return false
+  }
+
+  fn expect(this, kind, kindText) {
+    if this.pos.kind == kind {
+      this.advance()
+      return true
+    }
+    this.err(this.pos, "expected #{kindText}, not #{this.pos.value}")
+    this.advance()
+    return false
+  }
+
+  struct Table {
+    var name     = ""
+    var columns  = List(Column){}
+
+    fn dispose(this) {
+      delete this.columns
+    }
+
+    struct Column {
+      var name         = ""
+      var default      = ""
+      var type         = Type.Unknown
+      var notNull      = false
+      var isPrimaryKey = false
+    }
+  }
+  // 'create' 'table' ['if' 'not' 'exists'] table-name '(' columns ')'
+  fn parseCreateTable(this) {
+    const table = Table{}
+    this.advance() // Past 'table'
+    if this.pos.keyword == KW_IF {
+      this.advance() // Past 'if'
+      return table if !this.expectKeyword(KW_NOT, "not") // Past 'not'.
+      return table if !this.expectKeyword(KW_EXISTS, "exists") // Past 'exists'.
+    }
+    if this.pos.kind == TOK_QUOTED || this.pos.kind == TOK_IDENTIFIER {
+      table.name = this.pos.value
+      this.advance() // Past table-name
+    } else {
+      this.err(this.pos, "bad table name: #{this.pos.value}")
+      return table
+    }
+    table.name.unquote()
+    return table if !this.expect(TOK_LPAREN, "(") // Past '('.
+
+    for this.pos.kind != TOK_RPAREN {
+      if this.pos.keyword == KW_PRIMARY || this.pos.keyword == KW_KEY || this.pos.keyword == KW_CONSTRAINT {
+        this.advance()
+        return table if !this.skipToEither([ TOK_COMMA, TOK_RPAREN ])
+      } 
+
+      else if this.pos.kind == TOK_COMMA {
+        this.advance()
+      } 
+
+      else if this.pos.isQuotedOrIdentifier() {
+        const col = &table.columns.appendOne()
+        col.name = this.pos.value
+        col.name.unquote()
+        this.advance() // Past column-name.
+        return table if !this.parseColumn(col)
+      }
+
+      else {
+        assert !this.pos.keyword with this.pos.value
+        this.advance()
+      }
+    }
+    return table if !this.expect(TOK_RPAREN, ")") // Past ')'.
+    this.skipTo(TOK_SEMICOLON)
+    this.expect(TOK_SEMICOLON, ";")
+    return table
+  }
+
+  fn parseColumn(this, col) {
+    if this.pos.keyword == KW_INT {
+      col.type = Type.Int64
+    } 
+
+    else if this.pos.keyword == KW_FLOAT {
+      col.type = Type.Double
+    } 
+
+    else if this.pos.keyword == KW_TEXT {
+      col.type = Type.Text
+    } 
+
+    else {
+      this.err(this.pos, "expected a column type, not '#{this.pos.value}'")
+      return false
+    }
+
+    this.advance() // Past type
+
+    if this.pos.kind == TOK_LPAREN {
+      this.advance() // Past '('
+      return false if !this.expect(TOK_NUMBER, "number")
+      return false if !this.expect(TOK_RPAREN, ")")
+    }
+
+    for this.pos.kind != TOK_END {
+      break if this.pos.kind == TOK_COMMA || this.pos.kind == TOK_RPAREN
+      if this.pos.keyword == KW_NOT {
+        this.advance()
+        return false if !this.expectKeyword(KW_NULL, "null")
+        col.notNull = true
+        continue
+      }  
+
+      else if this.pos.keyword == KW_DEFAULT {
+        this.advance()
+        if this.pos.isQuotedOrIdentifier() {
+          col.default = this.pos.value
+          if col.type != Type.Text {
+            col.default.unquote()
+          }
+        } else {
+          this.err(this.pos, "expected value after 'default', not '#{this.pos.value}'")
+          return false
+        }
+      } 
+
+      else if this.pos.keyword == KW_AUTO_INCREMENT {
+        col.isPrimaryKey = true
+      }
+
+      else if this.pos.isQuotedOrIdentifier() {
+        // Do nothing.
+      } 
+
+      else {        
+        this.err(this.pos, "unexpected: '#{this.pos.value}'")
+        return false
+      }
+      this.advance()
+    }
+    return true
+  }
+
+  fn appendCreateTable(this, table) {
+    auto name = String{}
+    normalize(table.name, name)
+    this.dst.append("DROP TABLE IF EXISTS #{name};\r\n")
+    this.dst.append("CREATE TABLE #{name} (")
+    auto escaped = String{}
+    for var i = 0; i < table.columns.length; ++i {
+      const col = table.columns[i]
+      this.dst.append(",") if i
+      normalize(col.name, name)
+      if col.isPrimaryKey {
+        this.dst.append("#{name} INTEGER PRIMARY KEY ASC")
+        continue
+      } 
+      this.dst.append("#{name} ")
+      if col.type == Type.Int64 {
+        this.dst.append("INTEGER")
+      } else if col.type == Type.Double {
+        this.dst.append("FLOAT")
+      } else if col.type == Type.Text {
+        this.dst.append("TEXT")
+      } else {
+        assert 0
+      }
+      if col.notNull {
+        this.dst.append(" NOT NULL")
+      } 
+      if col.default.length {
+        this.dst.append(" DEFAULT ")
+        if col.default.isQuoted() {
+          escape(col.default, escaped)
+          this.dst.append(escaped)
+        } else {
+          this.dst.append(col.default)
+        }
+      }
+    }
+    this.dst.append(");\n")
+  }
+
+  // 'insert' 'into' table-name '(' column-names ')' 'values' '(' values ')' [',' values]+ ';'
+  fn parseAndAppendInsert(this) {
+    this.advance() // Past 'insert'.
+    return if !this.expectKeyword(KW_INTO, "into")
+    if !this.pos.isQuotedOrIdentifier() {
+      this.err(this.pos, "expected 'into', not '\"#{this.pos.value}\"")
+      return
+    }
+    auto name     = String{}
+    auto escaped  = String{}    
+    var  unqouted = this.pos.value
+    unqouted.unquote()
+    normalize(unqouted, name)
+    this.dst.append("INSERT INTO #{name}(")
+    this.advance() // Past table-name.
+    return if !this.expect(TOK_LPAREN, "(") // Past '('.
+    for var i = 0; this.pos.kind != TOK_END && this.pos.kind != TOK_RPAREN; this.advance() {
+      if this.pos.kind != TOK_COMMA {
+        this.dst.append(", ") if i
+        if !this.pos.isQuotedOrIdentifier() {
+          this.err(this.pos, "expected a column name, not '\"#{this.pos.value}\"")
+          return
+        }
+        unqouted = this.pos.value
+        unqouted.unquote()
+        normalize(unqouted, name)
+        this.dst.append(name)
+      }
+      ++i
+    }
+    this.dst.append(")VALUES")
+    return if !this.expect(TOK_RPAREN, ")") // Past ')'.
+    return if !this.expectKeyword(KW_VALUES, "values") // Past 'values'.
+    for var i = 0; this.pos.kind != TOK_END && this.pos.kind != TOK_SEMICOLON; {
+      if this.pos.kind != TOK_COMMA {
+        this.dst.append(",") if i
+        this.dst.append("\n (")
+        return if !this.expect(TOK_LPAREN, "(")
+        for var j = 0; this.pos.kind != TOK_END && this.pos.kind != TOK_RPAREN; this.advance() {
+          if this.pos.kind != TOK_COMMA {
+            this.dst.append(",") if j
+            if this.pos.value.isQuoted() {
+              this.escape(this.pos.value, escaped)
+              this.dst.append(escaped)
+            } else {
+              this.dst.append(this.pos.value)
+            }
+          }
+          ++j
+        }
+        this.dst.append(")")
+        return if !this.expect(TOK_RPAREN, ")")
+      } else {
+        this.advance()
+      }
+      ++i
+    }
+    this.dst.append(";\n")
+    this.expect(TOK_SEMICOLON, ";") // Past ';'.
+  }
+
+  fn skipStatement(this) {
+    if this.pos.kind == TOK_SEMICOLON {
+      return this.skipSemiColons() 
+    }
+    for this.advance() {
+      return this.pos if this.pos.kind == TOK_END
+      if this.pos.kind == TOK_SEMICOLON {
+        return this.skipSemiColons()
+      }
+    }
+    return this.pos
+  }
+
+  fn skipSemiColons(this) {
+    return this.pos if this.pos.kind != TOK_SEMICOLON
+    for this.advance() {
+      continue if this.pos.kind == TOK_SEMICOLON
+      return this.pos
+    }
+    return this.pos
+  }
+
+  fn skipTo(this, kind) {
+    const mark = this.pos
+    for this.pos.kind != TOK_END {
+      return true if this.pos.kind == kind
+      if this.pos.kind == TOK_LPAREN {
+        for ; this.pos.kind != TOK_END && this.pos.kind != TOK_RPAREN; this.advance() {}
+        return false if !this.expect(TOK_RPAREN, ")")
+      } else {
+        this.advance()
+      }
+    }
+    return false
+  }
+
+  fn skipToEither(this, either) {
+    const mark = this.pos
+    for this.pos.kind != TOK_END {
+      for var i = 0; i < either.length; ++i {
+        return true if this.pos.kind == either[i]
+      }
+      if this.pos.kind == TOK_LPAREN {
+        for ; this.pos.kind != TOK_END && this.pos.kind != TOK_RPAREN; this.advance() {}
+        return false if !this.expect(TOK_RPAREN, ")")
+      } else {
+        this.advance()
+      }
+    }
+    this.err(mark, "unexpected tokens after '#{mark.value}'")
+    return false
+  }
+
+  fn escape(src, dst) {
+    dst.clear()
+    var s = src
+    s.unquote()
+    dst.append("\'")
+    var mark = 0
+    for var i = 0; i < s.length; ++i {
+      const ch = s.text[i]
+      if ch == '\\' {
+        if i + 1 < s.length && char.isaQuote(s.text[i + 1]) {
+          dst.appendTextAndLength(s.text + mark, i - mark)
+          const quote = s.text[i + 1]
+          dst.appendTextAndLength(&quote, 1)
+          dst.appendTextAndLength(&quote, 1)
+          ++i
+          mark = i + 1
+        }
+      } else if char.isaQuote(ch) {
+        dst.appendTextAndLength(s.text + mark, i - mark)
+        const quote = ch
+        if i + 1 < s.length && s.text[i + 1] == ch {
+          dst.appendTextAndLength(&quote, 1)
+          dst.appendTextAndLength(&quote, 1)
+          ++i
+        } else {
+          dst.appendTextAndLength(&quote, 1)
+          dst.appendTextAndLength(&quote, 1)
+        }
+        mark = i + 1
+      }
+    }
+    dst.appendTextAndLength(s.text + mark, s.length - mark)
+    dst.append("\'")
+  }
+
+  fn normalize(src, dst) {
+    dst.clear()    
+    var mark = 0
+    for var i = 0; i < src.length; ++i {
+      const ch = src.text[i]
+      continue if char.isAlpha(ch) || ch == '_'
+      dst.appendTextAndLength(src.text + mark, i - mark)
+      dst.append("_")
+      mark = i + 1
+    }
+    dst.appendTextAndLength(src.text + mark, src.length - mark)
+  }
+
+  fn err(this, pos, msg) {
+    var afterPos  = this.tokens.src.end() - pos.value.end()
+    var beforePos = pos.value.text - this.tokens.src.text
+    var e         = this.errors.appendOne()
+    e.append(msg)
+    e.append(" « error near: '#{pos.value}' » ‹...")
+    if beforePos {
+      if afterPos {
+        const before = math.min(beforePos, 0x10)
+        const after  = math.min(afterPos, 0x100)
+        e.append(string.fromTextAndLength(pos.value.text - before, before + pos.value.length + after))
+      } else {
+        const len = math.min(beforePos, 0x100)
+        e.append(string.fromTextAndLength(pos.value.text - len, len))
+      }
+    } else if afterPos {
+      const len = math.min(afterPos, 0x100)
+      e.append(string.fromTextAndLength(pos.value.end(), len))
+    } else {
+      assert 0
+    }
+    e.append("...› ")
+    assert with e
+  }
+}
+
+fn convertMySQLSchema(src, dst) {
+  auto tokens = tokenize(src)
+  auto cursor = Cursor(typeof(tokens), typeof(dst)){ tokens = tokens, dst = dst }
+  cursor.advance()
+  for cursor.errors.isEmpty() {
+    break if cursor.pos.kind == TOK_END
+
+    if cursor.pos.keyword == KW_USE {
+      cursor.skipStatement()
+    }
+
+    else if cursor.pos.keyword == KW_DROP {
+      cursor.skipStatement()
+    }
+
+    else if cursor.pos.keyword == KW_CREATE {
+      const pos = cursor.advance()
+      if pos.keyword == KW_DATABASE {
+        cursor.skipStatement()
+      } else if pos.keyword == KW_TABLE {
+        auto table = cursor.parseCreateTable()
+        if cursor.errors.isEmpty() {
+          cursor.appendCreateTable(table)
+        }
+      } else {
+        assert with "#{cursor.pos.value}"
+        cursor.skipStatement()
+      }
+    }
+
+    else if cursor.pos.keyword == KW_INSERT {
+      cursor.parseAndAppendInsert()
+    }
+
+    else if cursor.pos.kind == TOK_SEMICOLON {
+      cursor.skipSemiColons()
+    } else {
+      println("#{cursor.pos.value}")
+      cursor.skipStatement()
+    }
+  }
+  assert cursor.pos.kind == TOK_END || cursor.errors.length
+  return cursor.errors.isEmpty()
+}
+
+define TOK_END        0x0
+define TOK_QUOTED     0x1
+define TOK_IDENTIFIER 0x2
+define TOK_LPAREN     0x3
+define TOK_RPAREN     0x4
+define TOK_COMMA      0x5
+define TOK_SEMICOLON  0x6
+define TOK_ASSIGN     0x7
+define TOK_NUMBER     0x8
+
+define KW_NONE        0x0
+define KW_USE         0x1
+define KW_DROP        0x2
+define KW_CREATE      0x3
+define KW_INSERT      0x4
+define KW_DATABASE    0x5
+define KW_TABLE       0x6
+define KW_IF          0x7
+define KW_EXISTS      0x8
+define KW_PRIMARY     0x9
+define KW_KEY         0xA
+define KW_CONSTRAINT  0xB
+define KW_NOT         0xC
+define KW_NULL        0xD
+define KW_AUTO_INCREMENT 0xE
+define KW_DEFAULT     0xF
+define KW_INT         0x10
+define KW_FLOAT       0x11
+define KW_TEXT        0x12
+define KW_VALUES      0x13
+define KW_INTO        0x14
+
+struct Token {
+  readonly value    = ""
+  readonly kind     = 0
+  var      keyword  = KW_NONE
+
+  fn set(this, pos, end, kind) {
+    this.value.setFromRange(pos, end)
+    this.kind    = kind
+    this.keyword = KW_NONE
+    return this
+  }
+
+  fn isQuotedOrIdentifier(this) = this.kind == TOK_QUOTED || this.kind == TOK_IDENTIFIER
+}
+
+fn tokenize(src) {
+  const end       = src.end()
+  var   mark      = src.text
+  var   pos       = src.text
+  var   ok        = true
+  var   token     = Token{}
+  var   keyword   = KW_NONE
+  for pos < end && ok {
+    if *pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n' {
+      ++pos  
+    } else if *pos == '-' {
+      ++pos
+      break if pos == end
+      if *pos == '-' {
+        ++pos // Past '--'.
+        pos = skipSingleLineComment(pos, end)
+      } else {
+        (pos, ok) = skipNumber(pos, end)
+        yield &token.set(mark, pos, TOK_NUMBER) if ok
+      }
+    } else if *pos == '/' {
+      ++pos
+      break if pos == end || *pos != '*'
+      (pos, ok)  = skipMultiLineComment(pos, end)
+    } else if *pos == '(' {
+      yield &token.set(mark, ++pos, TOK_LPAREN)
+    } else if *pos == ')' {
+      yield &token.set(mark, ++pos, TOK_RPAREN)
+    } else if *pos == ',' {
+      yield &token.set(mark, ++pos, TOK_COMMA)
+    } else if *pos == ';' {
+      yield &token.set(mark, ++pos, TOK_SEMICOLON)
+    } else if *pos == '=' {
+      yield &token.set(mark, ++pos, TOK_ASSIGN)
+    } else if *pos == '`' || *pos == '\'' || *pos == '"' {
+      (pos, ok) = skipQuoted(pos, end)
+      yield &token.set(mark, pos, TOK_QUOTED) if ok
+    } else if char.isaDigit(*pos) {
+      (pos, ok) = skipNumber(pos, end)
+      yield &token.set(mark, pos, TOK_NUMBER) if ok
+    } else if char.isAlpha(*pos) || *pos == '_' {
+      (pos, keyword) = skipIdentifier(pos, end)
+      token.set(mark, pos, TOK_IDENTIFIER)
+      token.keyword = keyword
+      yield &token
+    } else {
+      const rem = end - pos
+      const len = math.min(rem, 128)
+      assert with "#{string.fromTextAndLength(mark, len)}"
+    }
+    mark = pos
+  }
+  assert ok && pos == end
+  yield &token.set(pos, end, TOK_END)
+
+  fn skipSingleLineComment(pos, end) {
+    for ; pos < end && *pos != '\n'; ++pos {}
+    return pos
+  }
+
+  fn skipMultiLineComment(pos, end) {
+    for ++pos; pos < end; ++pos {
+      if *pos == '*' && pos + 1 < end && pos[1] == '/' {
+        pos += 2
+        return (pos, true)
+      }
+    }
+    return (pos, false)
+  }
+
+  fn skipNumber(pos, end) {
+    const mark = pos
+
+    for ; pos < end && (char.isaDigit(*pos) || *pos == '.'); ++pos {}
+    return (pos, true) if pos > mark
+    return (pos, false)
+  }
+
+  fn skip(pos, end, ch) {
+    for ; pos < end && *pos == ch; ++pos {}
+    return pos
+  }
+
+  fn skipTo(pos, end, ch) {
+    for ; pos < end && *pos != ch; ++pos {}
+    return pos
+  }
+
+  fn skipQuoted(pos, end) {
+    const quote = *pos
+    var   prev  = ''
+    for ++pos; pos < end; ++pos {
+      if prev == '\\' {
+        if char.isaQuote(*pos) {
+          prev = ''
+          continue
+        }
+      } else if *pos == quote {
+        return (++pos, true)
+      }
+      prev = *pos
+    }
+    return (pos, false)
+  }
+
+  fn skipIdentifier(pos, end) {
+    const mark = pos
+    for ; pos < end && (char.isAlpha(*pos) || *pos == '_'); ++pos {}
+    var keyword = KW_NONE
+    const s = string.fromRange(mark, pos)
+    if !s.compare("use", /* caseSensitive = */ false) {
+      keyword = KW_USE
+    } else if !s.compare("drop", /* caseSensitive = */ false) {
+      keyword = KW_DROP
+    } else if !s.compare("create", /* caseSensitive = */ false) {
+      keyword = KW_CREATE
+    } else if !s.compare("insert", /* caseSensitive = */ false) {
+      keyword = KW_INSERT
+    } else if !s.compare("database", /* caseSensitive = */ false) {
+      keyword = KW_DATABASE
+    } else if !s.compare("table", /* caseSensitive = */ false) {
+      keyword = KW_TABLE
+    } else if !s.compare("if", /* caseSensitive = */ false) {
+      keyword = KW_IF
+    } else if !s.compare("exists", /* caseSensitive = */ false) {
+      keyword = KW_EXISTS
+    } else if !s.compare("primary", /* caseSensitive = */ false) {
+      keyword = KW_PRIMARY
+    } else if !s.compare("key", /* caseSensitive = */ false) {
+      keyword = KW_KEY
+    } else if !s.compare("constraint", /* caseSensitive = */ false) {
+      keyword = KW_CONSTRAINT
+    } else if !s.compare("not", /* caseSensitive = */ false) {
+      keyword = KW_NOT
+    } else if !s.compare("null", /* caseSensitive = */ false) {
+      keyword = KW_NULL
+    } else if !s.compare("auto_increment", /* caseSensitive = */ false) {
+      keyword = KW_AUTO_INCREMENT
+    } else if !s.compare("default", /* caseSensitive = */ false) {
+      keyword = KW_DEFAULT
+    } else if !s.compare("int", /* caseSensitive = */ false) ||
+              !s.compare("mediumint", /* caseSensitive = */ false) ||
+              !s.compare("tinyint", /* caseSensitive = */ false) ||
+              !s.compare("smallint", /* caseSensitive = */ false) {
+      keyword = KW_INT
+    } else if !s.compare("varchar", /* caseSensitive = */ false) ||
+              !s.compare("text", /* caseSensitive = */ false) ||
+              !s.compare("tinytext", /* caseSensitive = */ false)  {
+      keyword = KW_TEXT
+    } else if !s.compare("float", /* caseSensitive = */ false) {
+      keyword = KW_FLOAT
+    } else if !s.compare("date", /* caseSensitive = */ false) ||
+              !s.compare("datetime", /* caseSensitive = */ false) {
+      keyword = KW_TEXT
+    } else if !s.compare("values", /* caseSensitive = */ false) {
+      keyword = KW_VALUES
+    } else if !s.compare("into", /* caseSensitive = */ false) {
+      keyword = KW_INTO
+    }
+    return (pos, keyword)
+  }
+}

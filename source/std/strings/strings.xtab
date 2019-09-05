@@ -1,0 +1,268 @@
+export wstring, string from _str
+export String from _String
+export strlen from os
+export mcopy, mmove from memory
+
+
+fn formatStr(str, stream, opts): typeof(stream) {
+  import console
+  var colors = console.parseColors(opts.colors)
+  auto colorizer = console.colorize(colors.backColor, colors.foreColor)
+  if opts.leftWidth {
+    const leftWidth = opts.leftWidth
+    if opts.rightWidth {
+      const rightWidth = opts.rightWidth
+      const        sum = leftWidth + rightWidth - str.length
+      if sum > 0 {
+        const half = sum / 2
+        const  rem = sum % 2
+        var   left = half + rem,
+             right = half
+        const diff = leftWidth - rightWidth
+        left  += diff
+        right -= diff
+        if left > 0 {
+          if opts.filler.isEmpty()
+            opts.filler = " "
+          for --left >= 0 {
+            stream.append(opts.filler)
+          }
+        }
+        stream.append(str)
+        if right > 0 {
+          if opts.filler.isEmpty()
+            opts.filler = " "
+          for --right >= 0 {
+            stream.append(opts.filler)
+          }
+        }
+      }
+      return stream
+    }
+    var gap = leftWidth - str.length
+    if gap > 0 {
+      if opts.filler.isEmpty()
+        opts.filler = " "
+      for --gap >= 0 {
+        stream.append(opts.filler)
+      }
+    }
+  }
+  stream.append(str)
+  if opts.rightWidth {
+    var gap = opts.rightWidth - str.length
+    if gap > 0 {
+      if opts.filler.isEmpty()
+        opts.filler = " "
+      for --gap >= 0 {
+        stream.append(opts.filler)
+      }
+    }
+  }
+  return stream
+}
+
+
+fn _skipNumberPrefix(s) {
+  var   pos = s.text
+  const end = s.end()
+  if *pos++ == '0' {
+    return s.text if pos == end
+    switch *pos++ {
+      case 'x', 'X'
+      case 'b', 'B'
+      case 'o', 'O'
+        return pos
+    }
+  }
+  return s.text
+}
+
+
+fn _tryParseInt(s, base) {
+  return (0i64, false) if s.isEmpty()
+  os._set_errno(0)
+  const      end = s.end()
+  const   endPtr = Char*{}
+  const startPtr = _skipNumberPrefix(s)
+  return (0i64, false) if startPtr == end
+  const n = os._strtoi64(startPtr, &endPtr, base)
+  return (0i64, false) if endPtr != end
+  assert endPtr == end
+  return (n, true)
+}
+
+
+fn _tryParseUInt(s, base) {
+  return (0u64, false) if s.isEmpty()
+  os._set_errno(0)
+  const      end = s.end()
+  const   endPtr = Char*{}
+  const startPtr = _skipNumberPrefix(s)
+  return (0u64, false) if startPtr == end
+  const n = os._strtoui64(startPtr, &endPtr, base)
+  return (0u64, false) if endPtr != end
+  assert endPtr == end
+  return (n, true)
+}
+
+
+fn _tryParseFloat(s) {
+  return (0.0f, false) if s.isEmpty()
+  os._set_errno(0)
+  const    end = s.end()
+  const endPtr = Char*{}
+  const      n = os.strtof(s.text, &endPtr)
+  return (0.0f, false) if endPtr != end
+  assert endPtr == end
+  return (n, true)
+}
+
+
+fn _tryParseDouble(s) {
+  return (0.0, false) if s.isEmpty()
+  os._set_errno(0)
+  const    end = s.end()
+  const endPtr = Char*{}
+  const      n = os.strtod(s.text, &endPtr)
+  return (0.0, false) if endPtr != end
+  assert endPtr == end
+  return (n, true)
+}
+
+
+fn _tryParseFraction(s, base) {
+  define TPF_DENOMINATOR 0x1
+  define   TPF_NUMERATOR 0x2
+  const frac = {
+    isEmpty     = fn(self) = !self.whole && !self.numerator && !self.denominator,
+    format      = fn(self, s, fmt = "") {
+      if self.whole {
+        self.whole.format(s)
+        s.append(" ") if self.numerator || self.denominator
+      } if self.numerator || self.denominator {
+        self.numerator.format(s)
+        s.append("/")
+        self.denominator.format(s)
+      }
+    },
+    whole       = 0, 
+    numerator   = 0, 
+    denominator = 0 
+  }
+  return (frac, false) if s.isEmpty()
+
+  var   state = 0
+  const end   = s.end()
+  var   pos   = skipSpaces(s.text, end)
+  return (frac, false) if pos == end
+
+  var mark = pos
+  pos = skipInt(pos, end)
+  return (frac, false) if pos == mark
+ 
+  if pos == end {
+    frac.whole = string.fromRange(mark, end).parseInt(base)
+    return (frac, true)
+  }
+  if char.isaSpace(*pos) {
+    const n = string.fromRange(mark, pos).parseInt(base)
+    pos = skipSpaces(pos, end)
+    if pos == end {
+      frac.whole = n
+      return (frac, true)
+    }
+    if char.isaSlash(*pos) {
+      frac.numerator = n
+      state = TPF_DENOMINATOR
+    } else if isStartOfNumber(*pos) {
+      frac.whole = n
+      state = TPF_NUMERATOR
+    } else {
+      return (frac, false)
+    }
+  } else if char.isaSlash(*pos) {
+    frac.numerator = string.fromRange(mark, end).parseInt(base)
+    state = TPF_DENOMINATOR
+  } else {
+    return (frac, false)
+  }
+
+  if state == TPF_NUMERATOR {
+    mark = pos
+    pos = skipInt(pos, end)
+    return (frac, false) if pos == end
+    frac.numerator = string.fromRange(mark, pos).parseInt(base)
+    if char.isaSpace(*pos) {
+      pos = skipSpaces(pos, end)
+    }
+    return (frac, false) if pos == end || !char.isaSlash(*pos)
+    state = TPF_DENOMINATOR
+  }
+
+  assert pos < end && state == TPF_DENOMINATOR && char.isaSlash(*pos)
+  pos = skipSpaces(++pos, end)
+  return (frac, false) if pos == end
+
+  mark = pos
+  pos = skipInt(pos, end)
+  return (frac, false) if pos == mark
+  frac.denominator = string.fromRange(mark, pos).parseInt(base)
+
+  if pos < end {
+    if char.isaSpace(*pos) {
+      pos = skipSpaces(pos, end)
+      return (frac, false) if pos < end
+    } else {
+      return (frac, false)
+    }
+  }
+
+  return (frac, true)
+
+  fn isStartOfNumber(ch) = ch == '-' || char.isDigit(ch)
+  fn skipSpaces(pos, end) {
+    for ; pos < end && char.isaSpace(*pos); ++pos {}
+    return pos
+  }
+
+  fn skipInt(pos, end) {
+    const mark = pos
+    const isMinus = *pos == '-'
+    if isStartOfNumber(*pos) {
+      for ++pos; pos < end && char.isDigit(*pos); ++pos {}
+      return mark if isMinus && pos == mark + 1
+    }
+    return pos
+  }
+}
+
+
+fn _compareLexicographically(a, b, caseSensitive) {
+  const alen = a.length
+  const blen = b.length
+  return -blen if !alen
+  return alen  if !blen 
+  if caseSensitive {
+    var cha = ''
+    var chb = ''
+    for var i = 0; i < alen && i < blen; ++i {
+      cha = a.text[i]
+      chb = b.text[i]
+      if const diff = cha - chb {
+        return diff
+      }
+    }
+    return cha - chb
+  }
+  var cha = ''
+  var chb = ''
+  for var i = 0; i < alen && i < blen; ++i {
+    cha = char.toLowerCase(a.text[i])
+    chb = char.toLowerCase(b.text[i])
+    if const diff = cha - chb {
+      return diff
+    }
+  }
+  return cha - chb
+}

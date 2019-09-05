@@ -1,0 +1,157 @@
+struct TemplateCollector {
+  const typer = Typer&{}
+  const  main = ast.Symbol*{}
+
+  fn visitFolderStatements(this, template, parent): ast.Folder* {
+    const instance = new ast.Folder{ pos = template.pos, path = template.path, name = template.name,
+      dotName = this.makeDotName(template.slashName) }
+    if parent {
+      instance.scope = new ast.Scope{ pos = template.pos, parent = parent.scope, owner = instance,
+        type = ast.tyVoid }
+      const (symbol, _) = parent.scope.appendSymbol(instance.name, template, instance)
+      assert symbol
+      instance.type.setSymbol(symbol)
+    } else {
+      instance.scope = new ast.Scope{ pos = template.pos, owner = instance, type = ast.tyVoid }
+    }
+    for file in template.files {
+      this.visitFileStatements(file.value, instance.scope)
+    }
+    for folder in template.folders {
+      this.visitFolderStatements(folder.value, instance)
+    }
+    return instance
+  }
+
+
+  fn visitFileStatements(this, template, folderScope) {
+    const pos = Pos {
+      range = Range {
+        start = template.pos.range.start,
+          end = src.nlastpos(template).range.end
+      },
+      file = template.id,
+      token = Tok.Unknown
+    }
+    const instance = new ast.File{       pos = pos,
+                                        path = template.path,
+                                        name = template.name,
+                                   slashName = template.slashName,
+                                     dotName = this.makeDotName(template.slashName),
+                                          id = template.id,
+                                      source = *template.source }
+    instance.scope = new ast.Scope{ pos = pos, parent = folderScope, owner = instance, type = ast.tyVoid }
+    const (symbol, dup) = folderScope.appendSymbol(instance.name, template, instance)
+    assert symbol
+    instance.type.setSymbol(symbol)
+    if template.block {
+      this.visitBlockStatements(template.block, instance.scope)
+    }
+    if template.name == this.typer.ids.kw_main && !folderScope.parent /* Root scope. */ {
+      assert !this.typer.main
+      this.typer.main = symbol
+    }
+    const folder = folderScope.owner as ast.Folder*
+    if folder.name == instance.name {
+      assert !folder.initFile
+      folder.initFile = instance
+    }
+    return instance
+  }
+
+
+  fn visitBlockStatements(this, template, scope): void {
+    for child in template.children {
+      this.visitStatement(child, scope)
+    }
+  }
+
+
+  fn visitStatement(this, template, scope): void {
+    switch template {
+      case src.Import
+        this.visitImportStatement(template, scope)
+      case list: src.CommaList {
+        for child in list.children {
+          if const imp = child is src.Import {
+            this.visitImportStatement(imp, scope)
+          }
+        }
+      }
+      case src.Struct
+        this.visitTypeStatement(template, scope)
+      case src.Union
+        this.visitTypeStatement(template, scope)
+      case src.Enum
+        this.visitTypeStatement(template, scope)
+      case src.Function
+        this.visitTypeStatement(template, scope)
+    }
+  }
+
+
+  fn visitImportStatement(this, template, scope) {
+    assert template.name
+    const instance = new ast.Import{ pos = this.typer.binder.mkPos(template),
+      name = getImportName(template.name, template.alias) }
+    const (_, found) = scope.appendImport(instance.name, template, instance)
+    if found {
+      this.e_exists(template, instance.name, found)
+    }
+    fn getImportName(name, alias): Identifier* {
+      if alias {
+        switch alias {
+          case src.MemberName return getImportName(name, alias.rhs)
+          case src.Name       return alias.value
+        }
+      } else switch name {
+        case src.MemberName return getImportName(name.rhs, alias)
+        case src.Name       return name.value
+      }
+      assert 0
+      return null
+    }
+  }
+
+
+  fn visitTypeStatement(this, template, scope): void {
+    assert template.name
+    const name = template.name
+    const (_, found) = scope.appendTypeTemplate(name, template, isaTypeExpression = false)
+    if found {
+      this.e_exists(template, name, found)
+    }
+  }
+
+
+  fn makeDotName(this, slashName) {
+    auto  str = String{}
+    const end = slashName.text + slashName.length
+    var   pos = slashName.text
+    var mark = pos
+    for ; pos < end; ++pos {
+      if *pos == '\\' {
+        str.appendRange(mark, pos)
+        mark = pos + 1
+        str.append('.') if mark < end
+      } else if *pos == '.' {
+        break
+      }
+    }
+    str.appendRange(mark, pos)
+    //assert str.length with "#{slashName}; #{str}"
+    return this.typer.ids.get(str)
+  }
+
+
+  fn err(this, template, msg) {
+    const pos = this.typer.binder.mkPos(template)
+    this.typer.err(pos, msg)
+  }
+
+
+  fn e_exists(this, template, name, found) {
+    const pos = this.typer.binder.mkPos(template)
+    this.typer.e_exists(pos, name, found)
+  }
+}

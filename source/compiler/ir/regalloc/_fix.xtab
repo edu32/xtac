@@ -1,0 +1,70 @@
+import gprs, xmms from regalloc
+
+fn output(value) {
+  var    fix = Register*{}
+  var    rdx = Register*{}
+  const type = value.type
+
+  switch value {
+    case ssa.Divide {
+      if type.isUnsigned() {
+        /*  variants:
+              dst ⟵ imm ÷ imm    ; illegal
+              dst ⟵ imm ÷ reg    ; illegal
+              dst ⟵ imm ÷ mem    ; illegal
+
+              dst ⟵ reg ÷ imm    ;
+              dst ⟵ reg ÷ reg    ; dst requires rax
+              dst ⟵ reg ÷ mem    ;
+
+              dst ⟵ mem ÷ imm    ; illegal
+              dst ⟵ mem ÷ reg    ; illegal
+              dst ⟵ mem ÷ mem    ; illegal
+        */
+        const lhs = value.lhs().isaValue()
+        const rhs = value.rhs().isaValue()
+        if lhs && rhs {
+          fix = &gprs.rcx
+        }
+      }
+    }
+    case ssa.Multiply {
+      if type.isUnsigned() || (type.isSigned() && type.size() == 1) {
+        /*  variants:
+              dst ⟵ imm × imm    ; illegal
+              dst ⟵ imm × reg    ; illegal
+              dst ⟵ imm × mem    ; illegal
+
+              dst ⟵ reg × imm    ;
+              dst ⟵ reg × reg    ; dst requires rax
+              dst ⟵ reg × mem    ;
+
+              dst ⟵ mem × imm    ; illegal
+              dst ⟵ mem × reg    ; illegal
+              dst ⟵ mem × mem    ; illegal
+        */
+        const lhs = value.lhs().isaValue()
+        const rhs = value.rhs().isaValue()
+        if lhs && rhs {
+          fix = &gprs.rax
+        }
+      }
+    }
+    case ssa.Call {
+      if type.isNotLoadable() {
+        // Do nothing.
+      } else if type.isaPointerOrInteger() {
+        // dst ⟵ call fn with (...)  ; dst requires rax
+        fix = &gprs.rax
+      } else {
+        // dst ⟵ call fn with (...) with dstrax ; dstrax requires rax
+      }
+    }
+  }
+
+  return (fix, rdx)
+}
+
+fn input(value, index) {
+
+}

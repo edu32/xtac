@@ -1,0 +1,195 @@
+struct Queue(T) {
+  readonly first = T*{}
+  readonly last = T*{}
+
+  fn dispose(this) {
+    this.first = null
+    this.last = null
+  }
+
+  fn disposeWith(this, disposer) {
+    for var item = this.first; item; {
+      const next = item.qnext
+      disposer(item)
+      item = next
+    }
+    this.dispose()
+  }
+
+  fn length(this) {
+    var length = 0
+    for var item = this.first; item; item = item.qnext {
+      ++length
+    }
+    return length
+  }
+
+  fn isEmpty(this)    = this.first == null
+  fn isNotEmpty(this) = this.first != null
+
+  fn iterator(this) {
+    return {
+      pos = this.first,
+      next = fn(self) {
+        if self.pos {
+          const curr = self.pos
+          self.pos = curr.qnext
+          return (curr, false)
+        }
+        return (T*{}, true)
+      }
+    }
+  }
+
+  fn reverseIterator(this) {
+    return {
+      pos = this.last,
+      next = fn(self) {
+        if self.pos {
+          const curr = self.pos
+          self.pos = curr.qprev
+          return (curr, false)
+        }
+        return (T*{}, true)
+      }
+    }
+  }
+
+  fn prepend(this, item) {
+    if this.first {
+      return this.insertBefore(item, this.first)
+    }
+    return this.append(item)
+  }
+
+  fn append(this, item) {
+    assert !item.qnext && !item.qprev
+    if this.last {
+      assert this.first
+      item.qprev = this.last
+      this.last.qnext = item
+      this.last = item
+    } else {
+      assert !this.last
+      this.first = item
+      this.last = item
+    }
+    return item
+  }
+
+  fn insertAfter(this, item, reference) {
+    assert !item.qnext && !item.qprev
+    if this.last == reference {
+      reference.qnext = item
+      item.qprev = reference
+      this.last = item
+    } else if const next = reference.qnext {
+      reference.qnext = item
+      item.qprev = reference
+      item.qnext = next
+      next.qprev = item
+    } else {
+      assert 0
+    }
+    return item
+  }
+
+  fn insertBefore(this, item, reference) {
+    assert !item.qnext && !item.qprev
+    if this.first == reference {
+      reference.qprev = item
+      item.qnext = reference
+      this.first = item
+    } else if const prev = reference.qprev {
+      prev.qnext = item
+      item.qprev = prev
+      item.qnext = reference
+      reference.qprev = item
+    } else {
+      assert 0
+    }
+    return item
+  }
+
+  fn removeFirst(this) {
+    if this.first {
+      const first = this.first
+      if var next = first.qnext {
+        next.qprev = null
+        this.first = next
+      } else {
+        assert first == this.last
+        this.first = null
+        this.last = null
+      }
+      first.qprev = null
+      first.qnext = null
+      return first
+    }
+    return null
+  }
+
+  fn removeLast(this) {
+    if this.last {
+      const    last = this.last
+      if const prev = last.qprev {
+         prev.qnext = null
+          this.last = prev
+      } else {
+        assert last == this.first
+        this.first = null
+         this.last = null
+      }
+      last.qprev = null
+      last.qnext = null
+      return last
+    }
+    return null
+  }
+
+  fn remove(this, item) {
+    if item {
+      return this.removeFirst() if item == this.first
+      return this.removeLast()  if item == this.last
+      const qprev = item.qprev,
+            qnext = item.qnext
+      assert qprev && qnext
+      qprev.qnext = qnext
+      qnext.qprev = qprev
+      item.qprev = null
+      item.qnext = null
+    }
+    return item
+  }
+}
+
+import ExclusiveLock from atomic
+
+struct Synchronized(T) {
+  readonly list = Queue(T){}
+  readonly srw = ExclusiveLock{}
+
+  fn dispose(this) {
+    delete this.list
+  }
+
+  fn disposeWith(this, disposer) {
+    delete this.list with disposer
+  }
+
+  fn length(this) = this.list.length()
+
+  fn isEmpty(this) = this.list.isEmpty()
+
+  fn iterator(this) = this.list.iterator()
+
+  fn reverseIterator(this) = this.list.reverseIterator()
+
+  synchronized fn append(this, item) = this.list.append(item)
+
+  synchronized fn removeFirst(this) = this.list.removeFirst()
+
+  synchronized fn removeLast(this) = this.list.removeLast()
+
+  synchronized fn remove(this, item) = this.list.remove(item)
+}

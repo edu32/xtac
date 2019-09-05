@@ -1,0 +1,359 @@
+/*struct Connection {
+  abstract async fn open(this, socket)
+  abstract async fn close(this, socket)
+
+  async fn write(this, socket) {
+
+  }
+
+  async fn read(this, socket) {
+
+  }
+
+  async fn recv(this, socket, buffer) {
+
+  }
+
+  async fn send(this, socket, buffer) {
+
+  }
+}
+
+
+struct Server : Sec {
+  async fn open(this, socket) {
+
+  }
+
+  async fn close(this, socket) {
+
+  }
+}
+
+
+struct Client : Sec {
+  async fn open(this, socket) {
+
+  }
+
+  async fn close(this, socket) {
+    
+  }
+}*/
+
+//-----------------------------------------------------------------------------------------------------
+struct SecBuffer {
+  var size = 0
+  var type = SecBufferType{}
+  var data = Char*{}
+}
+
+struct SecBufferList {
+  var version = SECBUFFER_VERSION
+  var count   = 0
+  var items   = SecBuffer*{}
+}
+
+struct SecHandle {
+  const lower = 0u64
+  const upper = 0u64
+}
+
+define UNISP_NAME_A         "Microsoft Unified Security Protocol Provider"
+define SECBUFFER_VERSION    0u32
+
+enum SecBufferType {
+  SECBUFFER_EMPTY                       = 0,   // Undefined, replaced by provider
+  SECBUFFER_DATA                        = 1,   // Packet data
+  SECBUFFER_TOKEN                       = 2,   // Security token
+  SECBUFFER_PKG_PARAMS                  = 3,   // Package specific parameters
+  SECBUFFER_MISSING                     = 4,   // Missing Data indicator
+  SECBUFFER_EXTRA                       = 5,   // Extra data
+  SECBUFFER_STREAM_TRAILER              = 6,   // Security Trailer
+  SECBUFFER_STREAM_HEADER               = 7,   // Security Header
+  SECBUFFER_NEGOTIATION_INFO            = 8,   // Hints from the negotiation pkg
+  SECBUFFER_PADDING                     = 9,   // non-data padding
+  SECBUFFER_STREAM                      = 10,  // whole encrypted message
+  SECBUFFER_MECHLIST                    = 11,
+  SECBUFFER_MECHLIST_SIGNATURE          = 12,
+  SECBUFFER_TARGET                      = 13,  // obsolete
+  SECBUFFER_CHANNEL_BINDINGS            = 14,
+  SECBUFFER_CHANGE_PASS_RESPONSE        = 15,
+  SECBUFFER_TARGET_HOST                 = 16,
+  SECBUFFER_ALERT                       = 17,
+  SECBUFFER_APPLICATION_PROTOCOLS       = 18,  // Lists of application protocol IDs, one per negotiation extension
+  SECBUFFER_SRTP_PROTECTION_PROFILES    = 19,  // List of SRTP protection profiles, in descending order of preference
+  SECBUFFER_SRTP_MASTER_KEY_IDENTIFIER  = 20,  // SRTP master key identifier
+  SECBUFFER_TOKEN_BINDING               = 21,  // Supported Token Binding protocol version and key parameters
+  SECBUFFER_PRESHARED_KEY               = 22,  // Preshared key
+  SECBUFFER_PRESHARED_KEY_IDENTITY      = 23  // Preshared key identity
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct CertContext {
+  const dwCertEncodingType  = 0u32
+  const pbCertEncoded       = null
+  const cbCertEncoded       = 0u32
+  const pCertInfo           = null
+  const hCertStore          = null
+}
+
+//-----------------------------------------------------------------------------------------------------
+enum CredUseFlag {
+  SECPKG_CRED_INBOUND         = 0x00000001,
+  SECPKG_CRED_OUTBOUND        = 0x00000002,
+  SECPKG_CRED_BOTH            = 0x00000003,
+  SECPKG_CRED_DEFAULT         = 0x00000004,
+  SECPKG_CRED_RESERVED        = 0xF0000000
+}
+
+define SCHANNEL_CRED_VERSION    0x00000004
+
+struct Cred {
+  const dwVersion               = SCHANNEL_CRED_VERSION
+  const cCreds                  = 0u32
+  const paCred                  = CertContext*{}
+  const hRootStore              = null
+  const cMappers                = 0u32
+  const aphMappers              = null
+  const cSupportedAlgs          = 0u32
+  const palgSupportedAlgs       = UInt32*{}
+  const grbitEnabledProtocols   = 0u32
+  const dwMinimumCipherStrength = 0u32
+  const dwMaximumCipherStrength = 0u32
+  const dwSessionLifespan       = 0u32
+  const dwFlags                 = 0u32
+  const dwCredFormat            = 0u32
+}
+ 
+define ISC_REQ_DELEGATE                0x00000001
+define ISC_REQ_MUTUAL_AUTH             0x00000002
+define ISC_REQ_REPLAY_DETECT           0x00000004
+define ISC_REQ_SEQUENCE_DETECT         0x00000008
+define ISC_REQ_CONFIDENTIALITY         0x00000010
+define ISC_REQ_USE_SESSION_KEY         0x00000020
+define ISC_REQ_PROMPT_FOR_CREDS        0x00000040
+define ISC_REQ_USE_SUPPLIED_CREDS      0x00000080
+define ISC_REQ_ALLOCATE_MEMORY         0x00000100
+define ISC_REQ_USE_DCE_STYLE           0x00000200
+define ISC_REQ_DATAGRAM                0x00000400
+define ISC_REQ_CONNECTION              0x00000800
+define ISC_REQ_CALL_LEVEL              0x00001000
+define ISC_REQ_FRAGMENT_SUPPLIED       0x00002000
+define ISC_REQ_EXTENDED_ERROR          0x00004000
+define ISC_REQ_STREAM                  0x00008000
+define ISC_REQ_INTEGRITY               0x00010000
+define ISC_REQ_IDENTIFY                0x00020000
+define ISC_REQ_NULL_SESSION            0x00040000
+define ISC_REQ_MANUAL_CRED_VALIDATION  0x00080000
+define ISC_REQ_RESERVED1               0x00100000
+define ISC_REQ_FRAGMENT_TO_FIT         0x00200000
+// This exists only in Windows Vista and greater
+define ISC_REQ_FORWARD_CREDENTIALS     0x00400000
+define ISC_REQ_NO_INTEGRITY            0x00800000 // honored only by SPNEGO
+define ISC_REQ_USE_HTTP_STYLE          0x01000000
+define ISC_REQ_UNVERIFIED_TARGET_NAME  0x20000000
+define ISC_REQ_CONFIDENTIALITY_ONLY    0x40000000 // honored by SPNEGO/Kerberos
+
+define ISC_RET_DELEGATE                0x00000001
+define ISC_RET_MUTUAL_AUTH             0x00000002
+define ISC_RET_REPLAY_DETECT           0x00000004
+define ISC_RET_SEQUENCE_DETECT         0x00000008
+define ISC_RET_CONFIDENTIALITY         0x00000010
+define ISC_RET_USE_SESSION_KEY         0x00000020
+define ISC_RET_USED_COLLECTED_CREDS    0x00000040
+define ISC_RET_USED_SUPPLIED_CREDS     0x00000080
+define ISC_RET_ALLOCATED_MEMORY        0x00000100
+define ISC_RET_USED_DCE_STYLE          0x00000200
+define ISC_RET_DATAGRAM                0x00000400
+define ISC_RET_CONNECTION              0x00000800
+define ISC_RET_INTERMEDIATE_RETURN     0x00001000
+define ISC_RET_CALL_LEVEL              0x00002000
+define ISC_RET_EXTENDED_ERROR          0x00004000
+define ISC_RET_STREAM                  0x00008000
+define ISC_RET_INTEGRITY               0x00010000
+define ISC_RET_IDENTIFY                0x00020000
+define ISC_RET_NULL_SESSION            0x00040000
+define ISC_RET_MANUAL_CRED_VALIDATION  0x00080000
+define ISC_RET_RESERVED1               0x00100000
+define ISC_RET_FRAGMENT_ONLY           0x00200000
+// This exists only in Windows Vista and greater
+define ISC_RET_FORWARD_CREDENTIALS     0x00400000
+
+define ISC_RET_USED_HTTP_STYLE         0x01000000
+define ISC_RET_NO_ADDITIONAL_TOKEN     0x02000000 // *INTERNAL*
+define ISC_RET_REAUTHENTICATION        0x08000000 // *INTERNAL*
+define ISC_RET_CONFIDENTIALITY_ONLY    0x40000000 // honored by SPNEGO/Kerberos
+
+
+define ASC_REQ_DELEGATE                0x00000001
+define ASC_REQ_MUTUAL_AUTH             0x00000002
+define ASC_REQ_REPLAY_DETECT           0x00000004
+define ASC_REQ_SEQUENCE_DETECT         0x00000008
+define ASC_REQ_CONFIDENTIALITY         0x00000010
+define ASC_REQ_USE_SESSION_KEY         0x00000020
+define ASC_REQ_SESSION_TICKET          0x00000040
+define ASC_REQ_ALLOCATE_MEMORY         0x00000100
+define ASC_REQ_USE_DCE_STYLE           0x00000200
+define ASC_REQ_DATAGRAM                0x00000400
+define ASC_REQ_CONNECTION              0x00000800
+define ASC_REQ_CALL_LEVEL              0x00001000
+define ASC_REQ_FRAGMENT_SUPPLIED       0x00002000
+define ASC_REQ_EXTENDED_ERROR          0x00008000
+define ASC_REQ_STREAM                  0x00010000
+define ASC_REQ_INTEGRITY               0x00020000
+define ASC_REQ_LICENSING               0x00040000
+define ASC_REQ_IDENTIFY                0x00080000
+define ASC_REQ_ALLOW_NULL_SESSION      0x00100000
+define ASC_REQ_ALLOW_NON_USER_LOGONS   0x00200000
+define ASC_REQ_ALLOW_CONTEXT_REPLAY    0x00400000
+define ASC_REQ_FRAGMENT_TO_FIT         0x00800000
+
+define ASC_REQ_NO_TOKEN                0x01000000
+define ASC_REQ_PROXY_BINDINGS          0x04000000
+//      SSP_RET_REAUTHENTICATION        0x08000000  // *INTERNAL*
+define ASC_REQ_ALLOW_MISSING_BINDINGS  0x10000000
+
+define ASC_RET_DELEGATE                0x00000001
+define ASC_RET_MUTUAL_AUTH             0x00000002
+define ASC_RET_REPLAY_DETECT           0x00000004
+define ASC_RET_SEQUENCE_DETECT         0x00000008
+define ASC_RET_CONFIDENTIALITY         0x00000010
+define ASC_RET_USE_SESSION_KEY         0x00000020
+define ASC_RET_SESSION_TICKET          0x00000040
+define ASC_RET_ALLOCATED_MEMORY        0x00000100
+define ASC_RET_USED_DCE_STYLE          0x00000200
+define ASC_RET_DATAGRAM                0x00000400
+define ASC_RET_CONNECTION              0x00000800
+define ASC_RET_CALL_LEVEL              0x00002000 // skipped 1000 to be like ISC_
+define ASC_RET_THIRD_LEG_FAILED        0x00004000
+define ASC_RET_EXTENDED_ERROR          0x00008000
+define ASC_RET_STREAM                  0x00010000
+define ASC_RET_INTEGRITY               0x00020000
+define ASC_RET_LICENSING               0x00040000
+define ASC_RET_IDENTIFY                0x00080000
+define ASC_RET_NULL_SESSION            0x00100000
+define ASC_RET_ALLOW_NON_USER_LOGONS   0x00200000
+define ASC_RET_ALLOW_CONTEXT_REPLAY    0x00400000  // deprecated - don't use this flag!!!
+define ASC_RET_FRAGMENT_ONLY           0x00800000
+define ASC_RET_NO_TOKEN                0x01000000
+define ASC_RET_NO_ADDITIONAL_TOKEN     0x02000000  // *INTERNAL*
+//      SSP_RET_REAUTHENTICATION        0x08000000  // *INTERNAL*
+
+define SEC_E_OK                         0
+define SEC_E_INCOMPLETE_MESSAGE         0x80090318
+
+define SEC_I_CONTINUE_NEEDED            0x00090312
+define SEC_I_COMPLETE_NEEDED            0x00090313
+define SEC_I_COMPLETE_AND_CONTINUE      0x00090314
+define SEC_I_LOCAL_LOGON                0x00090315
+define SEC_I_CONTEXT_EXPIRED            0x00090317
+define SEC_I_INCOMPLETE_CREDENTIALS     0x00090320
+define SEC_I_RENEGOTIATE                0x00090321
+
+extern AcquireCredentialsHandleA(//                            TYPE       DEFAULT
+    pszPrincipal,                // Name of principal          Char*
+    pszPackage,                  // Name of package            Char*      UNISP_NAME_A.text
+    fCredentialUse,              // Flags indicating use       CredUseFlag
+    pvLogonId,                   // Pointer to logon ID        Void*      null
+    pAuthData,                   // Package specific data      Cred*      null
+    pGetKeyFn,                   // Pointer to GetKey() func   Void*      null
+    pvGetKeyArgument,            // Value to pass to GetKey()  Void*      null
+    phCredential,                // Cred Handle                SecHandle*
+    ptsExpiry                    // (out) Lifetime (optional)  UInt64*    null
+  ) = 0
+
+extern FreeCredentialsHandle(
+  phCredential // Handle to free (SecHandle*)
+  ) = 0
+
+extern AcceptSecurityContext(//                           TYPE            DEFAULT
+    phCredential,            // Cred to base context      SecHandle*
+    phContext,               // Existing context (OPT)    SecHandle*
+    pInput,                  // Input buffer              SecBufferList*
+    fContextReq,             // Context Requirements      UInt32
+    TargetDataRep,           // Target Data Rep           UInt32
+    phNewContext,            // (out) New context handle  SecHandle*
+    pOutput,                 // (inout) Output buffers    SecBufferList*
+    pfContextAttr,           // (out) Context attributes  UInt32
+    ptsExpiry                // (out) Life span (OPT)    UInt64*         null
+  ) = 0
+
+extern InitializeSecurityContextA(//                            TYPE            DEFAULT
+    phCredential,                 // Cred to base context       SecHandle*
+    phContext,                    // Existing context (OPT)     SecHandle*
+    pszTargetName,                // Name of target             Char*
+    fContextReq,                  // Context Requirements       UInt32
+    Reserved1,                    // Reserved, MBZ              UInt32          0
+    TargetDataRep,                // Data rep of target         UInt32
+    pInput,                       // Input Buffers              SecBufferList*
+    Reserved2,                    // Reserved, MBZ              UInt32          0
+    phNewContext,                 // (out) New Context handle   SecHandle*
+    pOutput,                      // (inout) Output Buffers     SecBufferList*
+    pfContextAttr,                // (out) Context attrs        UInt32*
+    ptsExpiry                     // (out) Life span (OPT)      UInt64*
+  ) = 0
+
+
+extern DeleteSecurityContext(phContext) = 0
+
+extern CompleteAuthToken(
+    phContext,           // Context to complete   SecHandle*
+    pToken               // Token to complete     SecBufferList*
+  ) = 0
+
+extern QueryContextAttributesA(
+    phContext,                 // Context to query        SecHandle*
+    ulAttribute,               // Attribute to query      UInt32
+    pBuffer                    // Buffer for attributes   Void*
+  ) = 0
+
+extern QueryContextAttributesExA(
+    phContext,                 // Context to query        SecHandle*
+    ulAttribute,               // Attribute to query      UInt32
+    pBuffer,                   // Buffer for attributes   Void*
+    cbBuffer                   // Length of buffer        UInt32
+  ) = 0
+
+extern EncryptMessage(
+    phContext,    // SecHandle*
+    fQOP,         // UInt32
+    pMessage,     // SecBufferList*
+    MessageSeqNo  // UInt32
+  ) = 0
+
+extern DecryptMessage(
+    phContext,      // SecHandle*
+    pMessage,       // SecBufferList*
+    MessageSeqNo,   // UInt32
+    pfQOP          // UInt32*
+  ) = 0
+
+//-----------------------------------------------------------------------------------------------------
+define CERT_INFO_SUBJECT_FLAG       7
+
+define CERT_COMPARE_NAME_STR_A      7
+define CERT_COMPARE_SHIFT           16
+
+define CERT_FIND_SUBJECT_STR_A      CERT_COMPARE_NAME_STR_A << CERT_COMPARE_SHIFT | CERT_INFO_SUBJECT_FLAG
+
+extern CertOpenStore(
+    lpszStoreProvider,  // Char*
+    dwEncodingType,     // UInt32
+    hCryptProv,         // Void*
+    dwFlags,            // UInt32
+    pvPara              // WChar*
+  ) = null
+
+extern CertCloseStore(hCertStore, dwFlags) = 0
+
+extern CertFindCertificateInStore(
+    hCertStore,           // Void*
+    dwCertEncodingType,   // UInt32
+    dwFindFlags,          // UInt32
+    dwFindType,           // UInt32           CERT_FIND_SUBJECT_STR_A
+    pvFindPara,           // Char*
+    pPrevCertContext      // CertContext*     null
+  ) = CertContext*{}
+
+extern CertFreeCertificateContext(pCertContext) = 0

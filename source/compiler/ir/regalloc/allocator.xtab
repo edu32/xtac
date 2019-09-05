@@ -1,0 +1,120 @@
+struct Allocator {
+  const  function = ssa.Function*{}
+  const  gprSlots = GprSlots{}
+  const  xmmSlots = XmmSlots{}
+  const      defs = List(Definition){}
+
+
+  fn dispose(this) {
+    delete this.defs with fn(x) = delete x
+  }
+
+
+  fn run(this, context) {
+    this.setupSlots()
+    this.legalize()
+    this.setupBlocks()
+    this.setupUseRanges()
+    this.allocateRegisters()
+    this.resolveMoves(context.ids)
+    this.assignRegisters()
+    //this.removeNops()
+  }
+
+
+  fn setupSlots(this) {
+    import gprs, xmms from regalloc
+
+    var  regs = &gprs as Register*
+    var slots = &this.gprSlots as Slot*
+    for var i = 0; i < ssa.MAX_GPRS; ++i {
+      slots[i] = Slot{ reg = regs[i] }
+    }
+
+    slots = &this.xmmSlots as Slot*
+     regs = &xmms as Register*
+    for var i = 0; i < ssa.MAX_XMMS; ++i {
+      slots[i] = Slot{ reg = regs[i] }
+    }
+  }
+
+
+  fn legalize(this) {
+    import _legalize
+    _legalize.run(this)
+  }
+
+
+  fn setupBlocks(this) {
+    var bidx = 0, vidx = 0
+    each block in this.function.blocks() {
+      block.index = bidx++
+
+      if const last = block.body.last {
+        const nop = new ssa.Value{ pos = last.pos, parent = block, type = ssa.tyVoid }
+        nop.initialize(operands = 0)
+        block.body.insertBefore(nop, last)
+        if !nop.qprev {
+          const nop2 = new ssa.Value{ pos = last.pos, parent = block, type = ssa.tyVoid }
+          nop2.initialize(operands = 0)
+          block.body.insertBefore(nop2, nop)
+        }
+      }
+
+      each value in block.values() {
+        value.index = vidx++
+        this.defs.append(Definition{ value = value })
+      }
+    }
+
+    for i, def in this.defs {
+      const qprev = (&this.defs.items[i - 1] if i)
+      const qnext = (&this.defs.items[i + 1] if i + 1 < this.defs.length)
+         def.qprev = qprev
+         def.qnext = qnext
+    }
+  }
+
+
+  fn removeNops(this) {
+    each block in this.function.blocks() {
+      for var value = block.body.first; value; {
+        const qnext = value.qnext
+        switch value {
+          case ssa.Value {
+            block.body.remove(value)
+            delete value
+          }
+        }
+        value = qnext
+      }
+    }
+  }
+
+
+  fn setupUseRanges(this) {
+    import _setup
+    _setup.run(this)
+  }
+
+
+  fn allocateRegisters(this) {
+    import _allocate
+    _allocate.run(this)
+  }
+
+
+  fn resolveMoves(this, ids) {
+    import resolver
+    resolver.run(this, ids)
+  }
+
+
+  fn assignRegisters(this) {
+    import _stackframe
+    _stackframe.run(this)
+    
+    import _assign
+    _assign.run(this)
+  }
+}

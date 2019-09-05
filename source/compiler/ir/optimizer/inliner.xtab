@@ -1,0 +1,421 @@
+define MAX_CALLER_INSTRUCTIONS 1024
+define MIN_CALLEE_INSTRUCTIONS 4
+define MAX_CALLEE_INSTRUCTIONS 10
+
+fn run(context) {
+  for file in context.program.code.files {
+    auto caller = Caller{ function = file }
+    caller.run(context)
+  }
+  for function in context.program.code.functions {
+    auto caller = Caller{ function = function }
+    caller.run(context)
+  }
+}
+
+
+struct Caller {
+  const    function = ssa.Function*{}
+  readonly   length = 0
+  readonly callsite = ssa.Call*{}
+  readonly     copy = Copy{}
+
+  fn dispose(this) {
+    delete this.copy
+  }
+
+  fn run(this, context) {
+    each value in this.function.flatten() {
+      switch value {
+        case ssa.Value{}
+        case ssa.ElementAt{}
+        case ssa.Return{}
+        case ssa.Local{}
+        case ssa.Parameter{}
+        case ssa.Argument{}
+        default ++this.length
+      }
+    }
+
+    each block in this.function.blocks() {
+      for var value = block.body.first; value; {
+        switch value {
+          case call: ssa.Call {
+            this.callsite = call
+            value = this.visitCall(context)
+            break if this.length >= MAX_CALLER_INSTRUCTIONS
+          }
+          default
+            value = value.qnext
+        }
+      }
+    }
+  }
+
+
+  fn visitCall(this, context) {
+    ++context.inliner.callsites.visited
+
+    if const elem = this.callsite.operands.items[0].isMemory() {
+      if elem.operands.length == 2 {
+        const  base = elem.operands.items[0].isaNode()
+        const index = elem.operands.items[1].isaNode()
+        if base && index && base is ssa.CodeSection {
+          if const callee = index is ssa.Function {
+            if callee != this.function { // Don't inline recursions.
+              ++context.inliner.callsites.inlineable
+              return this.tryInlineCall(context, callee)
+            }
+          }
+        }
+      }
+    }
+
+    return this.callsite.qnext
+  }
+
+
+  fn tryInlineCall(this, context, callee) {
+    var values = 0
+    each value in callee.flatten() {
+      switch value {
+        case ssa.Value{}
+        case ssa.ElementAt{}
+        case ssa.Yield return this.callsite.qnext // Don't inline async/generator functions.
+        case ssa.Return{}
+        case ssa.Local{}
+        case ssa.Parameter{}
+        case ssa.Argument{}
+        default return this.callsite.qnext if ++values > MAX_CALLEE_INSTRUCTIONS
+      }
+    }
+    if values > MIN_CALLEE_INSTRUCTIONS && this.length + values >= MAX_CALLEE_INSTRUCTIONS {
+      return this.callsite.qnext 
+    }
+    ++context.inliner.inlined
+    return this.inlineCall(context, callee)
+  }
+
+  fn inlineCall(this, context, callee) {
+    /*  (1) Split the current block at the callsite (bb.before and bb.after). Keep callsite in bb.before
+        (2) Insert all blocks of callee after bb.before
+        (3) Make bb.before jump to 1st inserted block and make last inserted block jump to bb.after.
+    */
+    this.splitCallSiteBlock()
+    this.copyBlocks(callee)
+    this.copyValues(callee)
+    this.removeCallSite()
+    this.insertJumps()
+    return this.callsite.qnext
+  }
+
+  fn splitCallSiteBlock(this) {
+    const block = this.callsite.parent
+    const  next = new ssa.Block{ pos = block.pos, parent = this.function, type = ssa.tyVoid  }
+    this.function.body.insertAfter(next, block)
+    // Copy all values after callsite to {next}.
+    for block.body.last != this.callsite {
+      const value = block.body.removeLast()
+      value.parent = next
+      next.body.prepend(value)
+    }
+  }
+
+  fn removeCallSite(this) {
+
+  }
+
+  fn insertJumps(this) {
+
+  }
+
+  fn copyBlocks(this, callee) {
+    this.copy = Copy{}
+    var bidx = 0
+    each block in callee.blocks() {
+      block.index = bidx++
+      const copy = new ssa.Block{ pos = block.pos, parent = this.function, type = ssa.tyVoid }
+      this.copy.blocks.append(copy)
+    }
+  }
+
+  fn copyValues(this, callee) {
+    var i = 0
+    for var src = callee.body.first; src; src = src.qnext {
+      const dst = this.copy.blocks[i++]
+      this.copyBlockValues(dst, src)
+    }
+  }
+
+  fn copyBlockValues(this, dstBlock, srcBlock) {
+    if this.copy.block {
+      this.function.body.insertAfter(dstBlock, this.copy.block)
+    } else {
+      this.function.body.insertAfter(dstBlock, this.callsite.parent)
+    }
+    this.copy.block = dstBlock
+    for var srcValue = srcBlock.body.first; srcValue; srcValue = srcValue.qnext {
+      switch srcValue {
+        case ssa.Value                this.copy.nop(srcValue)
+        case ssa.ElementAt            this.copy.elementAt(srcValue)
+        case ssa.Store                this.copy.store(srcValue)
+        case ssa.Assign               this.copy.assign(srcValue)
+        case ssa.Exchange             this.copy.exchange(srcValue)
+        case ssa.XAdd                 this.copy.xadd(srcValue)
+
+        case ssa.Local                this.copy.local(srcValue)
+        case ssa.Parameter            this.copy.parameter(srcValue)
+
+        case ssa.Compare              this.copy.compare(srcValue)
+        case ssa.CompareExchange      this.copy.compareExchange(srcValue)
+
+        case ssa.Assert               this.copy.assert_(srcValue)
+        case ssa.Pause                this.copy.pause(srcValue)
+
+        case ssa.Jump                 this.copy.jump(srcValue)
+        case ssa.JumpIf               this.copy.jumpif(srcValue)
+        case ssa.Return               this.copy.return_(srcValue)
+
+        case ssa.Load                 this.copy.compare(srcValue)
+        case ssa.Argument             this.copy.argument(srcValue)
+        case ssa.Address              this.copy.address(srcValue)
+        case ssa.Decrement            this.copy.decrement(srcValue)
+        case ssa.Increment            this.copy.increment(srcValue)
+        case ssa.Negate               this.copy.negate(srcValue)
+        case ssa.BitwiseNot           this.copy.bitwiseNot(srcValue)
+        case ssa.SignExtend           this.copy.signExtend(srcValue)
+        case ssa.ZeroExtend           this.copy.zeroExtend(srcValue)
+        case ssa.NarrowingCast        this.copy.narrowingCast(srcValue)
+        case ssa.NumericCast          this.copy.numericCast(srcValue)
+        case ssa.BitCast              this.copy.bitCast(srcValue)
+        case ssa.Round                this.copy.round(srcValue)
+        case ssa.SquareRoot           this.copy.squareRoot(srcValue)
+        case ssa.Abs                  this.copy.abs(srcValue)
+
+        case ssa.Or                   this.copy.or(srcValue)
+        case ssa.XOr                  this.copy.xor(srcValue)
+        case ssa.And                  this.copy.and(srcValue)
+        case ssa.LeftShift            this.copy.leftShift(srcValue)
+        case ssa.RightShift           this.copy.rightShift(srcValue)
+        case ssa.UnsignedRightShift   this.copy.unsignedRightShift(srcValue)
+        case ssa.Subtract             this.copy.subtract(srcValue)
+        case ssa.Add                  this.copy.add(srcValue)
+        case ssa.Remainder            this.copy.remainder(srcValue)
+        case ssa.DivRem               this.copy.divrem(srcValue)
+        case ssa.Divide               this.copy.divide(srcValue)
+        case ssa.Multiply             this.copy.multiply(srcValue)
+        case ssa.Min                  this.copy.min(srcValue)
+        case ssa.Max                  this.copy.max(srcValue)
+        case ssa.RotateLeft           this.copy.rotateLeft(srcValue)
+        case ssa.RotateRight          this.copy.rotateRight(srcValue)
+
+        case ssa.Call                 this.copy.call(srcValue)
+        case ssa.Phi                  this.copy.phi(srcValue)
+
+        default assert with nameof(srcValue)
+      }
+    }
+  }
+}
+
+
+struct Copy {
+  const blocks = List(ssa.Block*){}
+  var    block = ssa.Block*{}
+
+  fn dispose(this) {
+    delete this.blocks
+  }
+
+  fn nop(this, src) {
+
+  }
+
+  fn elementAt(this, src) {
+
+  }
+
+  fn store(this, src) {
+    
+  }
+
+  fn assign(this, src) {
+    
+  }
+
+  fn exchange(this, src) {
+    
+  }
+
+  fn xadd(this, src) {
+    
+  }
+
+  fn local(this, src) {
+    
+  }
+
+  fn parameter(this, src) {
+    
+  }
+
+  fn compare(this, src) {
+    
+  }
+
+  fn compareExchange(this, src) {
+    
+  }
+
+  fn assert_(this, src) {
+    
+  }
+
+  fn pause(this, src) {
+    
+  }
+
+  fn jump(this, src) {
+    
+  }
+
+  fn jumpif(this, src) {
+    
+  }
+
+  fn return_(this, src) {
+    
+  }
+
+  fn load(this, src) {
+    
+  }
+
+  fn argument(this, src) {
+    
+  }
+
+  fn address(this, src) {
+    
+  }
+
+  fn decrement(this, src) {
+    
+  }
+
+  fn increment(this, src) {
+    
+  }
+
+  fn negate(this, src) {
+    
+  }
+
+  fn bitwiseNot(this, src) {
+    
+  }
+
+  fn signExtend(this, src) {
+    
+  }
+
+  fn zeroExtend(this, src) {
+    
+  }
+
+  fn narrowingCast(this, src) {
+    
+  }
+
+  fn numericCast(this, src) {
+    
+  }
+
+  fn bitCast(this, src) {
+    
+  }
+
+  fn round(this, src) {
+    
+  }
+
+  fn squareRoot(this, src) {
+    
+  }
+
+  fn abs(this, src) {
+    
+  }
+
+  fn or(this, src) {
+    
+  }
+
+  fn xor(this, src) {
+    
+  }
+
+  fn and(this, src) {
+    
+  }
+
+  fn leftShift(this, src) {
+    
+  }
+
+  fn rightShift(this, src) {
+    
+  }
+
+  fn unsignedRightShift(this, src) {
+    
+  }
+
+  fn subtract(this, src) {
+    
+  }
+
+  fn add(this, src) {
+    
+  }
+
+  fn remainder(this, src) {
+    
+  }
+
+  fn divrem(this, src) {
+    
+  }
+
+  fn divide(this, src) {
+    
+  }
+
+  fn multiply(this, src) {
+    
+  }
+
+  fn min(this, src) {
+    
+  }
+
+  fn max(this, src) {
+    
+  }
+
+  fn rotateLeft(this, src) {
+    
+  }
+
+  fn rotateRight(this, src) {
+    
+  }
+
+  fn call(this, src) {
+    
+  }
+
+  fn phi(this, src) {
+    
+  }
+}

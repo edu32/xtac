@@ -1,0 +1,466 @@
+import op
+
+struct Encoder {
+  const       buffer = Buffer&{}
+  const      patches = List(Patch)&{}
+  readonly lastPatch = Patch*{}
+
+  fn collectDisplacementPatch(this, address):this {
+    const site = this.buffer.displacement
+    if const elem = address.node is ssa.ElementAt {
+      assert elem.operands.length > 1
+      if const base = elem.operands.items[0].isaNode() {
+        if const index = elem.operands.items[1].isaNode() {
+          switch base {
+            case ssa.Program {
+              assert site.isValid()
+              switch index {
+                case ssa.DataSection this.lastPatch = &this.patches.append(Patch{ site = site, node = index })
+                case ssa.CodeSection this.lastPatch = &this.patches.append(Patch{ site = site, node = index })
+                default assert with nameof(index)
+              }
+            }
+            case ssa.DataSection {
+              assert site.isValid()
+              switch index {
+                case ssa.Extern this.lastPatch = &this.patches.append(Patch{ site = site, node = index })
+                case ssa.Global this.lastPatch = &this.patches.append(Patch{ site = site, node = index })
+                default assert with nameof(index)
+              }
+            }
+            case ssa.CodeSection {
+              assert site.isValid()
+              switch index {
+                case ssa.Function this.lastPatch = &this.patches.append(Patch{ site = site, node = index })
+                case ssa.Block    this.lastPatch = &this.patches.append(Patch{ site = site, node = index })
+                default assert with nameof(index)
+              }
+            }
+          }
+        }
+      }
+    } else if address.node is ssa.Block {
+      this.lastPatch = &this.patches.append(Patch{ site = site, node = address.node })
+    }
+  }
+
+  fn patch(this) {
+    if this.lastPatch {
+      this.lastPatch.rip = this.buffer.length
+      this.lastPatch = null
+    }
+  }
+
+
+  fn oneByteRexOp(this, opSize, reg, rm, opCode, opGroup, prefix) {
+    assert !this.lastPatch
+    this.buffer.begin()
+    if reg == INVALID_REGISTER {
+      if rm == INVALID_REGISTER {
+        if opGroup == INVALID_OPCODE {
+          //  [LOCK | REPNZ | REPZ] [66h] [REX.W] opCode [immediate]
+          this.writeByte(prefix) if prefix
+          this.encodeRex(opSize, r = 0, x = 0, b = 0)
+          this.writeByte(opCode)
+        } else {
+          //  [LOCK | REPNZ | REPZ] [66h] [REX.WR] opCode+group [immediate]
+          this.writeByte(prefix) if prefix
+          this.encodeRex(opSize, r = 0, x = 0, b = opGroup)
+          this.writeByte(opCode | (opGroup & LO_MASK))
+        }
+      } else if opGroup == INVALID_OPCODE {
+        //  [LOCK | REPNZ | REPZ] [66h] [REX.W] opCode ModRM.rm [immediate]
+        assert 0
+        this.writeByte(prefix) if prefix
+        this.encodeRex(opSize, r = 0, x = 0, b = rm)
+        this.writeByte(opCode)
+        this.buffer.writeModRM(MODRM_REGISTERS, reg = 0, rm = rm)
+      } else {
+        //  [LOCK | REPNZ | REPZ] [66h] opCode [REX.WB] ModRM.reg(group)+rm [immediate]
+        this.writeByte(prefix) if prefix
+        this.encodeRex(opSize, r = 0, x = 0, b = rm)
+        this.writeByte(opCode)
+        this.buffer.writeModRM(MODRM_REGISTERS, reg = opGroup, rm = rm)
+      }
+    } else if rm == INVALID_REGISTER {
+      if opGroup == INVALID_OPCODE {
+        //  [LOCK | REPNZ | REPZ] [66h] [REX.WB] opCode+reg [immediate]
+        this.writeByte(prefix) if prefix
+        this.encodeRex(opSize, r = 0, x = 0, b = reg)
+        this.writeByte(opCode | (reg & LO_MASK))
+      } else {
+        assert 0
+      }
+    } else {
+      //  [LOCK | REPNZ | REPZ] [66h] [REX.WRXB] ModRM opCode
+      this.writeByte(prefix) if prefix
+      this.encodeRex(opSize, r = reg, x = 0, b = rm)
+      this.writeByte(opCode)
+      this.buffer.writeModRM(MODRM_REGISTERS, reg, rm)
+    }
+  }
+
+
+  fn oneByteRexAddressOp(this, opSize, reg, address, opCode, opGroup, prefix):this {
+    assert !this.lastPatch
+    this.buffer.begin()
+    const  base = address.reg.base()
+    const index = address.reg.index()
+    if reg == INVALID_REGISTER {
+      if opGroup == INVALID_OPCODE {
+        assert 0
+      } else {
+        //  [LOCK | REPNZ | REPZ] [0x66] [REX.WRXB] opCode ModRM.reg(group)+r/m [SIB] [displacement] [immediate]
+        this.writeByte(prefix) if prefix
+        this.encodeRex(opSize, r = 0, x = index, b = base, isanAddress = true)
+        this.writeByte(opCode)
+        this.encodeAddress(opGroup, address)
+      }
+    } else if opGroup == INVALID_OPCODE {
+      //  [LOCK | REPNZ | REPZ] [0x66] [REX.WRXB] opCode ModRM.reg+r/m [SIB] [displacement] [immediate
+      this.writeByte(prefix) if prefix
+      this.encodeRex(opSize, r = reg, x = index, b = base, isanAddress = true)
+      this.writeByte(opCode)
+      this.encodeAddress(reg, address)
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn twoByteRexOp(this, opSize, reg, rm, opCode, opGroup, prefix) {
+    assert !this.lastPatch
+    this.buffer.begin()
+    this.writeByte(prefix) if prefix
+    if reg == INVALID_REGISTER {
+      if rm == INVALID_REGISTER {
+        if opGroup == INVALID_OPCODE {
+          //  [LOCK | REPNZ | REPZ] [66h] [REX.W] 0Fh opCode [immediate]
+          this.encodeRex(opSize, r = 0, x = 0, b = 0)
+          this.writeByte(0x0F)
+          this.writeByte(opCode)
+        } else {
+          assert 0
+        }
+      } else if opGroup == INVALID_OPCODE {
+        //  [LOCK | REPNZ | REPZ] [66h] [REX.WB] 0Fh opCode ModRM.rm [immediate]
+        this.encodeRex(opSize, r = 0, x = 0, b = rm)
+        this.writeByte(0x0F)
+        this.writeByte(opCode)
+        this.buffer.writeModRM(MODRM_REGISTERS, reg = 0, rm = rm)
+      } else {
+        //  [LOCK | REPNZ | REPZ] [66h] [REX.WB] 0Fh opCode ModRM.reg(group)+rm [immediate]
+        assert 0
+        this.encodeRex(opSize, r = 0, x = 0, b = rm)
+        this.writeByte(0x0F)
+        this.writeByte(opCode)
+        this.buffer.writeModRM(MODRM_REGISTERS, reg = opGroup, rm = rm)
+      }
+    } else if rm == INVALID_REGISTER {
+      assert 0
+    } else {
+      //  [LOCK | REPNZ | REPZ] [0x66] [REX.WRB] 0F opCode ModRM.reg+rm [immediate]
+      this.encodeRex(opSize, r = reg, x = 0, b = rm)
+      this.writeByte(0x0F)
+      this.writeByte(opCode)
+      this.buffer.writeModRM(MODRM_REGISTERS, reg, rm)
+    }
+  }
+
+
+  fn twoByteRexAddressOp(this, opSize, reg, address, opCode, opGroup, prefix):this {
+    assert !this.lastPatch
+    const  base = address.reg.base()
+    const index = address.reg.index()
+    this.buffer.begin()
+    this.writeByte(prefix) if prefix
+    if reg == INVALID_REGISTER {
+      if opGroup == INVALID_OPCODE {
+        //  [LOCK | REPNZ | REPZ] [0x66] [REX.WXB] 0F opCode ModRM.rm [SIB] [disp] [imm]
+        this.encodeRex(opSize, r = 0, x = index, b = base)
+        this.writeByte(0x0F)
+        this.writeByte(opCode)
+        this.encodeAddress(0, address)
+      } else {
+        assert 0
+        //  [LOCK | REPNZ | REPZ] [0x66] [REX.WXB] 0F opCode ModRM.reg(group)+rm [SIB] [disp] [imm]
+        this.encodeRex(opSize, r = 0, x = index, b = base)
+        this.writeByte(0x0F)
+        this.writeByte(opCode)
+        this.encodeAddress(opGroup, address)
+      }
+    } else if opGroup == INVALID_OPCODE {
+      //  [LOCK | REPNZ | REPZ] [0x66] [REX.WRXB] 0F opCode ModRM [SIB] [disp] [imm]
+      this.encodeRex(opSize, r = reg, x = index, b = base)
+      this.writeByte(0x0F)
+      this.writeByte(opCode)
+      this.encodeAddress(reg, address)
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn twoByteVexOp(this, reg, vreg, rm, opCode, prefix, vector, w) {
+    assert !this.lastPatch
+    this.buffer.begin()
+    //  VEX opCode ModRM [SIB] [displacement] [immediate]
+    this.buffer.writeVex(v = vreg, r = reg, x = 0, b = rm, l = vector, map = op.two_bytes_escape, pp = prefix, w = w)  
+    this.writeByte(opCode)
+    this.buffer.writeModRM(MODRM_REGISTERS, reg, rm)
+  }
+
+
+  fn twoByteVexAddressOp(this, reg, vreg, address, opCode, prefix, vector, w):this {
+    assert !this.lastPatch
+    this.buffer.begin()
+    const  base = address.reg.base()
+    const index = address.reg.index()
+    //  VEX opCode ModRM [SIB] [displacement] [immediate]
+    this.buffer.writeVex(v = vreg, r = reg, x = index, b = base, l = vector, map = op.two_bytes_escape, pp = prefix, w = w)
+    this.writeByte(opCode)
+    this.encodeAddress(reg, address)
+  }
+
+
+  fn encodeRex(this, opSize, r, x, b, isanAddress = false) {
+    //  [0x66] [REX]
+    if opSize == SIZE_OF_WORD {
+      this.buffer.writeByte(OPERAND_SIZE_OVERRIDE)
+    }
+    var emitRexAlways = false
+    if opSize == SIZE_OF_BYTE {
+      if isanAddress {
+        emitRexAlways = this.byteRegIsAvailableOnlyWithRex(r)
+      } else {
+        emitRexAlways = this.byteRegIsAvailableOnlyWithRex(r) || this.byteRegIsAvailableOnlyWithRex(b)
+      }
+    }
+    this.buffer.writeRex(
+        opSize == SIZE_OF_POINTER,  //  REX.W
+        (r & HI_MASK) != 0,         //  REX.R
+        (x & HI_MASK) != 0,         //  REX.X
+        (b & HI_MASK) != 0,         //  REX.B
+        emitRexAlways
+      )
+  }
+
+
+  fn encodeAddress(this, reg, address) {
+    const      rm = address.reg
+    const    base = rm.base()  if rm.hasBase()  else INVALID_REGISTER
+    const   index = rm.index() if rm.hasIndex() else INVALID_REGISTER
+    const   scale = rm.scale()
+    const    disp = rm.displacement()
+    const isDisp8 = isaByte(disp)
+
+    const  baseReg = (0 if  base == INVALID_REGISTER else ( base & LO_MASK))
+    const indexReg = (0 if index == INVALID_REGISTER else (index & LO_MASK))
+
+    assert reg != INVALID_REGISTER
+    
+    assert indexReg != rsp
+
+    if !rm.isRspRelative() {
+      assert baseReg != rsp
+    }
+
+    //assert reg != rsp
+
+    if isDisp8 {
+      assert disp >= -0xFF && disp < 0xFF
+    }
+
+    if rm.isRipRelative() {
+      assert base == INVALID_REGISTER && index == INVALID_REGISTER
+      //  [ rip + disp32 ]
+      //    00  ModRM.mod = 0b00 (MODRM_NODISP)
+      //        ModRM.reg = reg + [REX.R]
+      //        ModRM.rm  = rbp
+      //    01  disp32
+      this.buffer.writeModRM(MODRM_NODISP, reg, rbp)
+      this.buffer.writeDisp32(disp)
+      this.collectDisplacementPatch(address)
+    }
+    else if rm.isRspRelative() {
+      assert base == INVALID_REGISTER && index == INVALID_REGISTER
+      if disp {
+        if isDisp8 {
+          //  [ rsp + disp8 ]
+          //    00  ModRM.mod = 0b01 (MODRM_DISP8)
+          //        ModRM.reg = reg + [REX.R]
+          //        ModRM.rm  = rsp
+          //    01  SIB.scale = 0u8
+          //        SIB.index = rsp
+          //        SIB.base  = rsp
+          //    02  disp8
+          this.buffer.writeSIB(MODRM_DISP8, reg, rsp, rsp, Scale.1Byte)
+          this.buffer.writeDisp8(disp)
+        } else {
+          //  [ rsp + disp32 ]
+          //    00  ModRM.mod = 0b10 (MODRM_DISP32)
+          //        ModRM.reg = reg + [REX.R]
+          //        ModRM.rm  = rsp
+          //    01  SIB.scale = xx
+          //        SIB.index = rsp
+          //        SIB.base  = rsp
+          //    02  disp8
+          this.buffer.writeSIB(MODRM_DISP32, reg, rsp, rsp, Scale.1Byte)
+          this.buffer.writeDisp32(disp)
+        }
+      } else {
+        //  [ rsp ]
+        //    00  ModRM.mod = 0b00 (MODRM_NODISP)
+        //        ModRM.reg = reg + [REX.R]
+        //        ModRM.rm  = rsp
+        //    01  SIB.scale = xx
+        //        SIB.index = rsp
+        //        SIB.base  = rsp
+        this.buffer.writeSIB(MODRM_NODISP, reg, rsp, rsp, Scale.1Byte)
+      }
+    }
+    else if base == INVALID_REGISTER {
+      if index == INVALID_REGISTER {
+        //  [disp32 ]
+        //    00  ModRM.mod = 0b00 (MODRM_NODISP)
+        //        ModRM.reg = reg + [REX.R]
+        //        ModRM.rm  = rsp
+        //    01  SIB.scale = xx
+        //        SIB.index = rsp
+        //        SIB.base  = rbp
+        //    02  disp32
+        this.buffer.writeSIB(MODRM_NODISP, reg, rbp, rsp, Scale.1Byte)
+        this.buffer.writeDisp32(disp)
+      } else {
+        //  [ (index × scale) + disp32 ]
+        //    00  ModRM.mod = 0b00 (MODRM_NODISP)
+        //        ModRM.reg = reg + [REX.R]
+        //        ModRM.rm  = rsp
+        //    01  SIB.scale = xx
+        //        SIB.index = index + [REX.X]
+        //        SIB.base  = rbp
+        //    02  disp32
+        this.buffer.writeSIB(MODRM_NODISP, reg, rbp, index, Scale.1Byte)
+        this.buffer.writeDisp32(disp)
+      }
+    }
+    else if index == INVALID_REGISTER {
+      if disp {
+        if isDisp8 {
+          //  [ base + disp8 ]
+          //    00  ModRM.mod = 0b01 (MODRM_DISP8)
+          //        ModRM.reg = reg  + [REX.R]
+          //        ModRM.rm  = base + [REX.B]
+          //    01  disp8
+          this.buffer.writeModRM(MODRM_DISP8, reg, base)
+          this.buffer.writeDisp8(disp)
+        } else {
+          //  [ base + disp32 ]
+          //    00  ModRM.mod = 0b10 (MODRM_DISP32)
+          //        ModRM.reg = reg  + [REX.R]
+          //        ModRM.rm  = base + [REX.B]
+          //    01  disp32
+          this.buffer.writeModRM(MODRM_DISP32, reg, base)
+          this.buffer.writeDisp32(disp)
+        }
+      }
+      else if baseReg == rbp {
+        //  [ rbp/r13 + 0u8 ]
+        //    00  ModRM.mod = 0b01 (MODRM_DISP8)
+        //        ModRM.reg = reg     + [REX.R]
+        //        ModRM.rm  = rbp/r13 + [REX.B]
+        //    01  0u8
+        this.buffer.writeModRM(MODRM_DISP8, reg, base)
+        this.buffer.writeDisp8(0)
+      } else {
+        //  [base]
+        //    00  ModRM.mod = 0b00 (MODRM_NODISP)
+        //        ModRM.reg = reg  + [REX.R]
+        //        ModRM.rm  = base + [REX.B]
+        this.buffer.writeModRM(MODRM_NODISP, reg, base)
+      }
+    }
+    else if disp {
+      if isDisp8 {
+        //  [ base + (index × scale) + disp8 ]
+        //    00  ModRM.mod = 0b01 (MODRM_DISP8)
+        //        ModRM.reg = reg + [REX.R]
+        //        ModRM.rm  = rsp
+        //    01  SIB.scale = xx
+        //        SIB.index = index + [REX.X]
+        //        SIB.base  = base  + [REX.B]
+        //    02  disp8
+        this.buffer.writeSIB(MODRM_DISP8, reg, base, index, scale)
+        this.buffer.writeDisp8(disp)
+      } else {
+        //  [ base + (index × scale) + disp32 ]
+        //    00  ModRM.mod = 0b10 (MODRM_DISP32)
+        //        ModRM.reg = reg + [REX.R]
+        //        ModRM.rm  = rsp
+        //    01  SIB.scale = xx
+        //        SIB.index = index + [REX.X]
+        //        SIB.base  = base  + [REX.B]
+        //    02  disp32
+        this.buffer.writeSIB(MODRM_DISP32, reg, base, index, scale)
+        this.buffer.writeDisp32(disp)
+      }
+    } else if baseReg == rbp {
+      //  [ rbp/r13 + (index × scale) + 0u8]
+      //    00  ModRM.mod = 0b01 (MODRM_DISP8)
+      //        ModRM.reg = reg + [REX.R]
+      //        ModRM.rm  = rsp
+      //    01  SIB.scale = xx
+      //        SIB.index = index    + [REX.X]
+      //        SIB.base  = rbp/r13  + [REX.B]
+      //    02  0u8
+      this.buffer.writeSIB(MODRM_DISP8, reg, base, index, scale)
+      this.buffer.writeDisp8(0)
+    } else {
+      //  [ base + (index × scale) ]
+      //    00  ModRM.mod = 0b00 (MODRM_NODISP)
+      //        ModRM.reg = reg + [REX.R]
+      //        ModRM.rm  = rsp
+      //    01  SIB.scale = xx
+      //        SIB.index = index + [REX.X]
+      //        SIB.base  = base  + [REX.B]
+      this.buffer.writeSIB(MODRM_NODISP, reg, base, index, scale)
+    }
+  }
+
+  fn byteRegIsAvailableOnlyWithRex(reg) {
+    //  Always emit REX if the 8-bit {reg} is rsp/r12, rbp/r13, rsi/r14, rdi/r15. 
+    const loBits = reg & LO_MASK
+    return loBits >= rsp && loBits <= rdi
+  }
+
+
+  fn writeByte(this, byte) {
+    this.buffer.writeByte(byte)
+  }
+
+  fn isaByte(value) {
+    const mask = 0xFFFF_FF80
+    const hi24 = value & mask
+    return hi24 == mask || hi24  == 0
+  }
+
+  fn isaWord(value) {
+    const mask = 0xFFFF_8000
+    const hi16 = value & mask
+    return hi16 == mask || hi16  == 0
+  }
+}
+
+struct RexEncoder {
+  
+  fn oneByteOp() {
+
+  }
+}
+
+struct VexEncoder {
+  
+  fn oneByteOp() {
+
+  }
+}

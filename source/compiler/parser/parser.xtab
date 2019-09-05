@@ -1,0 +1,2971 @@
+import Token from scanner
+import Node from src
+
+fn parse(ctx) {
+  import time, memory from std
+  var  start = time.clock()
+  const info = fs.extractFilePathInfo(ctx.sourceFolderPath)
+  ctx.src = new src.Folder{ path = ctx.ids.get(info.path), name = ctx.ids.get(info.name),
+                            slashName = ctx.ids.get(info.name) }
+  const collector = {
+    ctx = ctx,
+    main = src.File*{},
+    std = src.Folder*{},  
+    sourceFolderPath = ctx.sourceFolderPath,
+    folders = 0,
+    skipped = 0,
+    errors = 0
+  }
+
+  collectFolder(collector, ctx.src, depth = 0)
+  checkRequired(collector)
+  var elapsed = time.elapsed(start)
+  println("#{'initialization'}#[%<darkblue|cyan>]: {\r\n\
+           #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+           #{'memory'}#[%wl12]: #{memory.mformat()},\r\n\
+           #{'errors'}#[%wl12]: #{collector.errors}#[%,%<red>],\r\n\
+           #{'size'}#[%wl12]: #{collector.ctx.compilationInfo.size}#[%y%<green>],\r\n\
+           #{'folders'}#[%wl12]: #{collector.folders}#[%,%<gray>],\r\n\
+           #{'files'}#[%wl12]: #{collector.ctx.sources.length}#[%,%<gray>],\r\n\
+           #{'skipped'}#[%wl12]: #{collector.skipped}#[%,%<gray>],\r\n\
+           #{'ids'}#[%wl12]: #{collector.ctx.ids.values.length}#[%,%<gray>] } ")
+
+  start = time.clock()
+  parseFolder(collector, ctx.src)
+  elapsed = time.elapsed(start)
+  println("#{'parser'}#[%<darkblue|cyan>]: {\r\n\
+           #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+           #{'memory'}#[%wl12]: #{memory.mformat()},\r\n\
+           #{'errors'}#[%wl12]: #{collector.errors}#[%,%<red>],\r\n\
+           #{'lines'}#[%wl12]: #{collector.ctx.compilationInfo.lines}#[%,%<gray>],\r\n\
+           #{'tokens'}#[%wl12]: #{collector.ctx.compilationInfo.tokens}#[%,%<gray>],\r\n\
+           #{'lspeed'}#[%wl12]: #{collector.ctx.compilationInfo.lines/elapsed}#[%,%d0%<gray>] lines/s,\r\n\
+           #{'tspeed'}#[%wl12]: #{collector.ctx.compilationInfo.tokens/elapsed}#[%,%d0%<gray>] tokens/s,\r\n\
+           #{'bspeed'}#[%wl12]: #{collector.ctx.compilationInfo.size/elapsed}#[%,%d0%<gray>] B/s,\r\n\
+           #{'ids'}#[%wl12]: #{collector.ctx.ids.values.length}#[%,%<gray>] }")
+
+  return collector.errors
+}
+
+
+fn checkRequired(collector) {
+  if !collector.main {
+    println("#{'main'}#[%<red>] file not found")
+    ++collector.errors
+  }
+  if !collector.std {
+    println("#{'std'}#[%<red>] folder not found")
+    ++collector.errors
+  }
+}
+
+
+fn collectFolder(collector, folder, depth): void {
+  ++collector.folders
+  const ids = collector.ctx.ids
+  if depth {
+    indent(depth)
+    println("» #{folder.name}#[%<gray>]")
+  } else {
+    println("#{folder.path}")
+  }
+  const folderPath = string.fromBuffer(folder.path)
+  each entry in auto fs.enumerate(folderPath) {
+    if entry.isaFile {
+      indent(depth + 1)
+      if entry.extension == "xtab" {
+        if entry.size <= 0 {
+          println("→ #{entry.name} (#{entry.size}#[%y]) skipped because it is empty")
+          ++collector.skipped
+        } else if nameIsValid(entry.shortName) {
+          const pathid = ids.get(entry.path)
+          const file = new src.File{ parent = folder,
+                                     path = pathid,
+                                     name = makeNameNoExtension(entry.shortName, ids),
+                                     slashName = makeSlashName(collector.sourceFolderPath, entry.path, ids),
+                                     id = collector.ctx.sources.length }
+          folder.files.append(pathid.hash, file)
+          if folder.isRoot() && file.name == ids.kw_main {
+            if collector.main {
+              println("#{entry.shortName}#[%<red>] already seen as #{collector.main.slashName}#[%green]")
+              ++collector.errors
+            }
+            collector.main = file
+          }
+          if file.name == folder.name {            
+            folder.initFile = file
+          }
+          collector.ctx.compilationInfo.size += entry.size
+          collector.ctx.sources.append(Source{ name = file.slashName })
+          println("→ #{entry.name}#[%<gray>] (#{entry.size}#[%y]) (id = #{file.id}) ")
+        } else {
+          println("→ #{entry.name}#[%<gray>] (#{entry.size}#[%y]) skipped because the name is not valid")
+          ++collector.skipped
+        }
+      } else {
+        println("→ #{entry.name}#[%<gray>] (#{entry.size}#[%y]) skipped because of extension #{entry.extension}#[%<gray>]")
+        ++collector.skipped
+      }
+    } else if nameIsValid(entry.name) {
+      const child = new src.Folder{ parent = folder,
+                                        path = ids.get(entry.path),
+                                        name = ids.get(entry.name),
+                                        slashName = makeSlashName(collector.sourceFolderPath, entry.path, ids) }
+      folder.folders.append(child.path.hash, child)
+      if folder.isRoot() && child.name == ids.kw_std {
+        if collector.std {
+          println("#{entry.shortName}#[%<red>] already seen as #{collector.std.path}#[%green]")
+          ++collector.errors
+        }
+        collector.std = child
+      }
+      collectFolder(collector, child, depth + 1)
+    } else {
+      indent(depth + 1)
+      println("» '#{entry.name}' skipped because the name is not valid")
+    }
+  }
+  fn indent(depth) {
+    import console from std
+    console.indent(depth)
+  }
+  fn nameIsValid(name) {
+    var digits = 0
+    for i, ch in name {
+      if char.isaDigit(ch) {
+        return false if i == 0
+        ++digits
+      } else {
+        return false if !(char.isAlpha(ch) || ch == '_')
+      }
+    }
+    return digits < name.length
+  }
+  fn makeSlashName(sourcePath, path, ids) {
+    const str = string.fromRange(path.text + sourcePath.length + 1, path.end())
+    return ids.get(str)
+  }
+  fn makeNameNoExtension(name, ids) {
+    var end = name.end()
+    for --end; end > name.text && *end != '.'; --end {}
+    if end > name.text {
+      return ids.get(string.fromRange(name.text, end))
+    }
+    return ids.get(name)
+  }
+}
+
+
+fn parseFolder(collector, folder): void {
+  for item in folder.files {
+    const file = item.value
+    parseFile(collector, file)
+  }
+  for item in folder.folders {
+    const child = item.value
+    parseFolder(collector, child)
+  }
+}
+
+
+fn parseFile(collector, file) {
+  import scanner
+  const (src, srcok) = scanner.read(file.path)
+  collector.ctx.sources.items[file.id].value = src
+  file.source = &collector.ctx.sources.items[file.id].value
+  if srcok {
+    parseFileSource(collector, file)
+  }
+}
+
+fn parseFileSource(collector, file) {
+  import scanner
+  auto sc = scanner.Scanner{}
+  sc.initialize(file)
+  auto parser = Parser{ sources = collector.ctx.sources, ids = collector.ctx.ids, file = file }
+  each tok in auto sc.tokens() {
+    ++collector.ctx.compilationInfo.tokens
+    collector.ctx.compilationInfo.lines += tok.isaNewLine()
+    if parser.tokens.isEmpty() {
+      continue if tok.isaSpace() || tok.isaNewLine()
+    }
+    parser.tokens.append(tok)
+  }
+  if parser.tokens.isNotEmpty() {
+    parser.parse(collector)
+  }
+}
+
+struct Scope {
+  var block = src.Block*{}
+  var outer = Scope*{}
+
+  fn currentFunction(this) {
+    for var p = this; p; p = p.outer {
+      if p.block.owner && p.block.owner.isaTypeNode() {
+        return p.block.owner is src.Function
+      }
+    }
+    return null
+  }
+
+  fn currentLoop(this) {
+    for var p = this; p; p = p.outer {
+      if p.block.owner {
+        break if p.block.owner.isaTypeNode()
+        switch p.block.owner {
+          case src.For   return p.block.owner
+          case src.ForIn return p.block.owner
+          case src.Each  return p.block.owner
+        }
+      }
+    }
+    return null
+  }
+
+  fn isFileScope(this)    = this.outer == null
+  fn isNotFileScope(this) = this.outer != null
+
+  fn isaTypeScope(this) {
+    if this.block.owner {
+      switch this.block.owner {
+        case src.Struct, src.Union, src.Enum, src.Function
+          return true
+      }
+    }
+    return false
+  }
+
+  fn isaUnionScope(this) {
+    if this.block.owner {
+      switch this.block.owner {
+        case src.Union return true
+      }
+    }
+    return false
+  }
+
+  fn isaFieldScope(this) {
+    if this.block.owner {
+      switch this.block.owner {
+        case src.Struct return true
+        case src.Union  return true
+      }
+    }
+    return false
+  }
+
+  fn append(this, node) {
+    return if !node
+    this.block.children.append(node)
+    if this.block.owner {
+      switch this.block.owner {
+        case owner: src.File   this.applyModifiers(node, src.Modifiers{ isStatic = true })
+        case owner: src.Struct this.applyModifiers(node, owner.modifiers)
+        case owner: src.Union  this.applyModifiers(node, owner.modifiers)
+        case owner: src.Enum   this.applyModifiers(node, owner.modifiers)
+      }
+    }
+  }
+
+  fn applyModifiers(this, node, modifiers): void {
+    switch node {
+      case src.Variable {
+        if !node.modifiers.isStatic   node.modifiers.isStatic = modifiers.isStatic
+        if !node.modifiers.isConst    node.modifiers.isConst = modifiers.isConst
+        if !node.modifiers.isReadOnly node.modifiers.isReadOnly = modifiers.isReadOnly
+        if !node.modifiers.isAuto     node.modifiers.isAuto = modifiers.isAuto
+      }
+      case src.CommaList {
+        for child in node.children 
+          this.applyModifiers(child, modifiers)
+      }
+    }
+  }
+}
+
+
+struct Parser {
+  readonly    pos = Token*{}
+  readonly    end = Token*{}
+  const       ctx = Compiler&{}
+  const       ids = compiler.Identifiers*{}
+  const      file = src.File*{}
+  const    tokens = List(Token){}
+  readonly  scope = Scope*{}
+  const   sources = List(Source)*{}
+  readonly errors = 0
+
+
+  fn dispose(this) {
+    delete this.tokens
+  }
+
+
+  fn beginScope(this, scope) {
+    const outer = this.scope
+    this.scope = &scope
+    return outer
+  }
+
+  fn endScope(this, outer) {
+    assert this.scope.outer == outer
+    this.scope = outer
+  }
+
+
+  fn parse(this, collector) {
+    this.initialize()
+    const scope = Scope{ block = this.file.block, outer = this.scope }
+    const outer = this.beginScope(scope)
+    this.skipWhiteSpace(Skip.NewLines)
+    for this.pos.isNotEndOfFile() {
+      if const stmt = this.parseStatement() {
+        this.scope.append(stmt)
+      } else {
+        this.advance() // Past bad token
+      }
+    }
+    this.endScope(outer)
+    this.file.block.closeCurly = this.mkPos(this.pos)
+    collector.errors += this.errors
+  }
+
+
+  fn initialize(this) {
+    this.pos = this.tokens.first()
+    this.end = this.tokens.last()
+    assert this.pos && this.end && this.end.isEndOfFile()
+    this.file.block = new src.Block{ owner = this.file, pos = this.mkPos(this.pos) }
+    this.file.pos = this.file.block.pos
+    if this.file == this.file.parent.initFile || this.file.parent.pos.isNotValid() {
+      this.file.parent.pos = this.file.pos
+    }
+  }
+
+  enum Skip { 
+    Nothing,  // Don't skip spaces, newlines or comments.
+    Spaces,   // Skip spaces and comments but not newlines
+    NewLines, // Skip spaces, newlines and comments.
+  }
+
+  fn advance(this, skip = Skip.NewLines) {
+    return this.pos if this.pos == this.end
+    assert this.pos < this.end
+    ++this.pos
+    if skip != Skip.Nothing {
+      this.skipWhiteSpace(skip) 
+    }
+    return this.pos
+  }
+
+
+  fn skipWhiteSpace(this, skip) {
+    for this.pos < this.end {
+      this.skipComment()
+      switch skip {
+        case Skip.Spaces {
+          break if this.pos.token != Tok.Space
+          ++this.pos
+        }
+        case Skip.NewLines {
+          break if this.pos.isNotASpace() && this.pos.isNotANewLine()
+          ++this.pos
+        }
+        default assert 0
+      }
+    }
+  }
+
+
+  fn skipComment(this) {
+    if this.pos.token == Tok.OpenSingleLineComment {      
+      for ++this.pos; this.pos < this.end && this.pos.isNotANewLine(); ++this.pos {}
+    } else if this.pos.token == Tok.OpenMultiLineComment {
+      const open = this.pos
+      for ++this.pos; this.pos < this.end && this.pos.token != Tok.CloseMultiLineComment; ++this.pos {}
+      if this.pos == this.end {
+        this.e_token(open, "'/*' unmatched before end of file")
+      } else {
+        ++this.pos // Past closing '*/'
+      }
+    }
+  }
+
+  enum Context {
+    Stmt,     // Parse '{' as Block.
+    Lhs,      // Parse '{' as Object or Initializer. Parse '*' and '&' as UnarySuffix.
+    Rhs,      // Stop at '{',  '*' or '&'.
+    TypeName  // Stop at '{'. Parse '*' and '&' as UnarySuffix
+  }
+
+
+  fn parseStatement(this): Node* {
+    var node = Node*{}
+    switch this.pos.token {
+      case Tok.OpenCurly
+        node = this.parseBlock(null)
+    }
+    if node {
+      // Do nothing.
+    } else switch this.pos.keyword {
+      case Tok.If
+        node = this.parseIf()
+      case Tok.For
+        node = this.parseFor()
+      case Tok.Each
+        node = this.parseEach()
+      case Tok.Switch
+        node = this.parseSwitch()
+      case Tok.Case, Tok.Default
+        node = this.parseCaseOrDefault()
+      case Tok.Return, Tok.Yield, Tok.Break, Tok.Continue {
+        this.updateFlowControlCount()
+        node = this.parseFlowControl()
+      }
+      case Tok.Import, Tok.Export
+        node = this.parseImport()
+      case Tok.Define
+        node = this.parseDefine()
+      case Tok.Assert
+        node = this.parseAssert()
+    }
+    if node {
+      // Do nothing.
+    } else if const en = this.scope.block.owner is src.Enum {
+      node = this.parseEnumEntry()
+    } else {
+      node = this.parseExpression(Context.Stmt)
+    }
+    if node && this.pos.keyword == Tok.With && this.prevIsNotANewLine() {
+      this.tryFinishCallWith(node)
+    }
+    return node
+  }
+
+
+  fn tryFinishCallWith(this, node) {
+    struct Param { const name = Identifier*{} const pos = Token*{} }
+
+    const call = getCallNodeForWithExpression(this, node)
+    return node if !call
+
+    const keyword = this.pos
+    this.advance() // Past 'with' keyword.
+
+    if this.pos.isOpenCurly() {
+      const parameters = List(Param){}
+      parameters.append(Param{ name = this.ids.kw_it, pos = this.pos })
+      parseCallWithFunction(this, keyword, call, parameters)
+    } else if this.pos.isanIdentifier() {
+      const parameters = parseCallWithParameters(this)
+      if this.pos.isOpenCurly() {
+        parseCallWithFunction(this, keyword, call, parameters)
+      } else {
+        this.expected(['{'], "to start the call-with block")
+      }
+    } else {
+      this.expected(["{", "identifier"], "after 'with' keyword in call-with")
+    }
+
+    return node
+
+
+    fn getCallNodeForWithExpression(parser, node): src.Call* {
+      if node {
+        switch node {
+          case src.Call       return node
+          case src.MemberName return getCallNodeForWithExpression(parser, node.rhs)
+          case src.Variable   return getCallNodeForWithExpression(parser, node.rhs)
+        }
+      }
+      return null
+    }
+
+    fn parseCallWithParameters(parser) {
+      const list = List(Param){}
+      list.append(Param{ name = parser.ids.get(parser.pos.value), pos = parser.pos })
+      parser.advance() // Past identifier
+      for parser.pos.isComma() {
+        parser.advance() // Past ','
+        if parser.pos.isanIdentifier() { // Now at identifier
+          list.append(Param{ name = parser.ids.get(parser.pos.value), pos = parser.pos })
+          parser.advance() // Past identifier
+        } else {
+          parser.expected(['parameter name'], "after ',' in call-with's list of parameters")
+          break
+        }
+      }
+      return list
+    }
+
+    fn parseCallWithFunction(parser, keyword, call, parameters) {    
+      const cb = new src.Function{ pos = parser.mkPos(keyword), name = parser.ids.random("cb"), keyword = Tok.Fn }
+      cb.parameters = new src.Tuple{ pos = cb.pos }
+      cb.parameters.closeParen = parser.mkPos()
+      for param in parameters {
+        cb.parameters.children.append(
+            parser.makeParameter(
+                param.name,
+                parser.mkPos(param.pos)
+              )
+          )
+      }
+      call.arguments.children.append(cb)
+      cb.block = parser.parseBlock(cb)
+      parameters.dispose()
+    }
+  }
+
+
+  fn parseEnumEntry(this): Node* {
+    // Entry ⟶ Name ['=' Value] ',' | '}'
+    if this.pos.isCloseCurly() {
+      return null
+    }
+    if this.pos.isanIdentifier() {
+      const id = this.pos
+      this.advance() // Past {id}
+      if this.pos.isAssign() {
+        this.advance() // Past '='
+        const node = new src.NameValue{ pos = this.mkPos(id), keyword = Tok.Assign,
+                                        name = this.ids.get(id.value) }
+        node.value = this.parseExpression(Context.Rhs)
+        return node
+      } 
+      if this.pos.isComma() || this.pos.isCloseCurly() {
+        return this.makeIdentifier(id)
+      }
+      this.pos = id // Restore cursor
+    }
+    return this.parseExpression(Context.Lhs)
+  }
+
+
+  fn parseBlock(this, owner): src.Block* {
+    const  node = new src.Block{ pos = this.mkPos(), owner = owner }
+    const scope = Scope{ block = node, outer = this.scope }
+    const outer = this.beginScope(scope)
+    if this.pos.isOpenCurly() {
+      // BlockStmt ⟶ '{' [Stmt [Stmt]+] '}'
+      const open = this.pos
+      this.advance() // Past '{'
+      for this.pos < this.end && this.pos.isNotCloseCurly() {
+        for const stmt = this.parseStatement() {
+          this.scope.append(stmt)
+          if (owner as Node*) is src.Enum {
+            if this.pos.isComma() {
+              this.advance()
+            } else if this.pos.isNotCloseCurly() {
+              this.expected([',', '}'], "after enum entry")
+            }
+          }
+        }
+        if this.pos.isNotEndOfFile() && this.pos.isNotCloseCurly() {
+          this.expected(["a statement"], "")
+          this.advance() // Past bad token
+        }
+      }
+      if this.pos == this.end {
+        this.e_token(open, "unmatched '{' before end of the file")
+      }
+      node.closeCurly = this.mkPos()
+      this.advance()
+    } else {
+      const scope2 = Scope{ block = node, outer = this.scope }
+      const outer2 = this.beginScope(scope2)
+      if const stmt = this.parseStatement() {
+        this.scope.append(stmt)
+        node.closeCurly = src.nlastpos(stmt)
+      }
+      this.endScope(outer2)
+    }
+    this.endScope(outer)
+    return node
+  }
+
+
+  fn createBlockFromExpression(this, expr, owner): src.Block* {
+    if expr {
+      if const node = expr is src.Block {
+        return node
+      }
+      const node = new src.Block{ pos = expr.pos, owner = owner, closeCurly = src.nlastpos(expr) }
+      const scope = Scope{ block = node, outer = this.scope }
+      const outer = this.beginScope(scope)
+      this.scope.append(expr)
+      this.endScope(outer)
+      return node
+    }
+    return null
+  }
+
+
+  fn parseIf(this) {
+    // IfStmt ⟶ 'if' [RhsExpr] Stmt ['else' Stmt]
+    const node = new src.If{ pos = this.mkPos() }
+    this.advance() // Past 'if' keyword
+    if this.pos.isOpenCurly() {
+      node.condition = this.newBoolean(true)
+    } else {
+      node.condition = this.parseExpression(Context.Rhs) 
+    }
+    node.iftrue = this.parseBlock(node)
+    if this.pos.keyword == Tok.Else {
+      this.advance() // Past 'else'
+      node.ifalse = this.parseElse()
+    }
+    return node
+  }
+
+
+  fn parseElse(this) {
+    switch this.pos.token {
+      case Tok.If, Tok.For, Tok.Each, Tok.Switch
+        return this.parseStatement()
+    }
+
+    return this.parseBlock(src.Node*{})
+  }
+
+
+  fn parseFor(this): Node* {
+    const kw = this.pos
+    // Sniff for:
+    //    'for' Id [',' Id] 'in' ...
+    this.advance() // Past 'for'
+    if this.pos.isanIdentifier() {
+      this.advance() // Past Id
+      for this.pos.isComma() {
+        this.advance()
+        break if this.pos.isNotAnIdentifier()
+        this.advance() // Past identifier
+      }
+      return this.parseForIn(kw) if this.pos.keyword == Tok.In
+    }
+    this.pos = kw // Restore cursor to 'for' keyword
+
+    const node = new src.For{ pos = this.mkPos() }
+    this.advance() // Past 'for'
+    if this.pos.isOpenCurly() { // 'for' '{' ...
+      node.condition = this.newBoolean(true)
+    } else {
+      for {
+        if this.pos.token == Tok.SemiColon { // 'for' ';' ...
+          this.advance() // Past 1st ';'
+          if this.pos.token == Tok.SemiColon { // 'for' ';' ';' ..
+            node.condition = this.newBoolean(true)
+            this.advance() // Past 2nd ';'
+          } else { // 'for' ';' condition ';'
+            node.condition = this.parseExpression(Context.Lhs)
+            if this.pos.token != Tok.SemiColon {
+              this.expected([';'], "after for-statement condition")
+              break
+            }
+            this.advance() // Past 2nd ';'
+          }
+          if this.pos.isNotOpenCurly() { // 'for' ';' [condition] ';' increment '{' ...
+            node.increment = this.parseCommaSeparatedListOfExpressions()
+          }
+          break
+        }
+
+        node.initializer = this.parseCommaSeparatedListOfExpressions() // 'for' initializer ...
+
+        if this.pos.isOpenCurly() || this.pos.token != Tok.SemiColon { // 'for' condition '{' | expr ...
+          node.condition = node.initializer
+          node.initializer = null
+          break
+        }
+
+        if this.pos.token != Tok.SemiColon {
+          this.expected(['{', ';'], "after for-statement initializer")
+          break
+        }
+
+        this.advance() // Past 1st ';'
+
+        if this.pos.token == Tok.SemiColon { // 'for' initializer ';' ';'
+          node.condition = this.newBoolean(true)
+        } else {
+          node.condition = this.parseExpression(Context.Lhs) // 'for' initializer ';' condition ...
+          if this.pos.token != Tok.SemiColon { // 'for' initializer ';' condition ';' ...
+            this.expected([';'], "after for-statement condition")
+            break
+          }
+        }
+
+        this.advance() // Past 2nd ';'
+
+        if this.pos.isNotOpenCurly() { // 'for' initializer ';' [condition] ';' increment '{' ...
+          node.increment = this.parseCommaSeparatedListOfExpressions()
+        } 
+        break
+      }
+    }
+    node.block = this.parseBlock(node)
+    return node
+  }
+
+
+  fn parseForIn(this, kw) {
+    // ForInStmt ⟶ 'for' Id [',' Id] 'in' RhsExpr Stmt
+    this.pos = kw
+    const node = new src.ForIn{ pos = this.mkPos() }
+    this.advance() // Past 'for' keyword
+    node.lhs = this.parseCommaSeparatedListOfIdentifiers()
+    if this.pos.keyword == Tok.In {
+      this.advance() // Past 'in' keyword
+      node.rhs = this.parseExpression(Context.Rhs)
+    } else {
+      this.expected(["in"], "after forin-statement variables")
+    }
+    node.block = this.parseBlock(node)
+    return node
+  }
+
+
+  fn parseEach(this): Node* {
+    // EachStmt ⟶ 'each' Id [',' Id]+ 'in' RhsExpr Stmt
+    const node = new src.Each{ pos = this.mkPos() }
+    this.advance() // Past 'each' keyword
+    node.lhs = this.parseCommaSeparatedListOfIdentifiers()
+    if this.pos.keyword == Tok.In {
+      this.advance() // Past 'in' keyword
+      node.rhs = this.parseExpression(Context.Rhs)
+    } else {
+      this.expected([';'], "after each-statement variables")
+    }
+    node.block = this.parseBlock(node)
+    return node
+  }
+
+
+  fn parseSwitch(this): Node* {
+    // SwitchStmt ⟶ 'switch' [RhsExpr] BlockStmt
+    const node = new src.Switch{ pos = this.mkPos() }
+    this.advance() // Past 'switch' keyword
+    if this.pos.isNotOpenCurly() {
+      node.condition = this.parseExpression(Context.Rhs)
+    } else {
+      node.condition = this.newBoolean(true)
+    }
+    node.block = this.parseBlock(node)
+    return node
+  }
+
+
+  fn parseCaseOrDefault(this): Node* {
+    // CaseStmt ⟶ 'case' [RhsExpr [',' RhsExpr]+] Stmt | CaseStmt
+    //           | 'default' Stmt
+    const kw = this.pos
+    var node = new src.Case{ pos = this.mkPos() }
+    this.advance() // Past 'case' or 'default' keyword.
+    if kw.keyword == Tok.Case {
+      if this.pos.isOpenCurly() {
+        node.condition = this.newBoolean(true)
+      } else if this.pos.isanIdentifier() {
+        const id = this.pos
+        this.advance() // Past id.
+        if this.pos.isColon() {
+          const nv = new src.NameValue{ pos = this.mkPos(id), name = this.ids.get(id.value),
+                                        keyword = Tok.Colon }
+          this.advance() // Past ':'
+          nv.value = this.parseTypeName()
+          node.condition = nv
+        } else {
+          this.pos = id // Restore cursor.
+        }
+      } 
+      if !node.condition {
+        // TODO: stop at 1st 'if' keyword to prevent parsing an ifexpr.
+        node.condition = this.parseCommaSeparatedListOfExpressions()
+      }
+    }
+    if this.pos.keyword == Tok.Case || this.pos.keyword == Tok.Default {
+      node = parseFallThroughCase(this, node)
+    }
+    node.block = this.parseBlock(node)
+    return node
+  }
+
+
+  fn parseFallThroughCase(this, node) {
+    //  CaseStmt ⟶ 'case' [RhsExpr [',' RhsExpr]+] Stmt | CaseStmt
+    //            | 'default' Stmt
+    for this.pos.keyword == Tok.Case {
+      this.advance() // Past 'case' keyword
+      if const condition = this.parseCommaSeparatedListOfExpressions() {
+        var list = node.condition is src.CommaList
+        if !list {
+          list = new src.CommaList{ pos = node.condition.pos }
+          list.children.append(node.condition)
+          node.condition = list
+        }
+        if const cond = condition is src.CommaList {
+          for child in cond.children {
+            list.children.append(child)
+          }
+          cond.children.clear()
+          delete cond
+        } else { 
+          list.children.append(condition)
+        }
+      } else {
+        break
+      }
+    }
+    return node
+  }
+
+
+  fn parseFlowControl(this): Node* {
+    const kw = this.pos
+    const node = new src.FlowControl{ pos = this.mkPos(), keyword = kw.keyword }
+    this.advance(Skip.Spaces) // Past 'return' | 'yield' | 'await' | break' | 'continue' (keep CRLF)
+    if this.pos.keyword == Tok.From {
+      if node.keyword == Tok.Yield {
+        node.keyword = Tok.YieldFrom
+        this.advance() // Past 'from'
+      }
+    }
+    if this.pos.isWhiteSpace() || this.pos.token == Tok.SemiColon {
+      this.advance() // 'return' | 'yield' | 'await' | 'break' | 'continue' CRLF | ';'
+      if node.keyword == Tok.YieldFrom || node.keyword == Tok.Await {
+        this.expected(["expression"], "after '#{kw.value}")
+      }
+    } else if this.pos.keyword == Tok.If {
+      if node.keyword == Tok.YieldFrom || node.keyword == Tok.Await {
+        this.expected(["expression"], "after '#{kw.value}")
+      }
+      return this.parseFlowControlFromIf(node)
+    } else {
+      node.value = this.parseExpression(Context.Lhs)
+    }
+    if node.value && (kw.keyword == Tok.Break || kw.keyword == Tok.Continue) {
+      this.err(node.value, "#{kw} statement should be followed by a newline or a ';'")
+    }
+    return this.convertIfExprToIfStatement(node)
+  }
+
+
+  fn parseFlowControlFromIf(this, node) {
+    const ifnode = new src.If{ pos = node.pos }
+    this.advance() // Past 'if' keyword
+    ifnode.condition = this.parseExpression(Context.Rhs)
+    ifnode.iftrue = this.createBlockFromExpression(node, ifnode)
+    if this.pos.keyword == Tok.Else {
+      this.advance() // Past 'else' keyword
+      ifnode.ifalse = this.parseStatement()
+      if ifnode.ifalse && ifnode.ifalse !is src.If {
+        ifnode.ifalse = this.parseStatement()
+      }
+    }
+    return ifnode
+  }
+
+
+  fn parseImport(this): Node* {
+    // Import       ⟶ 'import' | 'export' ImportName ['from' ImportSource]
+    // ImportName   ⟶ SingleImport  ['as' AliasName] [',' ImportName]
+    // SingleImport ⟶ Identifier ['.' Identifier]
+    // AliasName    ⟶ Identifier ['.' Identifier]
+    // ImportSource ⟶ Identifier ['.' Identifier]
+    const kw = this.pos
+    var node = src.Import*{}
+    var list = src.CommaList*{}
+    this.advance() // Past 'import' or 'export' keyword
+    if kw.keyword == Tok.Export && this.scope.isNotFileScope() {
+      this.e_token(kw, "'export' keyword only allowed at files scope")
+    }
+    for { // Loop for ImportName
+      var bad = 0
+      if this.pos.isNotAnIdentifier() {
+        this.expected(["identifier"], "after #{kw}")
+        break
+      }
+      var name = this.parseIdentifierOrMemberName() // SingleImport
+      if node {
+        assert !list
+        list = new src.CommaList{ pos = node.pos }
+        list.children.append(node)
+      }
+      node = new src.Import{ pos = this.mkPos(kw), keyword = kw.keyword, name = name }
+      if this.pos.keyword == Tok.As {
+        this.advance() // Past 'as' keyword
+        if this.pos.isanIdentifier() {
+          node.alias = this.parseIdentifierOrMemberName()
+        } else {
+          this.expected(["identifier"], "after 'as' in name of '#{kw}'")
+          ++bad
+        }
+      }
+      if list {
+        list.children.append(node)
+        node = null
+      }
+      break if bad
+      if this.pos.isComma() {
+        this.advance() // Past ','
+      } else {
+        break // ImportName finished.
+      }
+    }
+    if !list && !node {
+      return null
+    }
+    var i = 0
+    for this.pos.keyword == Tok.From {
+      const pivot = this.pos
+      this.advance() // Past 'from' keyword
+      if this.pos.isNotAnIdentifier() {
+        this.expected(["identifier"], "after 'from' in '#{kw}'")
+        break
+      }
+      const name = this.parseIdentifierOrMemberName()
+      if list {
+        node = list.children.items[i++] as src.Import*
+        node.source = name
+        break if i == list.children.length
+        this.pos = pivot // Put cursor at 'from' keyword to parse the next import/export
+      } else {
+        node.source = name
+      }
+    }
+    return list if list
+    return node
+  }
+
+
+  fn parseDefine(this): Node* {
+    // DefineStmt ⟶ 'define' Id LhsExpr
+    const kw = this.pos
+    const node = new src.NameValue{ pos = this.mkPos(), keyword = kw.keyword }
+    this.advance() // Past 'define' keyword
+    if this.pos.isanIdentifier() {
+      node.name = this.ids.get(this.pos.value)
+      this.advance() // Past identifier
+    } else {
+      this.expected(['identifier'], "after 'define' keyword")
+    }
+    if kw.keyword == Tok.Define {
+      node.value = this.parseExpression(Context.Lhs)
+    } else {
+      node.value = this.parseTypeName()
+    }
+    return node
+  }
+
+
+  fn parseAssert(this): Node* {
+    // AssertStmt ⟶ 'assert' LhsExpr ['with' Stmt]
+    const kw = this.pos
+    const node = new src.Assert{ pos = this.mkPos() }
+    this.advance(Skip.Spaces) // Past 'assert'. Keep CRLF.
+    if this.pos.isWhiteSpace() {
+      node.condition = this.newBoolean(false)
+      node.isAutoCondition = true
+      this.advance() // Past CRLF.
+      return node
+    }
+    if this.pos.keyword == Tok.With {
+      node.condition = this.newBoolean(false)
+      node.isAutoCondition = true
+    } else {
+      node.condition = this.parseExpression(Context.Lhs)
+    }
+    if this.pos.keyword == Tok.With {
+      this.advance() // Past 'with'.
+      node.withPart = this.parseExpression(Context.Rhs)
+    }
+    return node
+  }
+
+
+  fn parseTypeName(this) {
+    return this.parseExpression(Context.TypeName)
+  }
+
+
+  fn parseCommaSeparatedListOfIdentifiers(this): Node* {
+    assert this.pos.isanIdentifier()
+    var list = src.CommaList*{}
+    var node = src.Name*{}
+    for this.pos.isanIdentifier() {
+      const name = this.makeIdentifier()
+      if list {
+        list.children.append(name)
+      } else if node {
+        list = new src.CommaList{ pos = node.pos }
+        list.children.append(node)
+        list.children.append(name)
+      } else {
+        node = name
+      }
+      this.advance() // Past identifier
+      break if this.pos.isNotComma()
+      this.advance() // Past ','
+    }
+    return list as Node* if list
+      else node as Node*
+  }
+
+
+  fn parseCommaSeparatedListOfIdentifiersOrDotNames(this): Node* {
+    assert this.pos.isanIdentifier()
+    var list = src.CommaList*{}
+    var node = src.Name*{}
+    for this.pos.isanIdentifier() {
+      const name = this.parseIdentifierOrMemberName()
+      if list {
+        list.children.append(name)
+      } else if node {
+        list = new src.CommaList{ pos = node.pos }
+        list.children.append(node)
+        list.children.append(name)
+      } else {
+        dot = name
+      }
+      break if bad || this.pos.isNotComma()
+      this.advance() // Past ','
+    }
+    return list as Node* if list
+      else node as Node*
+  }
+
+
+  fn parseCommaSeparatedListOfExpressions(this): Node* {
+    var node = this.parseExpression(Context.Rhs)
+    var list = src.CommaList*{}
+    return node if !node
+    for this.pos.isComma() {
+      this.advance()
+      const child = this.parseExpression(Context.Rhs)
+      break if !child
+      if list {
+        list.children.append(child)
+      } else if node {
+        list = new src.CommaList{ pos = node.pos }
+        list.children.append(node)
+        list.children.append(child)
+      } else {
+        node = child
+      }
+    }
+    return list as Node* if list
+      else node as Node*
+  }
+
+
+  fn parseExpression(this, context): Node* {
+    var node = this.parseUnary(context)
+    return node if !node
+    if context != Context.TypeName {
+      if this.pos.isaBinaryOperator() {
+        node = this.parseBinary(node, Tok.Assign, context)
+      }      
+      if this.prevIsNotANewLine() {
+        if this.pos.keyword == Tok.If {
+          node = this.parseIfExpr(node)
+        }
+      }
+    }
+    return node
+  }
+
+
+  fn parseIfExpr(this, iftrue) {
+    if const binary = iftrue is src.Binary {
+      if binary.op.token.isanAssignmentOperator() {
+        this.tokenInfo(this.pos, "")
+        assert 0
+      }
+    }
+    const node = new src.IfExpr{ pos = iftrue.pos, iftrue = iftrue }
+    this.advance() // Pat 'if'
+    node.condition = this.parseExpression(Context.Rhs)
+    if this.pos.keyword == Tok.Else {
+      this.advance() // Past 'else'
+      node.ifalse = this.parseExpression(Context.Rhs)
+    }
+    return node
+  }
+
+
+  fn parseBinary(this, lhs, minPrecedence, context) {
+    return lhs if this.prevIsANewLine()
+    var lookAhead = this.pos
+    var hasFinished = false
+    for lookAhead.isaBinaryOperator() && lookAhead.token >= minPrecedence && !hasFinished {
+      const    op = this.pos
+      var opToken = op.token
+      this.advance() // Past {op}
+      var rhsContext = Context.Rhs
+      if op.keyword >= Tok.To && op.keyword <= Tok.Is {
+        rhsContext = Context.TypeName
+        opToken = op.keyword
+      } else if context == rhsContext {
+        // Do nothing.
+      } else if op.token.isanAssignmentOperator() {
+        rhsContext = Context.Lhs
+      }
+      var rhs = this.parseUnary(rhsContext)
+      if !rhs {
+        this.e_token(this.pos, "expected expression after #{op.value}#[%<red>] operator")
+        return lhs
+      }
+      lookAhead = this.pos
+      if rhsContext == Context.TypeName {
+        // Don't recurse.
+      } else for (!hasFinished && lookAhead.isaBinaryOperator() &&
+                  (lookAhead.token > op.token ||
+                    (isRightAssociative(lookAhead.token) &&
+                      (!isRightAssociative(op.token) || lookAhead.token >= op.token)))) {
+        rhs = this.parseBinary(rhs, lookAhead.token, context)
+        hasFinished = lookAhead == this.pos // {hasFinished} is true if {parseBinary} did not make progress.
+        lookAhead = this.pos
+      }
+      lhs = new src.Binary{ pos = lhs.pos, lhs = lhs, rhs = rhs, op = this.mkPos(op, opToken) }
+    }
+    return lhs
+
+    fn isRightAssociative(token) {
+      return token.isanAssignmentOperator()
+    }
+  }
+
+
+  fn parseUnary(this, context): Node* {
+    switch this.pos.token {
+      case Tok.MinusMinus, Tok.PlusPlus, Tok.Plus, Tok.Minus, Tok.LogicalNot, Tok.Tilde {
+        const node = new src.UnaryPrefix{ pos = this.mkPos(), op  = this.mkPos() }
+        this.advance() // Past {op}.
+        node.rhs = this.parseUnary(context)
+        return node
+      }
+      case Tok.And { // At '&'
+        const node = new src.UnaryPrefix{ pos = this.mkPos(), op  = this.mkPos(this.pos, Tok.Ampersand) }
+        this.advance() // Past '&'
+        if this.pos.token == Tok.Multiply { // Found '&*'
+          node.op.token = Tok.AmpersandStar
+          this.advance() // Past '*'
+          if this.pos.token == Tok.And || this.pos.token == Tok.Multiply {
+            this.expected(["expression"], "after '&*' unary-prefix operator")
+          }
+        }
+        node.rhs = this.parseUnary(context)
+        return node
+      }
+      case Tok.Multiply {
+        const node = new src.UnaryPrefix{ pos = this.mkPos(), op  = this.mkPos(this.pos, Tok.Star) }
+        this.advance() // Past '*'
+        if this.pos.token == Tok.And { // Found '*&'
+          node.op.token = Tok.StarAmpersand
+          this.advance() // Past '&'
+          if this.pos.token == Tok.And || this.pos.token == Tok.Multiply {
+            this.expected(["expression"], "after '*&' unary-prefix operator")
+          }
+        }
+        node.rhs = this.parseUnary(context)
+        return node
+      }
+    }
+    switch const keyword = this.pos.keyword {      
+      case Tok.Await {
+        this.updateFlowControlCount()
+        const node = new src.FlowControl{ pos = this.mkPos(), keyword = keyword }
+        this.advance(Skip.Spaces) // Past 'await'
+        if this.pos.isWhiteSpace() {
+          this.advance() // Past white space
+        } else if this.pos.keyword == Tok.Each {
+          node.value = this.parseEach()
+        } else {
+          node.value = this.parseExpression(context)
+        }
+        return node
+      }
+      case Tok.Auto {
+        if !this.autoIsForVariableOrFunction() {
+          return this.parseAuto(context)
+        }
+      }
+      case Tok.New {
+        const node = new src.UnaryPrefix{ pos = this.mkPos(), op = this.mkPos(this.pos, keyword) }
+        this.advance() // Past 'new' keyword
+        node.rhs = this.parseExpression(Context.Lhs)
+        return node
+      }
+      case Tok.Delete {
+        const node = new src.UnaryPrefix{ pos = this.mkPos(), op = this.mkPos(this.pos, keyword) }
+        this.advance() // Past 'new' keyword
+        node.rhs = this.parseExpression(Context.Rhs)
+        if this.pos.keyword == Tok.With {
+          this.advance() // Past 'with' keyword
+          node.withPart = this.parseExpression(Context.Rhs)
+        }
+        return node
+      }
+      case Tok.TypeOf, Tok.SizeOf, Tok.NameOf {
+        const node = new src.UnaryPrefix{ pos = this.mkPos(), op = this.mkPos(this.pos, keyword) }
+        this.advance() // Past keyword
+        if this.pos.isOpenParen() {
+          if node.rhs = this.parseTerm(context) {
+            return this.finishPostFix(node as src.Node*, context)
+          }
+        } else {
+          node.rhs = this.parseUnary(Context.Rhs)
+        }
+        return node
+      }
+    }
+    return this.parsePostFix(context)
+  }
+
+
+  fn parseAuto(this, context): Node* {
+    const node = new src.Auto{ pos = this.mkPos() }
+    this.advance() // Past 'auto'
+    node.value = this.parsePostFix(context)
+    return node
+  }
+
+
+  fn parsePostFix(this, context) {
+    var node = this.parseTerm(context)
+    return this.finishPostFix(node, context) if node
+      else null
+  }
+
+  fn finishPostFix(this, node, context) {
+    for this.pos < this.end {
+      switch this.pos.token {
+        case Tok.Dot {
+          node = new src.MemberName{ pos = node.pos, lhs = node, dot = this.mkPos() }
+          this.advance() // Past '.'
+          (node as src.MemberName*).rhs = this.parseTerm(context.Rhs)
+        }
+        case Tok.OpenParen {
+          break if this.prevIsANewLine()
+          node = new src.Call{ pos = node.pos, name = node }
+          this.parseCallArguments(node as src.Call*)
+        }
+        case Tok.OpenBracket {
+          break if this.prevIsANewLine()
+          node = new src.ArrayIndex{ pos = node.pos, name = node }
+          (node as src.ArrayIndex*).arguments = this.parseIndexArguments()
+        }
+        case Tok.OpenCurly {
+          break if this.prevIsANewLine() || context > Context.Lhs
+          node = new src.Initializer{ pos = node.pos, name = node }
+          (node as src.Initializer*).arguments = this.parseObjectLiteral(asType = false)
+        }
+        case Tok.MinusMinus, Tok.PlusPlus {
+          break if this.prevIsASpaceOrNewLine()
+          for this.pos.token == Tok.MinusMinus || this.pos.token == Tok.PlusPlus {
+            node = new src.UnarySuffix{ pos = node.pos, op = this.mkPos(), lhs = node }
+            this.advance()
+          }
+        }
+        case Tok.Multiply, Tok.And, Tok.MultiplyMultiply {
+          break if this.prevIsANewLine()
+          if const init = this.parseStarOrAmpersandSuffix(node, context) {
+            node = init
+          } else {
+            break
+          }
+        }
+        default
+          break
+      }
+    }
+    return node
+  }
+
+
+  fn parseStarOrAmpersandSuffix(this, node, context): src.Node* {
+    const pivot = this.pos
+    for this.pos.token == Tok.Multiply || this.pos.token == Tok.And || this.pos.token == Tok.MultiplyMultiply {
+      this.advance(Skip.Spaces)
+    }
+    if this.pos.isOpenCurly() || this.pos.isCloseCurly() || this.pos.isCloseParen() ||
+       this.pos.isOpenBracket() || this.pos.isCloseBracket() ||
+       this.pos.isComma() {
+      this.pos = pivot
+      for this.pos.token == Tok.Multiply || this.pos.token == Tok.And || this.pos.token == Tok.MultiplyMultiply {
+        if this.pos.token == Tok.MultiplyMultiply {
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Star) }
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Star) }
+        } else if this.pos.token == Tok.And {
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Ampersand) }
+        } else {
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Star) }
+        }
+        this.advance()
+      }
+      if this.pos.isOpenCurly() && context <= Context.Lhs {
+        const init = new src.Initializer{ pos = node.pos, name = node }
+        init.arguments = this.parseObjectLiteral(asType = false)
+        return init
+      }
+      return node
+    }
+    if context == Context.TypeName {
+      this.pos = pivot
+      for this.pos.token == Tok.Multiply || this.pos.token == Tok.And || this.pos.token == Tok.MultiplyMultiply {
+        if this.pos.token == Tok.MultiplyMultiply {
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Star) }
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Star) }
+        } else if this.pos.token == Tok.And {
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Ampersand) }
+        } else {
+          node = new src.UnarySuffix{ pos = node.pos, lhs = node, op = this.mkPos(this.pos, Tok.Star) }
+        }
+        this.advance()
+      }
+      return node
+    }
+    this.pos = pivot
+    return null
+  }
+
+
+  fn parseCallArguments(this, call) {
+    const openParen = this.pos
+    call.arguments = new src.Tuple{ pos = this.mkPos() }
+    this.advance() // Past '('
+    for this.pos < this.end && this.pos.isNotCloseParen() {
+      if const arg = this.parseCallArgument() {
+        if call.arguments.children.isNotEmpty() {
+          const last = call.arguments.children.last()
+          if last is src.NameValue && arg !is src.NameValue {
+            this.err(arg, "positional arguments cannot be declared after nominal arguments")
+          }
+        }
+        call.arguments.children.append(arg)
+      }
+      if this.pos.isComma() {
+        this.advance() // Past ','
+      } else if this.pos.isNotCloseParen() {
+        this.expected([',', ')'], "after call argument")
+        //this.info(call, "previous error context")
+        this.advance() // Past bad token
+      }
+    }
+    if this.pos == this.end {
+      this.e_token(openParen, "unmatched '(' before end of file")
+    }
+    call.arguments.closeParen = this.mkPos()
+    this.advance() // Past ')'
+  }
+
+
+  fn parseCallArgument(this): Node* {    
+    if this.pos.isanIdentifier() {
+      const id = this.pos
+      this.advance() // Past {id}.
+      if this.pos.token == Tok.Assign {
+        const node = new src.NameValue{ pos = this.mkPos(id), name = this.ids.get(id.value),
+          keyword = Tok.Assign }
+        this.advance() // Past '='.
+        node.value = this.parseExpression(Context.Lhs)
+        return node
+      }
+      this.pos = id // Restore cursor to {id}.
+    }
+    return this.parseExpression(Context.Lhs)
+  }
+
+
+  fn parseIndexArguments(this) {
+    const openBracket = this.pos
+    var node = new src.Array{ pos = this.mkPos() }
+    this.advance() // Past '['
+    for this.pos < this.end && this.pos.isNotCloseBracket() {
+      if const arg = this.parseExpression(Context.Lhs) {
+        node.children.append(arg)
+      }
+      if this.pos.isComma() {
+        this.advance() // Past ','
+      } else if this.pos.isNotCloseBracket() {
+        this.expected([',', ']'], "after indexer-arguments")
+        this.advance() // Past bad token
+      }
+    }
+    if this.pos == this.end {
+      this.e_token(openBracket, "unmatched '[' before end of file")
+    }
+    node.closeBracket = this.mkPos()
+    this.advance() // Past ')'
+    if node.children.isEmpty() {
+      this.err(node, "empty array index arguments")
+    }
+    return node
+  }
+
+
+  fn parseTerm(this, context): Node* {
+    //println("parseTerm@#{this.pos}#[%<yellow>]")
+    switch this.pos.token {
+      case Tok.Hash
+        return this.parseHash(context)
+      case Tok.OpenParen
+        return this.parseParenthesized(context)
+      case Tok.OpenBracket
+        return this.parseArrayLiteral(asType = false)
+      case Tok.OpenCurly {
+        return this.parseObjectLiteral(asType = false)
+      }
+      case Tok.SingleQuote, Tok.DoubleQuote
+        return this.parseQuoted()          
+      case Tok.Number {
+        import Num from tokens
+        var num = src.Constant.Kind{}
+        switch this.pos.number.kind {
+          case Num.u8  num = src.Constant.Kind.UInt8
+          case Num.u16 num = src.Constant.Kind.UInt16
+          case Num.u32 num = src.Constant.Kind.UInt32
+          case Num.u64 num = src.Constant.Kind.UInt64
+          case Num.i8  num = src.Constant.Kind.Int8
+          case Num.i16 num = src.Constant.Kind.Int16
+          case Num.i32 num = src.Constant.Kind.Int32
+          case Num.i64 num = src.Constant.Kind.Int64
+          case Num.f32 num = src.Constant.Kind.Float
+          case Num.f64 num = src.Constant.Kind.Double
+          default assert 0
+        }
+        const node = new src.Constant{ pos = this.mkPos(), kind = num }
+        node.value.u64 = this.pos.number.value.u64
+        this.advance() // Past number
+        return node
+      }      
+      case Tok.Identifier {
+        switch this.pos.keyword {
+          case Tok.True, Tok.False {
+            const node = this.newBoolean(this.pos.keyword == Tok.True)
+            this.advance()
+            return node
+          }
+          case Tok.Void {
+            const node = new src.Constant{ pos = this.mkPos(), kind = src.Constant.Kind.Void }
+            this.advance()
+            return node
+          }
+          case Tok.Null {
+            const node = new src.Constant{ pos = this.mkPos(), kind = src.Constant.Kind.Null }
+            this.advance()
+            return node
+          }
+          case Tok.Auto {
+            if !this.autoIsForVariableOrFunction() {
+              return this.parseAuto(context)
+            }
+          }
+        }
+        if this.pos.isaModifier() {
+          return this.parseModifiers(context)
+        }
+        if this.pos.isaTypeKeyword() {
+          return this.parseType(src.Modifiers{}, context)
+        }
+        if this.pos.value.length == 1 && this.pos.value.text[0] == 'w' {
+          if this.pos + 1 < this.end {
+            const quote = this.pos[1]
+            if quote.token == Tok.SingleQuote || quote.token == Tok.DoubleQuote {
+              ++this.pos // Past 'w'. Now at {quote}.
+              return this.parseQuoted(true)
+            }
+          }
+        }
+        const node = this.makeIdentifier()
+        this.advance() // Past identifier
+        return node
+      }
+    }
+    return null
+  }
+
+
+  fn parseParenthesized(this, context) {
+    var        node = Node*{}
+    const openParen = this.pos
+    if context != Context.TypeName {
+      context = Context.Lhs
+    }
+    this.advance() // Past '('.
+    for this.pos.isNotEndOfFile() && this.pos.isNotCloseParen() {
+      if const child = this.parseExpression(Context.Lhs) {
+        if node {
+          if const tuple = node is src.Tuple {
+            tuple.children.append(child)
+          } else {
+            var tuple = new src.Tuple{ pos = this.mkPos(openParen) }
+            tuple.children.append(node)
+            tuple.children.append(child)
+            node = tuple
+          }
+        } else {
+          node = child
+        }
+        if this.pos.isComma() {
+          this.advance() // Past ','
+        } else if this.pos.isNotCloseParen() {
+          this.expected([',', ')'], "after expression in tuple")
+          this.advance() // Past bad token
+        }
+      }
+    }
+    if !node {
+      node = new Node{ pos = this.mkPos(openParen) }
+      this.err(node, "expected an expression after '(' in parenthesized expression")
+    }
+    if this.pos.isCloseParen() {
+      if const tuple = node is src.Tuple {
+        tuple.closeParen = this.mkPos(this.pos)
+      } else {
+        node = new src.Parenthesized{ pos = this.mkPos(openParen), value = node, closeParen = this.mkPos() }
+      }
+      this.advance() // Past ')'
+    } else {
+      this.e_token(openParen, "unmatched ']' before end of file")
+    }
+    return node
+  }
+
+
+  fn parseArrayLiteral(this, asType) {
+    var node = new src.Array{ pos = this.mkPos() }
+    const openBracket = this.pos
+    this.advance() // Past '['.
+    for this.pos.isNotEndOfFile() && this.pos.isNotCloseBracket() {
+      if asType {
+        if const child = this.parseExpression(Context.TypeName) {
+          node.children.append(child)
+        }
+      } else if const child = this.parseExpression(Context.Lhs) {
+        node.children.append(child)
+      }
+      if this.pos.isComma() {
+        this.advance() // Past ','
+      } else if this.pos.isNotCloseBracket() {
+        this.expected([',', ']'], "after element in array literal")
+        this.advance() // Past bad token
+      }
+    }
+    if this.pos.isCloseBracket() {
+      node.closeBracket = this.mkPos()
+      this.advance() // Past ']'
+    } else {
+      this.e_token(openBracket, "unmatched '[' before end of file")
+    }
+    if node.children.isEmpty() {
+      this.err(node, "empty array literal")
+    }
+    return node
+  }
+
+
+  fn parseObjectLiteral(this, asType) {
+    const asValue = !asType
+    var node = new src.Object{ pos = this.mkPos() }
+    const open = this.pos
+    this.advance() // Past '{'.
+    for this.pos.isNotEndOfFile() && this.pos.isNotCloseCurly() {
+      const namepos = this.pos
+      var name = Identifier*{}      
+      if this.pos.isanIdentifier() {
+        const id = this.pos
+        this.advance() // Past identifier
+        if this.pos.isAssign() {
+          if asType {
+            this.expected([':'], "after name in obect-type literal")
+          }
+          name = this.ids.get(id.value)
+          this.advance() // Past '='
+        } else if this.pos.isColon() {
+          if asType {
+            this.expected(['='], "after name in object-value literal")
+          }
+          name = this.ids.get(id.value)
+          this.advance() // Past ':'
+        } else {
+          this.pos = id // Restore cursor to {id}
+        }
+      }
+      if !name {
+        name = this.ids.random("field")
+      }
+      const nv = new src.NameValue{ pos = this.mkPos(namepos), name = name,
+                                    keyword = Tok.Assign if asValue else Tok.Colon }
+      if asValue {
+        nv.value = this.parseExpression(Context.Lhs)
+      } else {
+        nv.value = this.parseTypeName()
+      }
+      const idx = node.children.indexOf(nv.name.hash)
+      if idx >= 0 {
+        this.err(nv, "#{nv.name}#[%<darkred|white>] already in object literal")
+        nv.name = this.ids.random("field")
+      }
+      node.children.append(nv.name.hash, nv)
+      if this.pos.isComma() {
+        this.advance() // Past ','
+      } else if this.pos.isNotCloseCurly() {
+        this.expected([',', '}'], "after name-values of an object literal")
+        //this.info(node, "previous error context")
+        this.advance() // Past bad token
+      }
+    }
+    if this.pos.isCloseCurly() {
+      node.closeCurly = this.mkPos(this.pos)
+      this.advance() // Past '}'
+    } else {
+      this.e_token(open, "unmatched '{' before end of file")
+    }
+    /*if node.name && node.value {
+      if const type = node.value.isaTypeNode() {
+        type.name = node.name
+      }
+    }*/
+    return node
+  }
+
+
+  fn parseModifiers(this, context): Node* {
+    const modifiers = src.Modifiers{}
+    const start = this.pos
+    var end = this.pos
+    for this.pos.isNotEndOfFile() {
+      switch this.pos.keyword {
+        case Tok.Static {
+          if modifiers.isStatic {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isStatic = true
+        }
+        case Tok.Const {
+          if modifiers.isConst {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isConst = true
+        }
+        case Tok.ReadOnly {
+          if modifiers.isReadOnly {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isReadOnly = true
+        }
+        case Tok.Auto {
+          if modifiers.isAuto {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isAuto = true
+        }
+        case Tok.Var {
+          if modifiers.isVar {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isVar = true
+        }
+        case Tok.Synchronized {
+          if modifiers.isSynchronized {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isSynchronized = true
+        }
+        case Tok.Async {
+          if modifiers.isAsync {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isAsync = true
+        }
+        case Tok.Abstract {
+          if modifiers.isAbstract {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isAbstract = true
+        }
+        default break
+      }
+      end = this.pos
+      this.advance() // Past modifier
+    }
+    modifiers.pos = this.mkPosFromRange(start, end, Tok.Text)
+    if this.pos.isaTypeKeyword() {
+      return this.parseType(modifiers, context)
+    }
+    if modifiers.isVar {
+      return this.parseVariable(modifiers, context)
+    }
+    switch this.pos.token {
+      case Tok.OpenParen, Tok.OpenBracket, Tok.OpenCurly, Tok.Identifier
+        return this.parseVariable(modifiers, context)
+    }
+    this.errModifiers(modifiers, "expected a declaration after modifiers")
+    return new src.Node{ pos = this.mkPos() }
+  }
+
+
+  fn parseVariable(this, modifiers, context): Node* {
+    if modifiers.pos.isNotValid() {
+      modifiers.pos = this.mkPos()
+    }
+    if context == Context.TypeName {
+      this.errModifiers(modifiers, "invalid context for variable declaration")
+    } else if !this.scope.outer {
+      modifiers.isStatic = true
+    }
+    if modifiers.combinationIsNotValid() {
+      this.errModifiers(modifiers, "invalid combination of modifiers")
+    }
+    var rhsContext = Context.Rhs if context == Context.Rhs else Context.Lhs
+    const     node = new src.Variable{ pos = this.mkPos(), modifiers = modifiers }
+    node.name = this.parseVariableName()
+    if this.pos.token == Tok.Assign {
+      this.advance() // Past '='
+      node.rhs = this.parseExpression(rhsContext) 
+    } else {
+      this.expected(['='], "after variable name")
+    }
+    if modifiers.isNotValidForVariable() {
+      this.errModifiers(modifiers, "invalid modifiers on variable")
+    } else if this.scope.isaUnionScope() {
+      if modifiers.isNotValidForUnionField() {
+        this.errModifiers(modifiers, "invalid modifiers on union field")
+      }
+    }
+    if context <= Context.Lhs && this.pos.isComma() {
+      return this.parseVariableList(node, rhsContext)
+    }
+    return node
+  }
+
+
+  fn parseVariableList(this, first, context) {
+    const list = new src.CommaList{ pos = first.pos }
+    list.children.append(first)
+    for this.pos.isComma() {
+      this.advance() // Past ','
+      const node = new src.Variable{ pos = this.mkPos(), modifiers = first.modifiers }
+      node.name = this.parseVariableName()
+      if this.pos.token == Tok.Assign {
+        this.advance() // Past '='
+        node.rhs = this.parseExpression(context)
+      } else {
+        this.expected(['='], "after variable name")
+      }
+      list.children.append(node)
+    }
+    return list
+  }
+
+
+  fn parseVariableName(this): Node* {
+    switch this.pos.token {
+      case Tok.OpenParen   return this.parseEnclosedVariableName(Tok.CloseParen)
+      case Tok.OpenBracket return this.parseEnclosedVariableName(Tok.CloseBracket)
+      case Tok.OpenCurly   return this.parseEnclosedVariableName(Tok.CloseCurly)
+      case Tok.Identifier {
+        const name = this.makeIdentifier()
+        this.advance() // Past identifier
+        this.checkVariableName(name)
+        return name
+      }
+      default
+        this.expected(["(", "[", "{", "identifier"], "in variable declaration")
+    }
+    return new src.Node{ pos = this.mkPos() }
+  }
+
+
+  fn parseEnclosedVariableName(this, closeToken) {
+    const openToken = this.pos
+    const node = new src.Tuple{ pos = this.mkPos() }
+    this.advance() // Past {openToken}.
+    for this.pos.isanIdentifier() {
+      const name = this.makeIdentifier()
+      node.children.append(name)
+      this.advance() // Past identifier
+      this.checkVariableName(name)
+      break if this.pos.token == closeToken || this.pos.isNotComma()
+      this.advance() // Past ','
+    }
+    if this.pos.token == closeToken {
+      node.closeParen = this.mkPos()
+      this.advance()
+    } else {
+      this.e_token(openToken, "unmatched #{openToken} in variable name")
+    }
+    return node
+  }
+
+  fn checkVariableName(this, name) {
+    const variableKind = VariableKind.Field if this.scope.isaFieldScope()
+    if this.isaReservedVariableName(name.value, variableKind) {
+      this.err(name, "reserved keyword used as a variable name")
+    }
+  }
+
+
+  fn parseHash(this, context): Node* {
+    /* CompilerDirective ⟶ '#'--+--'align'--
+                                  |
+                                  +--'assert'-- */
+    if this.pos + 1 < this.end {
+      const hash = this.pos
+      if this.pos[1].isanIdentifier() {
+        this.advance() // Past '#', now at identifier.
+        const id = this.ids.get(this.pos.value)
+        switch id {
+          case this.ids.kw_align {
+            return this.parseHashAlign(hash)
+          }
+          default {
+            this.expected(['align'], "after '#'")
+            return null
+          }
+        }
+      }
+    }
+    this.expected(['identifier'], "after '#'")
+    return null
+  }
+
+
+  fn parseHashAlign(this, hash) {
+    /*  '#align'--NumberLiteral--+-------------+--+--'struct'--+--
+                                 |             |  |            |
+                                 +--Modifiers--+  +--'union'---+ */
+    this.advance() // Past 'align'.
+    if this.pos.token == Tok.Number { 
+      if this.pos.number.kind.isNotIntegral() {
+        this.expected(['integer'], "after '#align'")
+      } else {
+        const num = this.pos.number.value.i64
+        if num < 1 || num > 0x100 {
+          this.expected(['1-0x100'], "alignment")
+        } else {
+          this.advance() // Past NumberLiteral
+          if const node = this.parseStatement() {
+            if node is src.Struct || node is src.Union {
+              (node as src.Structure*).alignment = num
+            } else {
+              this.err(node, "'#align' is only valid for 'struct' or 'union' declarations")
+            }
+            return node
+          }
+          return null
+        }
+      }
+    } else {
+      this.expected(['number'], "after '#align'")
+    }
+    this.pos = hash + 1 // Leave cursor at 'align'.
+    return null
+  }
+
+
+  fn parseType(this, modifiers, context): Node* {
+    if modifiers.pos.isNotValid() {
+      modifiers.pos = this.mkPos()
+    }
+    if modifiers.combinationIsNotValid() {
+      this.errModifiers(modifiers, "invalid combination of modifiers")
+    }
+    switch this.pos.keyword {
+      case Tok.Struct, Tok.Union, Tok.Enum
+        return this.parseStructure(modifiers, context)
+      case Tok.Fn, Tok.UrlHandler
+        return this.parseFnOrUrlHandler(modifiers, context)
+      case Tok.Extern
+        return this.parseExtern(modifiers, context)
+      case Tok.Html, Tok.Css, Tok.Json, Tok.Sql, Tok.Blob
+        return this.parseTextFunction(modifiers, context)
+      default assert 0
+    }
+    this.expected(["a type keyword"])
+    return Node*{}
+  }
+
+
+  fn parseStructure(this, modifiers, context): Node* {
+    const  kw = this.pos
+    var  node = src.TypeNode*{}
+    var infix = ""
+    if kw.keyword == Tok.Struct {
+      node = new src.Struct{ pos = this.mkPos(), modifiers = modifiers, keyword = kw.keyword }
+      if modifiers.isNotValidForStruct() {
+        this.errModifiers(modifiers, "invalid modifiers for #{this.pos}#[%<yellow>] declaration")
+      }
+      infix = "struct"
+    } else if kw.keyword == Tok.Union {
+      node = new src.Union{ pos = this.mkPos(), modifiers = modifiers, keyword = kw.keyword }
+      if modifiers.isNotValidForUnion() {
+        this.errModifiers(modifiers, "invalid modifiers for #{this.pos}#[%<yellow>] declaration")
+      }
+      infix = "union"
+    } else if kw.keyword == Tok.Enum {
+      node = new src.Enum{ pos = this.mkPos(), modifiers = modifiers, keyword = kw.keyword }
+      if modifiers.isNotValidForEnum() {
+        this.errModifiers(modifiers, "invalid modifiers for #{this.pos}#[%<yellow>] declaration")
+      }
+      infix = "enum"
+    } else {
+      assert 0
+    }
+    this.advance() // Past 'struct' or 'union' keyword
+    if this.pos.isanIdentifier() {
+      node.name = this.ids.get(this.pos.value)
+      this.advance() // Past identifier
+    } else {
+      node.name = this.ids.random(infix)
+    }
+    if this.pos.isOpenParen() {
+      if kw.keyword == Tok.Enum {
+        this.e_token(this.pos, "enums cannot be parameterized")
+      }
+      node.parameters = this.parseTypeParameters()
+    }
+    if this.pos.isColon() {
+      if node.modifiers.isAbstract {
+        this.err(node, "#{'abstract'}#[%<red>] keyword not allowed on #{infix}#[%<yellow>] declaration \
+          that already derives from another declaration")
+      }
+      this.advance() // Past ':'
+      if const st = node is src.Struct {
+        st.supers = this.parseSupers()
+      } else if const en = node is src.Enum {
+        en.valueType = this.parseTypeName()  
+      } else {
+        this.e_token(this.pos, "supers not allowed on #{kw}#[%<yellow>] declarations")
+      }
+    }
+    if this.pos.isOpenCurly() {
+      node.block = this.parseBlock(node)
+    } else {
+      this.expected(['{'], "to begin #{kw} body")
+    }
+    if const en = node is src.Enum {
+      this.createNameOfFunction(en)
+    } else if const st = node is src.Struct {
+      if st.modifiers.isAbstract {
+        this.createNameOfFunction(st)
+        this.createIsFunction(st)
+      }
+    }
+    return node
+  }
+
+
+  fn createNameOfFunction(this, node) {
+    // fn __nameof__( this ): string {}
+    return if !node.block
+    const      pos = src.nlastpos(node)
+    const function = new src.Function{ pos = pos, keyword = Tok.Fn, name = this.ids.kw_nameof }
+    function.parameters = new src.Tuple{ pos = pos, closeParen = pos }
+    function.parameters.children.append(this.makeParameter(this.ids.kw_this, pos))
+    function.fnreturn = new src.Name{ pos = pos, value = this.ids.kw_string }
+    function.block = new src.Block{ pos = pos, closeCurly = pos, owner = function }
+    node.block.children.append(function)
+  }
+
+
+  fn createIsFunction(this, node) {
+    // fn __is__( this, __type__id ) { this }
+    return if !node.block
+    const function = new src.Function{ pos = node.pos, keyword = Tok.Fn, name = this.ids.kw_is }
+    function.parameters = new src.Tuple{ pos = node.pos }
+    function.parameters.closeParen = src.nlastpos(node)
+    function.parameters.children.append(this.makeParameter(this.ids.kw_this, node.pos))
+    function.parameters.children.append(this.makeParameter(this.ids.kw_typeid, node.pos))
+    function.block = new src.Block{ pos = node.pos, closeCurly = src.nlastpos(node), owner = function }
+    function.block.children.append(new src.Name{ pos = node.pos, value = this.ids.kw_this })
+    node.block.children.append(function)
+  }
+
+
+  fn parseFnOrUrlHandler(this, modifiers, context): Node* {
+    const  kw = this.pos
+    var infix = ""
+    if kw.keyword == Tok.Fn {
+      if modifiers.isNotValidForFunction() {
+        this.errModifiers(modifiers, "invalid modifiers for #{this.pos}#[%<yellow>] declaration")
+      }
+      if modifiers.isAuto && !modifiers.isAsync {
+        this.errModifiers(modifiers, "'auto' modifier must be combined with 'async' \
+                                      for #{this.pos}#[%<yellow>] declaration")
+      }
+      infix = "fn"
+    } else if kw.keyword == Tok.UrlHandler {
+      if modifiers.hasAny() {
+        this.errModifiers(modifiers, "no modifiers allowed on a #{this.pos}#[%<yellow>] declaration")
+      }
+      modifiers.isAsync = true
+      infix = "urlhandler"
+    } else {
+      assert with "#{kw}"
+    }
+    var isanOperator = false
+    const node = new src.Function{ pos = this.mkPos(), modifiers = modifiers, keyword = kw.keyword }
+    this.advance() // Past 'fn' or 'urlhandler' keyword
+    if this.pos.isanIdentifier() {
+      node.name = this.ids.get(this.pos.value)
+      this.advance() // Past identifier
+      if this.pos.isaQuote() {
+        if node.keyword != Tok.UrlHandler {
+          this.e_token(this.pos, "quoted function names not allowed on #{kw}")
+        }
+        node.urlHandlerMethod = node.name      
+        node.name = this.parseUrlHandlerName()
+      }
+    } else if this.pos.isaQuote() {
+      if node.keyword != Tok.UrlHandler {
+        this.e_token(this.pos, "quoted function names not allowed on #{kw}")
+      }
+      node.name = this.parseUrlHandlerName()
+    } else {
+      node.name = this.tryParseOperatorAsAFunctionName()
+      isanOperator = node.name != null
+    }
+    if !node.name {
+      node.name = this.ids.random(infix)
+    }
+    if this.pos.isOpenParen() {
+      node.parameters = this.parseFunctionParameters(context)
+    }
+    if this.pos.isColon() {
+      this.advance() // Past ':'
+      node.fnreturn = this.parseTypeName()
+    }
+    if this.pos.token == Tok.Assign {
+      this.advance() // Past '='
+      node.block = this.createBlockFromExpression(expr = this.parseExpression(Context.Lhs), owner = node)
+    } else if this.pos.isOpenCurly() {
+      node.block = this.parseBlock(node)
+    } else if !modifiers.isAbstract {
+      this.expected(['=', '{'], "to begin a non-abstract function body")
+    }
+    if modifiers.isAbstract && node.block {
+      this.errModifiers(modifiers, "abstract functions cannot be defined")
+    }
+    if isanOperator && node.keyword == Tok.UrlHandler {
+      this.err(node, "invalid urlhandler name")
+    }
+    this.checkKnownFunction(node)
+    return node
+  }
+
+
+  fn checkKnownFunction(this, node) {
+    if node.name == this.ids.kw_dispose || node.name == this.ids.kw_disposeWith {
+      const expected = 1 if node.name == this.ids.kw_dispose else 2
+      if !node.parameters || node.parameters.children.length != expected {        
+        this.cberr(node, { name = node.name, expected = expected }) with {
+          println("#{it.name}#[%<green>] is a known function expecting exactly #{it.expected} parameter\
+            #{'s' if it.expected > 1}")
+        }
+      } else if const first = node.parameters.children.items[0] as src.Variable* {
+        if const name = first.name is src.Name {
+          if name.value != this.ids.kw_this && name.value != this.ids.kw_self {
+            this.cberr(first, name.value) with {
+              println("bad parameter name #{it}#[%<darkred|white>] for a known function, expected 'self' or 'this'")
+            }
+          }
+        }
+      }
+    }
+  }
+
+
+  fn parseUrlHandlerName(this): Identifier* {
+    const node = this.parseQuoted()
+    return null if !node
+    if const quoted = node is src.Quoted {
+      const value = quoted.value
+      delete quoted
+      return value
+    }
+    this.err(node, "cannot have interpolation in urlhandler name")
+    src.ndispose(node)
+    return null
+  }
+
+
+  fn tryParseOperatorAsAFunctionName(this) {
+    const op = this.pos
+    if this.pos.isOpenBracket() {
+      this.advance() // Past '['
+      if this.pos.isCloseBracket() {
+        this.advance() // Past ']'
+        return this.ids.get("[]")
+      } 
+      this.expected([']'], "after '[' in function operator '[]'")
+    } else if this.pos.isOpenParen() {
+      this.advance() // Past '('
+      if this.pos.isCloseParen() {
+        const closeParen = this.pos
+        this.advance() // Past ')'
+        if this.pos.isOpenParen() {
+          this.advance() // Past ')'
+          return this.ids.get("()")
+        }
+      }
+    } else switch this.pos.token {
+      case Tok.Or, Tok.XOr, Tok.And,
+           Tok.LeftShift, Tok.RightShift, Tok.UnsignedRightShift,
+           Tok.Minus, Tok.Plus, Tok.Multiply, Tok.Divide, Tok.Remainder,
+           Tok.Equal, Tok.NotEqual, Tok.Less, Tok.LessOrEqual, Tok.Greater, Tok.GreaterOrEqual,
+           Tok.LogicalNot, Tok.LogicalIs {
+        const name = this.ids.get(this.pos.value)
+        this.advance() // Past operator
+        return name
+      }
+    }
+    this.pos = op
+    return null
+  }
+
+
+  fn parseExtern(this, modifiers, context): Node* {
+    if modifiers.hasAny() {
+      this.errModifiers(modifiers, "no modifiers allowed on #{this.pos}#[%<yellow>] declaration")
+    }
+    const kw = this.pos
+    const node = new src.Function{ pos = this.mkPos(), modifiers = modifiers, keyword = kw.keyword }
+    this.advance() // Past 'extern' keyword
+    if this.pos.isanIdentifier() {
+      node.name = this.ids.get(this.pos.value)
+      this.advance() // Past identifier
+    } else {
+      this.expected(['identifier'], "after extern keyword")
+    }
+    if this.pos.isOpenParen() {
+      node.parameters = this.parseFunctionParameters(context)
+    } else {
+      this.expected(['('], "after extern function name")
+    }
+    if this.pos.isColon() {
+      this.advance() // Past ':'
+      node.fnreturn = this.parseTypeName()
+    } else if this.pos.isAssign() {
+      this.advance() // Past '='
+      node.block = this.createBlockFromExpression(expr = this.parseExpression(Context.Lhs), owner = node)
+    }
+    return node
+  }
+
+
+  fn parseTextFunction(this, modifiers, context): Node* {
+    const        kw = this.pos
+    const     node = this.parseTextFunctionSignature(modifiers, context)
+    var closeToken = Tok{}
+    if this.pos.isOpenCurly() {
+      closeToken = Tok.CloseCurly
+    } else if this.pos.token == Tok.HashOpenCurly {
+      closeToken = Tok.HashCloseCurly
+    } else {
+      this.expected(["{", "# {"], "to begin #{kw}#[%<yellow>] function")
+      return node
+    }
+    var openCurly = this.pos
+       node.block = new src.Block{ pos = this.mkPos(), owner = node }
+    const   scope = Scope{ block = node.block, outer = this.scope }
+    const   outer = this.beginScope(scope)
+    auto      str = String{}
+    var      mark = this.pos + 1 // 1 past '#{' or '{'
+    var      prev = Token*{}
+    for ++this.pos; this.pos < this.end; ++this.pos {
+      break if this.pos.token == closeToken
+      if this.pos.token == Tok.BackSlash && prev && prev.token == Tok.BackSlash {
+        prev = null
+        continue
+      }
+      if this.pos.token != Tok.HashOpenCurly {
+        prev = this.pos
+        continue
+      }
+      const openHashCurly = this.pos
+      if const child = this.takeText(node, mark, str) {
+        this.scope.append(child)
+      }
+      this.advance() // Past '#{'
+      for this.pos.isNotEndOfFile() && this.pos.isNotCloseCurly() {
+        this.scope.append(this.parseStatement())
+      }
+      if this.pos.isCloseCurly() {
+        node.block.closeCurly = this.mkPos()
+        mark = this.pos + 1
+      } else {
+        this.e_token(openHashCurly, "unmatched #{openHashCurly}#[%<yellow>] before end of file")
+        break
+      }
+      prev = null
+    }
+    if const child = this.takeText(node, mark, str) {
+      this.scope.append(child)
+    }
+    if this.pos.token == closeToken {
+      node.block.closeCurly = this.mkPos()
+      this.advance()
+    } else {
+      this.e_token(openCurly, "unmatched #{openCurly}#[%<yellow>] before end of file")
+    }
+    if node.block.children.isEmpty() {
+      this.err(node.block, "empty body for #{kw}#[%<yellow>] declaration not allowed")
+    }
+    this.endScope(outer)
+    return node
+  }
+
+
+  fn parseTextFunctionSignature(this, modifiers, context): src.Function* {  
+    const kw = this.pos  
+    if modifiers.hasAny() {
+      this.errModifiers(modifiers, "no modifiers allowed on a #{this.pos}#[%<yellow>] declaration")
+    }
+    const node = new src.Function{ pos = this.mkPos(), modifiers = modifiers, keyword = kw.keyword }
+    this.advance() // Past text-function keyword
+    if this.pos.isanIdentifier() {
+      node.name = this.ids.get(this.pos.value)
+      this.advance() // Past identifier
+    } else switch kw.keyword {
+      case Tok.Html node.name = this.ids.random("html")
+      case Tok.Css  node.name = this.ids.random("css" )
+      case Tok.Json node.name = this.ids.random("json")
+      case Tok.Sql  node.name = this.ids.random("sql" )
+      case Tok.Blob node.name = this.ids.random("blob")
+      default assert 0
+    } 
+    switch kw.keyword {
+      case Tok.Html, Tok.Css, Tok.Json
+        node.modifiers.isAsync = true
+    }
+    if this.pos.isOpenParen() {
+      node.parameters = this.parseFunctionParameters(context)
+    }
+    if this.pos.isColon() {
+      this.advance() // Past ':'
+      node.fnreturn = this.parseTypeName()
+    }
+    return node
+  }
+
+
+  fn parseFunctionParameters(this, context) {
+    const openParen = this.pos
+    const node = new src.Tuple{ pos = this.mkPos() }
+    this.advance() // Past '('
+    for this.pos.isNotEndOfFile() && this.pos.isNotCloseParen() {
+      if const param = this.parseFunctionParameter(node.children.length, context) {
+        if node.children.isNotEmpty() {
+          const last = node.children.last() as src.Variable*
+          if param.rhs { // Nominal
+            if last.isEllipsis {
+              this.err(param, "nominal parameters cannot be declared after variable parameters")
+            }
+          } else if param.isEllipsis {
+            if last.isEllipsis {
+              this.err(param, "multiple variable parameters not allowed")
+            }
+          } else if last.rhs || last.isEllipsis {
+            this.err(param, "positional parameters cannot be declared after nominal or variable parameters")
+          }
+        }
+        const paramName = (param.name as src.Name*).value
+        for i, value in node.children {
+          const existing = value as src.Variable*
+          const existingName = (existing.name as src.Name*).value
+          if existingName == paramName {
+            this.err(param, "parameter '#{paramName}' already declared at position #{i}")
+            break
+          }
+        }
+        node.children.append(param)
+      }
+      if this.pos.isComma() {
+        this.advance() // Past ','
+      } else if this.pos.isNotCloseParen() {
+        this.expected([',', ')'], "after function parameter")
+        this.advance() // Past bad token
+      }
+    }
+    if this.pos.isCloseParen() {
+      node.closeParen = this.mkPos()
+      this.advance()
+    } else {
+      this.e_token(openParen, "unmatched '(' before end of file")
+    }
+    return node
+  }
+
+
+  fn parseFunctionParameter(this, index, context) {
+    const modifiers = src.Modifiers{ pos = this.mkPos() }
+    for this.pos.isNotEndOfFile() {
+      switch this.pos.keyword {
+        case Tok.Const {
+          if modifiers.isConst {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isConst = true
+        }
+        case Tok.ReadOnly {          
+          if modifiers.isReadOnly {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isReadOnly = true
+        }
+        case Tok.Auto {          
+          if modifiers.isAuto {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isAuto = true
+        }
+        default {
+          break if !this.pos.isaModifier()
+          this.e_token(this.pos, "modifier #{this.pos.value}#[%<yellow>] not allowed on function parameters")
+        }
+      }
+      this.advance() // Past modifier keyword
+    }
+    if modifiers.combinationIsNotValid() {
+      this.errModifiers(modifiers, "invalid combination of modifiers")
+    }
+    const node = new src.Variable{ pos = this.mkPos(), modifiers = modifiers }
+    if this.pos.isanIdentifier() {
+      node.name = this.makeIdentifier()
+      this.checkFunctionParameterName((node.name as src.Name*))
+      this.advance() // Past identifier
+      if this.pos.isAssign() {
+        this.advance() // Past '='
+        node.rhs = this.parseExpression(Context.Lhs)
+      }
+    } else if this.pos.token == Tok.Ellipsis {
+      node.isEllipsis = true
+      node.name = this.makeIdentifier()
+      this.advance() // Past '...'
+    } else {
+      this.expected(['identifier', '...'], "as a function parameter")
+    }
+    if node.name {
+      const name = (node.name as src.Name*).value
+      if name == this.ids.kw_this || name == this.ids.kw_self {
+        if index > 0 {
+          this.err(node, "'#{name}' parameter cannot be declared at index #{index} of function parameters")
+        }
+      }
+    }
+    return node
+  }
+
+
+  fn checkFunctionParameterName(this, name) {
+    if this.isaReservedVariableName(name.value, VariableKind.Parameter) {
+      this.err(name, "reserved keyword used as a parameter name")
+    }
+  }
+
+
+  fn parseTypeParameters(this) {
+    const openParen = this.pos
+    const node = new src.Tuple{ pos = this.mkPos() }
+    this.advance() // Past '('
+    for this.pos.isNotEndOfFile() && this.pos.isNotCloseParen() {
+      if const param = this.parseTypeParameter() {
+        node.children.append(param)
+        if const name = param is src.Name {
+          this.checkTypeParameterName(name)
+        }
+      }
+      if this.pos.isComma() {
+        this.advance() // Past ','
+      }
+    }
+    if this.pos.isCloseParen() {
+      node.closeParen = this.mkPos()
+      this.advance()
+    } else {
+      this.e_token(openParen, "unmatched '(' before end of file")
+    }
+    return node
+  }
+
+
+  fn parseTypeParameter(this) {
+    const modifiers = src.Modifiers{ pos = this.mkPos() }
+    for this.pos.isNotEndOfFile() {
+      switch this.pos.keyword {
+        case Tok.Const {
+          if modifiers.isConst {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isConst = true
+        }
+        case Tok.ReadOnly {          
+          if modifiers.isReadOnly {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isReadOnly = true
+        }
+        case Tok.Auto {          
+          if modifiers.isAuto {
+            this.e_token(this.pos, "modifier #{this.pos.value}#[%<gray>] already declared")
+          }
+          modifiers.isAuto = true
+        }
+        default {
+          break if !this.pos.isaModifier()
+          this.e_token(this.pos, "modifier #{this.pos.value}#[%<yellow>] not allowed on type parameters")
+        }
+      }
+      this.advance() // Past modifier keyword
+    }
+    if modifiers.combinationIsNotValid() {
+      this.errModifiers(modifiers, "invalid combination of modifiers")
+    }
+    const node = new src.Variable{ pos = this.mkPos(), modifiers = modifiers }
+    if this.pos.isanIdentifier() {
+      node.name = this.makeIdentifier()
+      this.checkTypeParameterName((node.name as src.Name*))
+      this.advance() // Past identifier
+      if this.pos.isAssign() {
+        this.advance() // Past '='
+        node.rhs = this.parseExpression(Context.Lhs)
+      }
+    } else if this.pos.token == Tok.Ellipsis {
+      node.isEllipsis = true
+      node.name = this.makeIdentifier()
+      this.advance() // Past '...'
+    } else {
+      this.expected(['identifier', '...'], "as a type parameter")
+    }
+    return node
+  }
+
+
+  fn checkTypeParameterName(this, name) {
+    if this.isaReservedVariableName(name.value, VariableKind.Other) {
+      this.err(name, "reserved keyword used as a type parameter name")
+    }
+  }
+
+
+  fn parseSupers(this): Node* {
+    var node = this.parseTypeName()
+    return node if !node
+    node = this.parseRestOfSuper(node)
+    for this.pos.isComma() {
+      this.advance() // Past ','
+      if var value = this.parseTypeName() {
+        value = this.parseRestOfSuper(value)
+        var list = node is src.CommaList
+        if !list {
+          list = new src.CommaList{ pos = node.pos }
+          list.children.append(node)
+          node = list
+        }
+        list.children.append(value)
+      }
+    }
+    return node
+  }
+
+  fn parseRestOfSuper(this, node) {
+    if this.pos.keyword == Tok.As {
+      this.advance() // Past 'as' keyword
+      if this.pos.isanIdentifier() {
+        node = new src.NameValue{ pos = node.pos, name = this.ids.get(this.pos.value), value = node }
+        this.advance() // Past identifier
+        this.checkSuperName(node as src.NameValue*)
+      } else {
+        this.expected(['identifier'], "after 'as' in named super")
+      }
+    }
+    return node
+  }
+
+  fn checkSuperName(this, node) {
+    if this.isaReservedVariableName(node.name, VariableKind.Other) {
+      this.err(node, "reserved keyword used as a super name")
+    }
+  }
+
+
+  fn parseIdentifierOrMemberName(this) {
+    if this.pos.isanIdentifier() {
+      var node = this.makeIdentifier() as Node*
+      this.advance() // Past identifier
+      for this.pos.token == Tok.Dot {
+        const dot = this.pos
+        this.advance() // Past '.'
+        if this.pos.isanIdentifier() {
+          node = new src.MemberName{ pos = node.pos, lhs = node, dot = this.mkPos(dot),
+            rhs = this.makeIdentifier() }
+          this.advance() // Past identifier
+        } else {
+          this.expected(['identifier'], "after '.'")
+          break
+        }
+      }
+      return node
+    }
+    this.expected(['identifier'])
+    return null
+  }
+
+
+  fn parseQuoted(this, isWChar = false): Node* {
+    const openQuote = this.pos
+    if sniffInterpolation(this.pos, this.end) {
+      return this.parseInterpolatedQuoted(isWChar)
+    }
+    var prev = Token*{}
+    for ++this.pos; this.pos < this.end; ++this.pos {
+      if this.pos.token == Tok.BackSlash && prev && prev.token == Tok.BackSlash {
+        prev = null
+        continue
+      }
+      if this.pos.token == openQuote.token {
+        break if !prev || prev.token != Tok.BackSlash
+      }
+      prev = this.pos
+    }
+    if this.pos == this.end {
+      this.e_token(openQuote, "unmatched quote before end of file")
+      return new src.Node{ pos = this.mkPos(openQuote) }
+    }
+    const node = new src.Quoted{ pos = this.mkPos(openQuote), closeQuote = this.mkPos(), isWChar = isWChar }
+    auto   str = String{}
+    const    v = this.getTextRange(openQuote, this.pos)
+    var   vpos = v.text + 1 // +1 to exclude the opening quote
+    const vend = v.end() - 1 // -1 to exclude the closing quote
+    this.takeQuoted(str, vpos, vend, node)
+    node.value = this.ids.get(str)
+    this.advance()
+    if str.length <= 1 && openQuote.token == Tok.SingleQuote {
+      const       ch = str.text[0] if str.length else ''
+      const charNode = new src.Character{ pos = node.pos, closeQuote = node.closeQuote, value = ch,
+        isWChar = isWChar }
+      delete node
+      return charNode
+    }
+    return node
+
+    fn sniffInterpolation(pos, end) {
+      const quote = pos.token
+      for ++pos; pos < end; ++pos {
+        if pos.token == Tok.BackSlash { // '\x'
+          ++pos // Past '\'. Now at 'x'. '++' above will make the comparisons start after 'x'.
+        } else if pos.token == Tok.HashOpenCurly {
+          return pos
+        } else if pos.token == quote {
+          break
+        }
+      }
+      return null
+    }
+  }
+
+
+  fn parseInterpolatedQuoted(this, isWChar) {
+    const openQuote = this.pos
+    const node = new src.Interpolation{ pos = this.mkPos() }
+    var prev = Token*{}
+    var mark = openQuote + 1
+    auto str = String{}
+    for ++this.pos; this.pos < this.end; ++this.pos {
+      if this.pos.token == Tok.BackSlash && prev && prev.token == Tok.BackSlash {
+        prev = null
+        continue 
+      }
+      if this.pos.token == Tok.HashOpenCurly {
+        if prev && prev.token == Tok.BackSlash { // '\' '#{'
+          prev = this.pos
+          continue
+        } // Else '#{'
+        if const child = this.takeText(node, mark, str, isWChar) {
+          node.children.append(child)
+        }
+        this.advance() // Past '#{'
+        var value = Node*{}
+        if this.pos.isNotCloseCurly() {
+          if value = this.parseExpression(Context.Lhs) {
+            node.children.append(value)
+          }
+        }
+        if this.pos.isCloseCurly() {
+          this.advance(Skip.Nothing) // Past '}'
+          if value && this.pos.token == Tok.HashOpenBracket {
+            this.pos = takeFormat(this, node, value, this.pos, this.end, str)
+            return node if this.pos == this.end
+          } else {
+            --this.pos // Because of {++this.pos} above.
+          }
+          mark = this.pos + 1
+        } else {
+          this.expected(['}'], "after interpolated item")
+        }
+        prev = null
+        continue
+      }
+      if this.pos.token == openQuote.token {
+        break if !prev || prev.token != Tok.BackSlash        
+      }
+      prev = this.pos
+    }
+    node.closeQuote = this.mkPos()
+    if this.pos == this.end {
+      this.e_token(openQuote, "unmatched quote before end of file")
+    } else {
+      if const child = this.takeText(node, mark, str, isWChar) {
+        node.children.append(child)
+      }
+      this.advance()
+    }
+    return node
+
+    fn takeFormat(parser, node, value, pos, end, str) {
+      const openHashCurly = pos
+      const mark = pos + 1
+      for ++pos; pos < end && pos.isNotCloseBracket(); ++pos {}
+      if pos == end {
+        parser.e_token(openHashCurly, "unmatched '#[' before end of file")
+        return pos
+      }
+      str.clear()
+      const v = parser.getTextRange(mark, pos)
+      const vpos = v.text
+      const vend = v.end() - 1 // -1 '['
+      parser.takeQuoted(str, vpos, vend, node)
+      if str.length {
+        const item = new src.InterpolationItem{ pos = parser.mkPos(openHashCurly),
+                                                value = value,
+                                                fmt = parser.ids.get(str),
+                                                closeBracket = parser.mkPos(pos) }
+        node.children.items[node.children.length - 1] = item
+      }
+      return pos
+    }
+  }
+
+  fn takeText(this, node, mark, str, isWChar = false): src.Text* {
+    const pos = this.pos - 1
+    if mark >= pos {
+      return null
+    }
+    str.clear()
+    const v = this.getTextRange(mark, pos)
+    const vpos = v.text
+    const vend = v.end() //- pos.range.length()
+    this.takeQuoted(str, vpos, vend, node)
+    if str.length {
+      return new src.Text{ pos = this.mkPosFromRange(mark, pos, Tok.Text),
+                           value = this.ids.get(str), isWChar = isWChar }
+    }
+    return null
+  }
+
+
+  fn takeQuoted(this, str, vpos, vend, node) {
+    assert vpos <= vend
+    //const s = string.fromRange(vpos, vend)
+    var vmark = vpos
+    for ; vpos < vend; ++vpos {
+      if *vpos == '\\' {
+        assert vpos + 1 < vend
+        str.appendRange(vmark, vpos)
+        switch const ch = vpos[1] {
+          case 'a'    str.append('\a')
+          case 'b'    str.append('\b')
+          case 'f'    str.append('\f')
+          case 'n'    str.append('\n')
+          case 'r'    str.append('\r')
+          case 't'    str.append('\t')
+          case 'v'    str.append('\v')
+          case '0'    str.append('')
+          case ' ', '\r', '\n' {
+            for ++vpos; vpos < vend && (*vpos == ' ' || *vpos == '\r' || *vpos == '\n'); ++vpos {}
+            vmark = vpos
+            break if vpos == vend
+            --vpos
+            continue
+          }
+          case '\\', '\'', '"', '?'
+            str.append(ch)
+          default {
+            this.err(node, "unknown escape sequence: '\\' #{ch}")
+            continue
+          }
+        }
+        ++vpos
+        vmark = vpos + 1
+      }
+    }
+    str.appendRange(vmark, vpos)
+  }
+
+
+  fn updateFlowControlCount(this) {
+    const function = this.scope.currentFunction()
+    if !function {
+      this.e_token(this.pos, "keyword '#{this.pos.value}' must be declared inside a function")
+      return
+    }
+    switch this.pos.keyword {
+      case Tok.Return ++function.seen.returns
+      case Tok.Yield  ++function.seen.yields
+      case Tok.Await  ++function.seen.awaits
+      case Tok.Break, Tok.Continue {
+        if !this.scope.currentLoop() {
+          this.e_token(this.pos, "keyword '#{this.pos.value}' must be declared inside a loop")
+        }
+      }
+      default {
+        this.e_token(this.pos, "unknown flow-control keyword")
+      }
+    }
+    if this.pos.keyword == Tok.Await {
+      if !function.modifiers.isAsync {
+        this.e_token(this.pos, "keyword 'await' can only be used in an function declared 'async'")
+      }
+    }
+  }
+
+
+  fn convertIfExprToIfStatement(this, node): Node* {
+    switch node {
+      case src.FlowControl {
+        return node if !node.value
+        if const ifexpr = node.value is src.IfExpr {
+          return this.finishConvertingIfExprToIfStatement(node, ifexpr, nodeTaken = false)
+        }
+      }
+    }
+    return node
+  }
+
+
+  fn finishConvertingIfExprToIfStatement(this, node, ifexpr, nodeTaken): src.If* {
+    const ifnode = new src.If{ pos = node.pos, condition = ifexpr.condition }
+    ifnode.iftrue = new src.Block{ pos = node.pos, owner = ifnode,
+                                       closeCurly = src.nlastpos(ifexpr.condition) }
+    const scope = Scope{ block = ifnode.iftrue, outer = this.scope }
+    const outer = this.beginScope(scope)
+    if nodeTaken {
+      node = new src.FlowControl{ pos = node.pos, keyword = node.keyword }
+    }
+    node.value = ifexpr.iftrue
+    this.scope.append(node)
+    this.endScope(outer)
+    if ifexpr.ifalse {
+      if const ifalse = ifexpr.ifalse is src.IfExpr {
+        ifnode.ifalse = this.finishConvertingIfExprToIfStatement(node, ifalse, nodeTaken = true)
+      } else {
+        ifnode.ifalse = new src.Block{ pos = ifexpr.ifalse.pos, closeCurly = src.nlastpos(ifexpr.ifalse) }
+        node = new src.FlowControl{ pos = node.pos, keyword = node.keyword, value = ifexpr.ifalse }
+        (ifnode.ifalse as src.Block*).children.append(node)
+      }
+    }
+    ifexpr.condition = null
+    ifexpr.iftrue = null
+    ifexpr.ifalse = null
+    delete ifexpr
+    return ifnode
+  }
+
+
+  fn mkPos(this, pos = Token*{}, token = Tok.Unknown) {
+    if !pos {
+      pos = this.pos
+    } if !token {
+      token = pos.token
+    }
+    assert pos.range.start.pos <= pos.range.end.pos
+    return Pos{ range = pos.range, file = this.file.id, token = token }
+  }
+
+
+  fn mkPosFromRange(this, start, end, token) {
+    assert start.range.start.pos <= end.range.end.pos
+    return Pos{ range = Range{ start = start.range.start, end = end.range.end },
+                file  = this.file.id,
+                token = token }
+  }
+
+
+  fn makeIdentifier(this, pos = Token*{}) {
+    if !pos {
+      pos = this.pos
+    }
+    return new src.Name{ pos = this.mkPos(pos), value = this.ids.get(pos.value),
+                                   keyword = pos.keyword }
+  }
+
+
+  fn makeParameter(this, name, pos) {
+    return new src.Variable{ 
+            pos = pos,
+      modifiers = src.Modifiers{},
+           name = new src.Name{ pos = pos, value = name }
+    }
+  }
+
+
+  fn newBoolean(this, value) {
+    const node = new src.Constant{ pos = this.mkPos(), kind = src.Constant.Kind.Bool }
+    node.value.bool = value
+    return node
+  }
+
+
+  fn getTextRange(this, pos, end) {    
+    const vstart = this.file.source.text + pos.range.start.pos
+    const vend = this.file.source.text + end.range.end.pos
+    assert vstart <= vend
+    return string.fromRange(vstart, vend)
+  }
+
+
+  fn prevIsANewLine(this) {
+    const first = &this.tokens.items[0]
+    return false if this.pos == first
+    const prev = this.pos - 1
+    return prev.isaNewLine()
+  }
+
+
+  fn prevIsNotANewLine(this) = !this.prevIsANewLine()
+
+
+  fn prevIsASpaceOrNewLine(this) {
+    const first = &this.tokens.items[0]
+    return false if this.pos == first
+    const prev = this.pos - 1
+    return prev.isaNewLine() || prev.isaSpace()
+  }
+
+
+  fn autoIsForVariableOrFunction(this) {
+    const kw = this.pos
+    this.advance(Skip.Spaces) // Past 'auto' keyword
+    var isaVariableOrFunction = false
+    if this.pos.isOpenParen() {
+      // Sniff for:
+      //    '(' identifier [ ',' identifier] ')' '=' ...
+      this.advance() // Past '('
+      for this.pos.isNotEndOfFile() && this.pos.isNotCloseParen() {
+        break if this.pos.isNotAnIdentifier()
+        this.advance() // Past identifier
+        break if !this.pos.isComma()
+        this.advance() // Past ','
+      }
+      if this.pos.isCloseParen() {
+        this.advance() // Past ')'
+        isaVariableOrFunction = this.pos.token == Tok.Assign // Expect '=' after ')'
+      }
+    } else if this.pos.keyword == Tok.Async {
+      isaVariableOrFunction = true
+    } else if this.pos.isanIdentifier() {
+      // Sniff for:
+      //      identifier '=' ...
+      this.advance() // Past identifier
+      isaVariableOrFunction = this.pos.token == Tok.Assign // Expect '=' after identifier
+    }
+    this.pos = kw // Restore cursor to 'auto' keyword
+    return isaVariableOrFunction
+  }
+
+  enum VariableKind { Other, Field, Parameter }
+
+  fn isaReservedVariableName(this, value, variableKind) {
+    return false if variableKind == VariableKind.Parameter &&
+                   (value == this.ids.kw_this || value == this.ids.kw_self)
+    switch value {
+      case this.ids.kw_this, this.ids.kw_self, this.ids.kw_super, this.ids.kw_typeid
+        return true // Reserved in all contexts.
+      case this.ids.kw_iocallback, this.ids.kw_iotransferred, this.ids.kw_ioresult,
+           this.ids.kw_ioawaiter, this.ids.kw_ioawaited, this.ids.kw_ioresult, this.ids.kw_getioreturn,
+           this.ids.kw_ioresume, this.ids.kw_iostopped, this.ids.kw_autoDelete, this.ids.kw_retval,
+           this.ids.kw_exitReason, this.ids.kw_retval
+        return variableKind != VariableKind.Field // Reserved in any context other than field context.
+    }
+    return false // Not reserved
+  }
+
+
+  fn cberr(this, node, it, cb) {
+    const lastPos = src.nlastpos(node)
+    const   range = Range{
+      start = node.pos.range.start,
+      end = lastPos.range.end
+    }
+    const source = this.sources.items[this.file.id]
+    diagnostics.errorWithCallBack(source, range, "parser", it, cb)
+    ++this.errors
+  }
+
+
+  fn err(this, node, msg) {
+    const lastPos = src.nlastpos(node)
+    const   range = Range{
+      start = node.pos.range.start,
+      end = lastPos.range.end
+    }
+    const source = this.sources.items[this.file.id]
+    diagnostics.error(source, range, "parser", msg)
+    ++this.errors
+  }
+
+  fn errModifiers(this, modifiers, msg) {
+    const source = this.sources.items[this.file.id]
+    diagnostics.error(source, modifiers.pos.range, "parser", msg)
+    ++this.errors
+  }
+
+
+  fn e_token(this, token, msg) {
+    const source = this.sources.items[this.file.id]
+    diagnostics.error(source, token.range, "parser", msg)
+    ++this.errors
+  }
+
+  fn expected(this, listOfExpected, msg = "") {
+    const badToken = this.pos
+    const source = this.sources.items[this.file.id]
+    diagnostics.errorWithCallBack(source, badToken.range, "parser",
+      { listOfExpected = listOfExpected, msg = msg, badToken = badToken },
+      fn(ctx) {
+        print("expected ")
+        for var i = 0; i < ctx.listOfExpected.length; ++i {
+          if i {
+            if i + 1 == ctx.listOfExpected.length {
+              print(" or ")
+            } else {
+              print(", ")
+            }
+          }
+          const s = ctx.listOfExpected[i]
+          print("#{s}#[%<green>]")
+        }
+        print(" not #{ctx.badToken}#[%<red>] ")
+        println(ctx.msg)           
+      })
+    ++this.errors
+  }
+
+
+  fn info(this, node, msg) {
+    const lastPos = src.nlastpos(node)
+    const   range = Range{
+      start = node.pos.range.start,
+      end = lastPos.range.end
+    }
+    const source = this.sources.items[this.file.id]
+    diagnostics.info(source, range, "parser", msg)
+  }
+
+
+  fn tokenInfo(this, token, msg) {
+    const source = this.sources.items[this.file.id]
+    diagnostics.info(source, token.range, "parser", msg)
+  }
+}

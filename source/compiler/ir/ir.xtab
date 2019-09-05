@@ -1,0 +1,41 @@
+
+fn translate(ctx) {
+  import lower
+  return lower.run(ctx)
+}
+
+
+fn dumpir(ctx) {
+  import dumper
+  return dumper.run(ctx, "ir")
+}
+
+
+fn dumpcleaned(ctx) {
+  import dumper
+  return dumper.run(ctx, "clean")
+}
+
+
+fn dumpssa(ctx) {
+  import dumper
+  return dumper.run(ctx, "ssa")
+}
+
+
+fn dumpopt(ctx) {
+  import dumper
+  return dumper.run(ctx, "opt")
+}
+
+
+fn dumpregalloc(ctx) {
+  import dumper
+  return dumper.run(ctx, "regalloc")
+}
+
+
+fn dumpcodegen(ctx) {
+  import dumper
+  return dumper.run(ctx, "codegen")
+}

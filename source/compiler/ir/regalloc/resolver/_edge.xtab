@@ -1,0 +1,389 @@
+struct EdgeBundle {
+  const bundle = Bundle&{}
+
+  fn append(this, dst, src): void {
+    assert dst.slot || src.slot
+    assert dst.slot != src.slot
+    assert dst.owner == src.owner
+    if dst.slot {
+      if src.slot {
+        return this.transfer(dst, src)
+      }
+      return this.fill(dst)
+    }
+    return this.spill(src)
+  }
+
+
+  fn transfer(this, dst, src): void {
+    const      def = dst.owner
+    const    block = this.bundle.parent
+    const lifetime = block.resolver.variables.items[def.value.index].lifetimes.items[block.block.index]
+    const   livein = lifetime.start
+    const  liveout = lifetime.end
+
+    assert dst.slot != src.slot
+
+    if this.bundle.isTop() {
+      assert !this.bundle.isBottom()
+      //  Create a (livein ⟵ src) or (livein ⟵ *) fill transfer at top of {block}.
+      assert dst == livein
+      return this.doTransferToLiveIn(livein, src)
+    }
+
+    //  Create a (liveout ⟵ src) transfer at the nop before the bottom of {block}.
+    if dst == liveout {
+      import MidBundle from _mid
+      const nop = block.nopBeforeBottom()
+      const mid = MidBundle{ bundle = nop }
+      return mid.transfer(dst, src)
+    }
+    //  Create a (dst ⟵ liveout) transfer or a (* ⟵ liveout) spill at bottom of {block}.
+    assert src == liveout
+    return this.doTransferFromLiveOut(dst, liveout)
+  }
+
+
+  fn fill(this, dst): void {
+    const      def = dst.owner
+    const    block = this.bundle.parent
+    const lifetime = block.resolver.variables.items[def.value.index].lifetimes.items[block.block.index]
+    const   livein = lifetime.start
+    const  liveout = lifetime.end
+
+    if this.bundle.isTop() {
+      assert !this.bundle.isBottom()
+      //  Create a (livein ⟵ *) fill at top of {block}.
+      assert dst == livein
+      return this.doFillLiveIn(livein)
+    }
+
+    //  Create a (dst ⟵ *) fill at bottom of {block}.
+    assert !liveout.slot
+    return this.doFillFromLiveOut(dst)
+  }
+
+
+  fn spill(this, src): void {
+    const      def = src.owner
+    const    block = this.bundle.parent
+    const lifetime = block.resolver.variables.items[def.value.index].lifetimes.items[block.block.index]
+    const   livein = lifetime.start
+    const  liveout = lifetime.end
+
+    if this.bundle.isTop() {
+      assert !this.bundle.isBottom()
+      //  Create a (* ⟵ src) spill at top of {block}.
+      assert !livein.slot
+      return this.doSpillToLiveIn(src)
+    }
+
+    //  Create a (* ⟵ liveout) spill at bottom of {block}.
+    assert src == liveout
+    return this.doSpillLiveOut(liveout)
+  }
+
+
+  fn doTransferToLiveIn(this, livein, src): void {
+    //  Rule:
+    //    (1) · There must only be one (livein ⟵ xxx) transfer or fill.
+    if const move = this.bundle.findWriteTo(livein.slot) {
+      switch move {
+        case Transfer return if move.src.slot == src.slot
+        case Fill     return
+        default assert 0
+      }
+      this.bundle.deleteWritesTo(livein) // Delete all (livein ⟵ xxx) transfers.
+      return this.doFillLiveIn(livein)   // And then insert a (livein ⟵ *) fill move.
+    }
+
+    //  Insert the (livein ⟵ src) transfer move or the (livein ⟵ *) fill move.
+    const def = livein.owner
+    const  it = this.computeIntereference(livein, src)
+    assert it.leads < 0
+    if it.follows >= 0 {
+      //     xxx ⟵ livein ; leader
+      //  livein ⟵ *      ; move
+      this.bundle.insertAfter(new Transfer{ dst = livein, src = src }, it.follows)
+    } else {
+      this.bundle.append(new Transfer{ dst = livein, src = src })
+    }
+  }
+
+
+  fn doTransferFromLiveOut(this, dst, liveout): void {
+    //  Rule:
+    //    (1) · There can be multiple (xxx ⟵ liveout) transfers.
+    //    (2) · There can only be one (* ⟵ liveout) spill.
+    const block = this.bundle.parent
+
+    // Do nothing if either the (dst ⟵ liveout) transfer or (* ⟵ liveout) exists. Rule (1).
+    return if this.bundle.findTransferOrSpill(dst, liveout)
+
+    //  Spill (* ⟵ liveout) if the transfer (dst ⟵ liveout) clobbers a move or a some other liveout.
+    return this.doSpillLiveOut(liveout) if this.bundle.findMoveClobberedBy(dst)
+    return this.doSpillLiveOut(liveout) if block.findLiveOutClobberedBy(dst)
+
+    //  Insert the (dst ⟵ liveout) transfer move or the (* ⟵ liveout) spill move.
+    const def = dst.owner
+    const  it = this.computeIntereference(dst, liveout)
+    assert it.leads < 0
+    if it.follows >= 0 {
+      //  xxx ⟵ dst       ; leader
+      //  dst ⟵ liveout   ; move
+      this.bundle.insertAfter(new Transfer{ dst = dst, src = liveout }, it.follows)
+    } else {
+      this.bundle.append(new Transfer{ dst = dst, src = liveout })
+    }
+  }
+
+
+  fn doFillLiveIn(this, livein): void {
+    //  Rule:
+    //    (1) · There must only be one (livein ⟵ xxx) transfer or fill.
+
+    if const move = this.bundle.findWriteTo(livein.slot) {
+      switch move {
+        case Transfer {} // Have to remove this (livein ⟵ xxx) transfer because of rule (1).
+        case Fill return // Do nothing if the (livein ⟵ *) fill move already exists.
+        default assert 0
+      }
+      this.bundle.deleteWritesTo(livein) // Delete all (livein ⟵ xxx) transfers.
+    }
+
+    const def = livein.owner
+
+    //  Insert the (livein ⟵ *) fill move.
+    const src = UseRange{ owner = def, start = livein.start, end = livein.end }
+    const  it = this.computeIntereference(livein, src)
+    assert it.leads < 0
+    if it.follows >= 0 {
+      //     xxx ⟵ livein ; leader
+      //  livein ⟵ *      ; fill move
+      this.bundle.insertAfter(new Fill{ dst = livein }, it.follows)
+    } else {
+      this.bundle.append(new Fill{ dst = livein })
+    }
+  }
+
+
+  fn doFillFromLiveOut(this, dst): void {
+    //  Rule:
+    //    (1) · There can be multiple (xxx ⟵ *) fills.
+    //    (2) · If the (dst ⟵ *) fill clobbers, let successors do (livein ⟵ *) fills.
+
+    return if this.bundle.findFillOf(dst) // Found the (dst ⟵ *) fill.
+
+    //  Rule (2).
+    const block = this.bundle.parent
+    return if this.bundle.findMoveClobberedBy(dst) || block.findLiveOutClobberedBy(dst)
+
+    //  Insert the (dst ⟵ *) fill move.
+    const def = dst.owner
+    const src = UseRange{ owner = def, start = dst.start, end = dst.end }
+    const  it = this.computeIntereference(dst, src)
+    assert it.leads < 0
+    if it.follows >= 0 {
+      //  xxx ⟵ dst ; leader
+      //  dst ⟵ *   ; fill move
+      this.bundle.insertAfter(new Fill{ dst = dst }, it.follows)
+    } else {
+      this.bundle.append(new Fill{ dst = dst })
+    }
+  }
+
+
+  fn doSpillToLiveIn(this, src): void {
+    //  Rule:
+    //    (1) · There must only be one (* ⟵ xxx) spill.
+    //    (2) · If more than one (* ⟵ xxx) spill is required, do not spill. Let predecessors spill.
+
+
+    const def = src.owner
+
+    //  Does the (* ⟵ src) spill move already exist?
+    if const move = this.bundle.findSpillOf(def) {
+      return if move.src.slot == src.slot // Found the (* ⟵ src) spill move we want to add.
+      //  Found another (* ⟵ xxx) spill move. Remove it and let predecessors do (* ⟵ liveout) spills.
+      this.bundle.deleteReadsFrom(move.src)
+      return
+    }
+
+    //  Insert the (* ⟵ src) spill move.
+    const dst = UseRange{ owner = def, start = src.start, end = src.end }
+    const  it = this.computeIntereference(dst, src)
+    assert it.follows < 0
+    if it.leads >= 0 {
+      //    * ⟵ src   ; move
+      //  src ⟵ xxx   ; follower
+      this.bundle.insertBefore(new Spill{ src = src }, it.leads)
+    } else {
+      this.bundle.append(new Spill{ src = src })
+    }
+  }
+
+
+  fn doSpillLiveOut(this, liveout): void {
+    //  Rule:
+    //    (1) · There must only be one (* ⟵ liveout) spill.
+    //    (2) · There can be multiple (xxx ⟵ liveout) transfers.
+    //    (3) · If there is a (* ⟵ liveout), there must be exactly zero (xxx ⟵ liveout) transfers.
+    const def = liveout.owner
+
+    //  Does the (* ⟵ liveout) spill move already exist?
+    if const move = this.bundle.findSpillOf(def) {
+      assert move.src == liveout
+      return
+    }
+
+    //  Remove all (xxx ⟵ liveout) transfers because of rule (3).
+    this.bundle.deleteReadsFrom(liveout)
+
+    //  Insert the (* ⟵ liveout) spill move.
+    const dst = UseRange{ owner = def, start = liveout.start, end = liveout.end }
+    const  it = this.computeIntereference(dst, liveout)
+    assert it.follows < 0
+    if it.leads >= 0 {
+      //    * ⟵ src   ; move
+      //  src ⟵ xxx   ; follower
+      this.bundle.insertBefore(new Spill{ src = liveout }, it.leads)
+    } else {
+      this.bundle.append(new Spill{ src = liveout })
+    }
+  }
+
+
+  fn computeIntereference(this, dst, src) {
+    const it = {
+      follows = -1,
+        leads = -1
+    }
+    const def = dst.owner
+    for i, move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move.dst.slot == dst.slot {
+            assert 0
+          } else if move.dst.slot == src.slot {
+            // (dst ⟵ src) should come BEFORE the first transfer {move} that clobbers it.
+            if it.leads < 0 {
+              it.leads = i
+            }
+            // (dst ⟵ src) should come AFTER the last transfer {move} it clobbers.
+            if move.src.slot == dst.slot {
+              it.follows = i
+            }
+          } else if move.src.slot == dst.slot {
+            // (dst ⟵ src) should come AFTER the last transfer {move} it clobbers.
+            it.follows = i
+          } else if move.src.slot == src.slot {
+            assert move.dst.owner == def
+          }
+        }
+        case Fill {
+          if move.dst.slot == dst.slot {
+            assert 0
+          } else if move.dst.slot == src.slot {
+            // (dst ⟵ src) should come BEFORE the first fill transfer {move} that clobbers it.
+            if it.leads < 0 {
+              it.leads = i
+            }
+          }
+        }
+        case Spill {
+          if move.src.slot == dst.slot {
+            // (dst ⟵ src) should come AFTER the last spill {move} it clobbers.
+            it.follows = i
+          } else if move.src.slot == src.slot {
+            assert move.src.owner == def
+          }
+        }
+      }
+    }
+    return it
+  }
+
+  fn dump(this, dst, src) {
+    const block = this.bundle.parent.block
+    const   pos = this.bundle.pos.value
+    if dst {
+      if src {
+        if dst.slot {
+          if src.slot {
+            println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+              dst.#{dst.owner.value.index}.[pos.#{dst.start.value.index}-#{dst.end.value.index}].\
+                  [bb.#{dst.start.value.parent.index}-#{dst.end.value.parent.index}].#{dst.slot.reg} = \
+              src.#{src.owner.value.index}.[pos.#{src.start.value.index}-#{src.end.value.index}].\
+                  [bb.#{src.start.value.parent.index}-#{src.end.value.parent.index}].#{src.slot.reg}")
+          } else {
+            println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+              dst.#{dst.owner.value.index}.[pos.#{dst.start.value.index}-#{dst.end.value.index}].\
+                  [bb.#{dst.start.value.parent.index}-#{dst.end.value.parent.index}].#{dst.slot.reg} = \
+              src.#{src.owner.value.index}.[pos.#{src.start.value.index}-#{src.end.value.index}].\
+                  [bb.#{src.start.value.parent.index}-#{src.end.value.parent.index}].*")
+          }
+        } else if src.slot {
+            println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+              dst.#{dst.owner.value.index}.[pos.#{dst.start.value.index}-#{dst.end.value.index}].\
+                  [bb.#{dst.start.value.parent.index}-#{dst.end.value.parent.index}].* = \
+              src.#{src.owner.value.index}.[pos.#{src.start.value.index}-#{src.end.value.index}].\
+                  [bb.#{src.start.value.parent.index}-#{src.end.value.parent.index}].#{src.slot.reg}")
+        } else {
+            println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+              dst.#{dst.owner.value.index}.[pos.#{dst.start.value.index}-#{dst.end.value.index}].\
+                  [bb.#{dst.start.value.parent.index}-#{dst.end.value.parent.index}].* = \
+              src.#{src.owner.value.index}.[pos.#{src.start.value.index}-#{src.end.value.index}].\
+                  [bb.#{src.start.value.parent.index}-#{src.end.value.parent.index}].*")
+        }
+      } else if dst.slot {
+          println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+            dst.#{dst.owner.value.index}.[pos.#{dst.start.value.index}-#{dst.end.value.index}].\
+                [bb.#{dst.start.value.parent.index}-#{dst.end.value.parent.index}].#{dst.slot.reg} = *")
+      } else {
+        println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+          dst.#{dst.owner.value.index}.[pos.#{dst.start.value.index}-#{dst.end.value.index}].\
+              [bb.#{dst.start.value.parent.index}-#{dst.end.value.parent.index}].*= *")
+      }
+    } else if src {
+      if src.slot {
+        println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+          * = src.#{src.owner.value.index}.[pos.#{src.start.value.index}-#{src.end.value.index}].#{src.slot.reg}")
+      } else {
+        println("bb.#{block.index}.[#{block.body.first.index}-#{block.body.last.index}] pos.#{pos.index}\r\n\
+          * = src.#{src.owner.value.index}.[pos.#{src.start.value.index}-#{src.end.value.index}].\
+                  [bb.#{src.start.value.parent.index}-#{src.end.value.parent.index}].*")
+      }
+    } else {
+      assert 0
+    }
+    for move in this.bundle.moves {
+      print("\t")
+      switch move {
+        case Transfer {
+          assert move.dst.slot
+          assert move.src.slot
+          println("\
+            dst.#{move.dst.owner.value.index}.[pos.#{move.dst.start.value.index}-#{move.dst.end.value.index}]\
+               .[bb.#{move.dst.start.value.parent.index}-#{move.dst.end.value.parent.index}].#{move.dst.slot.reg} = \
+            src.#{move.src.owner.value.index}.[pos.#{move.src.start.value.index}-#{move.src.end.value.index}]\
+               .[bb.#{move.src.start.value.parent.index}-#{move.src.end.value.parent.index}].#{move.src.slot.reg}")
+        }
+        case Fill {
+          assert move.dst.slot
+          println("\
+            dst.#{move.dst.owner.value.index}.[pos.#{move.dst.start.value.index}-#{move.dst.end.value.index}]\
+               .[bb.#{move.dst.start.value.parent.index}-#{move.dst.end.value.parent.index}].#{move.dst.slot.reg} = \
+            src.*")
+        }
+        case Spill {
+          assert move.src.slot
+          println("\
+            dst.* = \
+            src.#{move.src.owner.value.index}.[pos.#{move.src.start.value.index}-#{move.src.end.value.index}]\
+               .[bb.#{move.src.start.value.parent.index}-#{move.src.end.value.parent.index}].#{move.src.slot.reg}")
+        }
+        default assert 0
+      }
+    }
+  }
+}

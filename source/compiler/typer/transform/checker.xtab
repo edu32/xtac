@@ -1,0 +1,1306 @@
+
+import CastKind from ast
+import sema
+
+
+fn run(context, node) {
+  const pass = Checker{ typer = context.typer }
+  pass.run(node)
+  context.update(pass)
+}
+
+
+struct Checker {
+  const         typer = Typer&{}
+  readonly statements = List(ast.Node*)*{}
+  readonly      scope = ast.Scope*{}
+  readonly    removed = 0
+  readonly      added = 0
+  readonly    visited = 0
+  readonly retargeted = 0
+
+
+  fn run(this, node) {
+    switch node {
+      case ast.File     this.checkFile(node)
+      case ast.Function this.checkFunction(node)
+      default assert 0
+    }
+  }
+
+
+  fn checkFile(this, file) {
+    file.scope = this.checkBlock(file.scope) 
+  }
+
+
+  fn checkFunction(this, function) {
+    function.scope = this.checkBlock(function.scope) 
+  }
+
+
+  fn check(this, node): ast.Node* {
+    return null if !node
+
+    ++this.visited
+
+    if node.type.isUnknown() || node.pos.file < 0 {
+      this.cberr(node.pos, node) with {
+        println("unknown type or invalid pos\r\n\t\
+          → node: #{nameof(it)}: #{it.type}\r\n\t\
+          →  pos: #{it.pos.file}")
+      }
+    }
+
+    if const symbol = node.type.isaSymbol() {
+      if !symbol.instance {
+        this.cberr(node.pos, node) with {
+          println("uninstantiated symbol. did you intend to call or initialize?\r\n\t\
+            → node: #{nameof(it)}\r\n\t\
+            → type: #{it.type}")
+        }
+      }
+    }
+
+    switch node {
+      case ast.Scope return this.checkBlock(node)
+      case ast.If    return this.checkIfStmt(node)
+      case ast.Loop  return this.checkLoop(node)
+
+      case ast.Assert   {}
+      case ast.Goto     {}
+      case ast.Label    {}
+      case ast.Yield    {}
+
+      case ast.IfExpr           return this.checkIfExpr(node)
+
+      case ast.Destructure      return this.checkDestructure(node)
+      case ast.Assignment       return this.checkAssignment(node)
+      case ast.Arithmetic       return this.checkArithmetic(node)
+
+      case ast.BinaryCondition  return this.checkBinaryCondition(node)
+      case ast.UnaryCondition   return this.checkUnaryCondition(node)
+
+      case ast.Cast             return this.checkCast(node)
+      case ast.TypeOf           {}
+      case ast.SizeOf           return this.checkSizeOf(node)
+      case ast.UnaryOp          return this.checkUnaryOp(node)
+      case ast.UnaryAssignment  return this.checkUnaryAssignment(node)
+      case ast.Address          return this.checkAddress(node)
+      case ast.Dereference      return this.checkDereference(node)
+
+      case ast.Initializer  return this.checkInitializer(node)
+      case ast.Call         return this.checkCall(node)
+      case ast.Intrinsic    return this.checkIntrinsic(node)
+      case ast.ArrayIndex   return this.checkArrayIndex(node)
+
+      case ast.Name         return this.checkName(node)
+      case ast.MemberName   return this.checkMemberName(node)
+
+      case ast.Quoted       {}
+      case ast.QuotedUtf16  {}
+      case ast.Constant     {}
+
+      default assert with nameof(node)
+    }
+    return node
+  }
+
+
+  fn canDelete(this, node) {
+    return true if !node
+    switch node {
+      case ast.IfExpr return this.canDelete(node.condition) && this.canDelete(node.iftrue) &&
+                             this.canDelete(node.ifalse)
+
+      case ast.Destructure      return false
+      case ast.Assignment       return false
+      case ast.Arithmetic       return this.canDelete(node.lhs) && this.canDelete(node.rhs)
+
+      case ast.BinaryCondition  return this.canDelete(node.lhs) && this.canDelete(node.rhs)
+      case ast.UnaryCondition   return this.canDelete(node.rhs)
+
+      case ast.Cast             return this.canDelete(node.value)
+      case ast.TypeOf           return true
+      case ast.SizeOf           return this.canDelete(node.value)
+      case ast.UnaryOp          return this.canDelete(node.value)
+      case ast.UnaryAssignment  return false
+      case ast.Address          return this.canDelete(node.value)
+      case ast.Dereference      return this.canDelete(node.value)
+
+      case ast.Initializer  return false
+      case ast.Call         return false
+      case ast.Intrinsic    return false
+      case ast.ArrayIndex   return this.canDelete(node.base) && this.canDelete(node.index)
+
+      case ast.Name         return true
+      case ast.MemberName   return this.canDelete(node.base)
+
+      case ast.Quoted       return true
+      case ast.QuotedUtf16  return true
+      case ast.Constant     return true
+    }
+    return false
+  }
+
+
+  fn checkStatements(this, scope): void {
+    const prevScope = this.scope
+    const prevStmts = this.statements
+    const      list = List(ast.Node*){}
+    this.statements = &list
+         this.scope = scope
+    for node in scope.statements {
+      if const statement = this.check(node) {
+        if this.canDelete(statement) {
+          this.throwAway(statement)
+        } else {
+          list.append(statement)
+        }
+      }
+    }
+    delete scope.statements
+    scope.statements = list
+     this.statements = prevStmts
+          this.scope = prevScope
+  }
+
+
+  fn checkBlock(this, node): ast.Scope* {
+    assert node.bindingStatus.isDone()
+    this.checkStatements(node)
+    return node
+  }
+
+
+  fn checkIfStmt(this, node): ast.Scope* {
+    assert node.bindingStatus.isDone()
+    node.condition = this.checkCondition(node.condition)
+    this.checkStatements(node)
+    return node
+  }
+
+
+  fn checkLoop(this, node): ast.Scope* {
+    assert node.bindingStatus.isDone()
+    node.condition = this.checkCondition(node.condition)
+    this.checkStatements(node)
+    return node
+  }
+
+
+  fn checkCondition(this, node) {
+    const errors = this.typer.errors
+
+    if !node.type.isBool() {
+      this.cberr(node.pos, node) with {
+        println("invalid type of condition\r\n\t\
+          → expected: #{ast.tyBool}\r\n\t\
+          →    found: #{it.type}")
+      }
+    }
+
+    if this.isNotACondition(node) {
+      this.cberr(node.pos, node) with {
+        println("invalid value in condition\r\n\t\
+          → expected: BinaryCondition, UnaryCondition or __atomic_cmpxchg__\r\n\t\
+          →    found: #{nameof(it)}: #{it.type}")
+      }
+    }
+
+    return this.check(node) if errors == this.typer.errors
+      else this.throwAway(node)
+  }
+
+
+  fn checkIfExpr(this, node) {
+    //  ƒ( condition:T, iftrue:T, ifalse:T )
+    const   errors = this.typer.errors
+    node.condition = this.checkCondition(node.condition)
+
+    if node.iftrue = this.check(node.iftrue) {
+      if node.type != node.iftrue.type {
+        this.cberr(node.iftrue.pos, { expected = node.type, found = node.iftrue.type }) with {
+          println("ifexpr.iftrue type check failed\r\n\t\
+            → expected: #{it.expected}\r\n\t\
+            →    found: #{it.found}")
+        }
+      }
+    }
+
+    if node.ifalse = this.check(node.ifalse) {
+      if node.type != node.ifalse.type {
+        this.cberr(node.ifalse.pos, { expected = node.type, found = node.ifalse.type }) with {
+          println("ifexpr.ifalse: type check failed\r\n\t\
+            → expected: #{it.expected}\r\n\t\
+            →    found: #{it.found}")
+        }
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkDestructure(this, node) {
+    const errors = this.typer.errors
+
+    if !node.type.isaTuple() {
+      this.cberr(node.pos, node) with {
+        println("type of destructure must be a tuple\r\n\t\
+          → found: #{it.type}")
+      }
+    }
+
+    for i, child in node.children {
+      if const value = this.check(child) {
+        node.children.items[i] = value
+      } else {
+        node.children.items[i] = new ast.Constant{ pos = node.pos, type = ast.tyVoid }
+      }
+    }
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkAssignment(this, node) {
+    //  ƒ( lhs:T ) → rhs:T
+    const errors = this.typer.errors
+        node.lhs = this.check(node.lhs)
+        node.rhs = this.check(node.rhs)
+    if !node.lhs || !node.rhs {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, lhs = node.lhs.type, op = node.op, rhs = node.rhs.type }
+
+    if !it.op.isanAssignmentOperator() {
+      this.cberr(node.pos, it) with {
+        println("not an assignment operator\r\n\t\
+          → found: #{it.op.value()}")
+      }
+    }
+
+    if it.dst != it.lhs {
+      this.cberr(node.pos, it) with {
+        println("assignment.dst/lhs type mismatch\r\n\t\
+          → expected: #{it.lhs} ← #{it.rhs}\r\n\t\
+          →    found: #{it.dst} ← #{it.lhs} ← #{it.rhs}")
+      }
+    }
+
+    if it.op == Tok.Assign {
+      if it.lhs != it.rhs {
+        this.cberr(node.pos, it) with {
+          println("assignment.lhs/rhs type mismatch\r\n\t\
+            → expected: #{it.lhs} = #{it.lhs}\r\n\t\
+            →    found: #{it.lhs} = #{it.rhs}")
+        }
+      }
+      this.markIfIsAssignmentReturningLocal(node)      
+    } else if it.lhs.isaPointer() {
+      if it.op != Tok.MinusAssign && it.op != Tok.PlusAssign {
+        this.cberr(node.pos, it) with {
+          println("pointer.assignment operator check failed\r\n\t\
+            → found: #{it.op.value()}")
+        }
+      }
+      if it.rhs.isa64BitInteger() || it.rhs.isa32BitInteger() {
+        // Do nothing.
+      } else if it.rhs.isSigned() {
+        node.rhs = this.cast(node.rhs, ast.tyInt64, CastKind.Numeric)
+      } else if it.rhs.isUnsigned() {
+        node.rhs = this.cast(node.rhs, ast.tyUInt64, CastKind.Numeric)
+      } else this.cberr(node.rhs.pos, it) with {
+        println("pointer.assignment.rhs type check failed\r\n\t\
+          → expected: integer\r\n\t\
+          →    found: #{it.rhs}")
+      } 
+    } else if it.lhs != it.rhs {
+      this.cberr(node.rhs.pos, it) with { 
+        println("compound assignment.lhs/rhs type mismatch\r\n\t\
+          → expected: #{it.lhs} = #{it.lhs}\r\n\t\
+          →    found: #{it.lhs} = #{it.rhs}")
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn markIfIsAssignmentReturningLocal(this, node) {
+    var lhsLocal = ast.Local*{}
+    var rhsLocal = ast.Local*{}
+
+    switch node.lhs {
+      case name: ast.Name {
+        if const instance = name.symbol.instance is ast.Local {
+          if instance.name == this.typer.ids.kw_retval {
+            lhsLocal = instance
+          }
+        }
+      }
+    }
+
+    switch node.rhs {
+      case name: ast.Name {
+        rhsLocal = name.symbol.instance is ast.Local 
+      }
+    }
+
+    if lhsLocal && rhsLocal {
+      rhsLocal.isUsedInReturn = true
+    }
+  }
+
+
+  fn checkArithmetic(this, node) {
+    const errors = this.typer.errors
+    assert (node.op >= Tok.Or && node.op <= Tok.And) || 
+           (node.op >= Tok.LeftShift && node.op <= Tok.Multiply)
+
+    node.lhs = this.check(node.lhs)
+    node.rhs = this.check(node.rhs)
+    if !node.lhs || !node.rhs {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, lhs = node.lhs.type, op = node.op, rhs = node.rhs.type }
+    
+    if it.lhs.isaPointer() {
+      if it.rhs.isaPointer() {
+        if it.dst != ast.tyInt64 {
+          this.cberr(node.pos, it) with {
+            println("pointer.arithmetic.dst type check failed\r\n\t\
+              → expected: #{ast.tyInt64} ← #{it.lhs} #{it.op.value()} #{it.rhs}\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} #{it.rhs}")
+          }
+        }
+        if it.lhs != it.rhs {
+          this.cberr(node.pos, it) with {
+            println("pointer.arithmetic type check failed\r\n\t\
+              → expected: Same lhs and rhs pointer type\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} #{it.rhs}")
+          }
+        }
+      } else if it.dst != it.lhs {
+          this.cberr(node.pos, it) with {
+            println("pointer.arithmetic.dst type check failed\r\n\t\
+              → expected: #{it.lhs} ← #{it.lhs} #{it.op.value()} #{it.rhs}\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} #{it.rhs}")
+          }
+      } else if it.rhs.isa64BitInteger() || it.rhs.isa32BitInteger() {
+        // Do nothing.
+      } else if it.rhs.isSigned() {
+        node.rhs = this.cast(node.rhs, ast.tyInt64, CastKind.Numeric)
+      } else if it.rhs.isUnsigned() {
+        node.rhs = this.cast(node.rhs, ast.tyUInt64, CastKind.Numeric)
+      } else this.cberr(node.rhs.pos, it) with {
+        println("pointer.arithmetic.rhs type check failed\r\n\t\
+          → expected: #{it.lhs} ← #{it.lhs} #{it.op.value()} #{it.rhs}\r\n\t\
+          →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} Integer")
+      }
+    } else if it.dst != it.lhs {
+      this.cberr(node.pos, it) with {
+        println("arithmetic.dst type check failed\r\n\t\
+          → expected: #{it.lhs} ← #{it.lhs} #{it.op.value()} #{it.rhs}\r\n\t\
+          →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} #{it.rhs}")
+      }
+    } else if it.dst.isaPointer() {
+      if it.rhs.isa64BitInteger() || it.rhs.isa32BitInteger() {
+        // Do nothing.
+      } else if it.rhs.isSigned() {
+        node.rhs = this.cast(node.rhs, ast.tyInt64, CastKind.Numeric)
+      } else if it.rhs.isUnsigned() {
+        node.rhs = this.cast(node.rhs, ast.tyUInt64, CastKind.Numeric)
+      } else this.cberr(node.rhs.pos, it) with {
+        println("pointer.arithmetic.rhs type check failed\r\n\t\
+          → expected: #{it.lhs} ← #{it.lhs} #{it.op.value()} #{it.rhs}\r\n\t\
+          →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} Integer")
+      }
+    } else switch node.op {
+      case Tok.Or, Tok.XOr, Tok.And {
+        if it.dst.isNotANumber() {
+          this.cberr(node.pos, it) with {
+            println("arithmetic.#{it.op.value()} type check failed\r\n\t\
+              → expected: Number ← Number #{it.op.value()} Number\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} Integer")
+          }
+        }
+      }
+      case Tok.LeftShift, Tok.RightShift, Tok.UnsignedRightShift {
+        if it.dst.isNotIntegral() {
+          this.cberr(node.pos, it) with {
+            println("arithmetic.#{it.op.value()} type check failed\r\n\t\
+              → expected: Integer ← Integer #{it.op.value()} Integer\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} Integer")
+          }
+        }
+      }
+      case Tok.Plus, Tok.Minus {
+        if it.dst.isNotNumeric() {
+          this.cberr(node.pos, it) with {
+            println("arithmetic.#{it.op.value()} type check failed\r\n\t\
+              → expected: Numeric ← Numeric #{it.op.value()} Numeric\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} Integer")
+          }
+        }
+      }
+      case Tok.Remainder {
+        if it.dst.isNotIntegral() {
+          this.cberr(node.pos, it) with {
+            println("arithmetic.#{it.op.value()} type check failed\r\n\t\
+              → expected: Integer ← Integer #{it.op.value()} Integer\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} Integer")
+          }
+        }
+      }
+      case Tok.Multiply, Tok.Divide {
+        if it.dst.isNotNumeric() {
+          this.cberr(node.pos, it) with {
+            println("arithmetic.#{it.op.value()} type check failed\r\n\t\
+              → expected: Numeric ← Numeric #{it.op.value()} Numeric\r\n\t\
+              →    found: #{it.dst} ← #{it.lhs} #{it.op.value()} Integer")
+          }
+        }
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkBinaryCondition(this, node) {
+    const errors = this.typer.errors
+        node.lhs = this.check(node.lhs)
+        node.rhs = this.check(node.rhs)
+    if !node.lhs || !node.rhs {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, lhs = node.lhs.type, op = node.op, rhs = node.rhs.type }
+    if (it.op < Tok.Equal || it.op > Tok.GreaterOrEqual) && (it.op < Tok.OrOr || it.op > Tok.AndAnd) {
+      this.cberr(node.pos, it) with {
+        println("unknown binary condition operator\r\n\t\
+          → found: #{it.op.value()}")
+      }
+    }
+    if it.dst.isNotBool() {
+      this.cberr(node.pos, it) with {
+        println("binary.condition type\r\n\t\
+          → expected: #{ast.tyBool}\r\n\t\
+          →    found: #{it.dst}")
+      }
+    }
+
+    switch node.op {
+      case Tok.OrOr, Tok.AndAnd {
+        if this.isNotACondition(node.lhs) || it.lhs.isNotBool() {
+          this.cberr(node.lhs.pos, node.lhs) with {
+            println("binary.logical.condition lhs value check failed\r\n\t\
+              → expected: Condition\r\n\t\
+              →    found: #{nameof(it)}: #{it.type}")
+          }
+        } 
+        if this.isNotACondition(node.rhs) || it.rhs.isNotBool() {
+          this.cberr(node.rhs.pos, node.rhs) with {
+            println("binary.logical.condition rhs value check failed\r\n\t\
+              → expected: Condition\r\n\t\
+              →    found: #{nameof(it)}: #{it.type}")
+          }
+        }
+      }
+      default {
+        if it.lhs.isNotAPointerOrANumber() {
+          this.cberr(node.lhs.pos, it) with {
+            println("binary.condition.#{it.op.value()} lhs type check failed\r\n\t\
+              → expected: Pointer or Number\r\n\t\
+              →    found: #{it.lhs}")
+          }
+        }
+        if it.rhs.isNotAPointerOrANumber() {
+          this.cberr(node.rhs.pos, it) with {
+            println("binary.condition.#{it.op.value()} rhs type check failed\r\n\t\
+              → expected: Pointer or Number\r\n\t\
+              →    found: #{it.rhs}")
+          }
+        }
+        if it.lhs != it.rhs {
+          this.cberr(node.pos, it) with {
+            println("binary.condition.#{it.op.value()} type check failed\r\n\t\
+              → expected: Same type\r\n\t\
+              →    found: #{it.lhs} #{it.op.value()} #{it.rhs}")
+          }
+        }
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkUnaryCondition(this, node) {
+    const errors = this.typer.errors
+        node.rhs = this.check(node.rhs)
+    if !node.rhs {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, op = node.op, rhs = node.rhs.type }
+    if it.op < Tok.LogicalNot || it.op > Tok.LogicalIs {
+      this.cberr(node.pos, it) with {
+        println("unknown unary condition operator\r\n\t\
+          → found: #{it.op.value()}")
+      }
+    }
+    if it.dst.isNotBool() {
+      this.cberr(node.pos, it) with {
+        println("unary.condition type\r\n\t\
+          → expected: #{ast.tyBool}\r\n\t\
+          →    found: #{it.dst}")
+      }
+    }
+
+    if it.rhs.isNotAPointerOrANumber() && !it.rhs.isaFunction() {
+      this.cberr(node.pos, it) with {
+        println("unary.condition rhs type check failed\r\n\t\
+          → expected: Pointer or Integer\r\n\t\
+          →    found: #{it.rhs}")
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkCast(this, node) {
+    const errors = this.typer.errors
+      node.value = this.check(node.value)
+    if !node.value {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, kind = node.kind, value = node.value.type }
+    if it.kind < CastKind.Numeric || it.kind == CastKind.Ref2Obj || it.kind == CastKind.Obj2Ref {
+      this.cberr(node.pos, it) with {
+        println("cast operator check failed\r\n\t\
+          → found: #{nameof(it.kind)}")
+      }
+    }
+    if it.dst == it.value {
+      this.cberr(node.pos, it) with {
+        println("cast type check failed\r\n\t\
+          → expected: Different types\r\n\t\
+          →    found: #{it.value} as #{it.dst}")
+      }
+    }
+    switch it.kind {
+      case CastKind.Numeric {
+        if it.dst.isNotNumeric() || it.value.isNotNumeric() {
+          this.e_badcast(node.value.pos, it)
+        } else if it.dst.isaFloat() && it.value.isIntegral() {
+          if it.value.size() < sizeof(Int32) {
+            if it.value.isSigned() {
+              node.value = this.cast(node.value, ast.tyInt32, CastKind.Numeric)
+            } else {
+              node.value = this.cast(node.value, ast.tyUInt32, CastKind.Numeric)
+            }
+          }
+        } else if it.dst.isaDouble() && it.value.isIntegral() {
+          if it.value.size() < sizeof(Int32) {
+            if it.value.isSigned() {
+              node.value = this.cast(node.value, ast.tyInt64, CastKind.Numeric)
+            } else {
+              node.value = this.cast(node.value, ast.tyUInt64, CastKind.Numeric)
+            }
+          }
+        } else if it.dst.isIntegral() && it.value.isaFloat() {
+          if it.dst.size() < sizeof(Int32) {
+            ++this.added
+            const node2 = new ast.Cast{
+                pos = node.pos,
+              value = node,
+               kind = it.kind,
+               type = it.dst
+            }
+            if it.dst.isSigned() {
+              node.type = ast.tyInt32
+            } else {
+              node.type = ast.tyUInt32
+            }
+            node = node2
+          }
+        } else if it.dst.isIntegral() && it.value.isaDouble() {
+          if it.dst.size() < sizeof(Int32) {
+            ++this.added
+            const node2 = new ast.Cast{
+                pos = node.pos,
+              value = node,
+               kind = it.kind,
+               type = it.dst
+            }
+            if it.dst.isSigned() {
+              node.type = ast.tyInt64
+            } else {
+              node.type = ast.tyUInt64
+            }
+            node = node2
+          }
+        }
+      }
+
+      case CastKind.Object {
+        if it.dst.isIndirect() || it.dst.isaBuiltin() {
+          this.e_badcast(node.value.pos, it)
+        } else if const en = it.dst.isanEnum() {
+          if en.valueType.isIndirect() || en.valueType.isaBuiltin() {
+            this.e_badcast(node.value.pos, it)
+          }
+        }
+        if it.value.isIndirect() || it.value.isaBuiltin() {
+          this.e_badcast(node.value.pos, it)
+        } else if const en = it.value.isanEnum() {
+          if en.valueType.isIndirect() || en.valueType.isaBuiltin() {
+            this.e_badcast(node.value.pos, it)
+          }
+        }
+        if errors == this.typer.errors {
+          if const symbol = it.value.isaSymbol() {
+            if const instance = symbol.instance {
+              node.value = this.ensureIsLValue(node.value)
+            } else {
+              this.e_badcast(node.value.pos, it)
+            }
+          } else {
+            this.e_badcast(node.value.pos, it)
+          }
+        }
+      }
+
+      case CastKind.BitCast {
+        if it.dst.isaDouble() {
+          if it.value.isa64BitInteger() {
+            // Do nothing.
+          } else if it.value.isSigned() { // (I|E ⟶ Int64) ⟶ Double
+            node.value = this.cast(node.value, ast.tyInt64, CastKind.Numeric)
+          } else if it.value.isUnsigned() { // (I|E ⟶ UInt64) ⟶ Double
+            node.value = this.cast(node.value, ast.tyUInt64, CastKind.Numeric)
+          } else {
+            this.e_badcast(node.value.pos, it)
+          }
+        } else if it.dst.isaFloat() {
+          if it.value.isa32BitInteger() {
+            // Do nothing.
+          } else if it.value.isSigned() { // (I|E ⟶ Int32) ⟶ Float
+            node.value = this.cast(node.value, ast.tyInt32, CastKind.Numeric)
+          } else if it.value.isUnsigned() { // (I|E ⟶ UInt32) ⟶ Float
+            node.value = this.cast(node.value, ast.tyUInt32, CastKind.Numeric)
+          } else {
+            this.e_badcast(node.value.pos, it)
+          }
+        } else if it.dst.isa64BitInteger() {
+          if it.value.isaDouble() {
+            // Do nothing.
+          } else {
+            this.e_badcast(node.value.pos, it)
+          }
+        } else if it.dst.isa32BitInteger() {
+          if it.value.isaFloat() {
+            // Do nothing.
+          } else {
+            this.e_badcast(node.value.pos, it)
+          }
+        } else {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+
+      case CastKind.Ref2Ptr {
+        if it.dst.isNotAPointer() {
+          this.e_badcast(node.value.pos, it)
+        }
+        if it.value.isNotAReference() {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+      case CastKind.Ref2Ref {
+        if it.dst.isNotAReference() {
+          this.e_badcast(node.value.pos, it)
+        }
+        if it.value.isNotAReference() {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+      case CastKind.Ref2Int {
+        if it.dst.isa64BitInteger() || it.dst.isBool() {
+          // Do nothing.
+        } else if it.dst.isSigned() { // (T& ⟶ Int64) ⟶ I|E
+          node.value = this.cast(node.value, ast.tyInt64, CastKind.Ref2Int)
+        } else if it.dst.isUnsigned() { // (T& ⟶ UInt64) ⟶ I|E
+          node.value = this.cast(node.value, ast.tyUInt64, CastKind.Ref2Int)
+        } else {
+          this.e_badcast(node.value.pos, it)
+        }
+        if it.value.isNotAReference() {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+      case CastKind.Ptr2Ref {
+        if it.dst.isNotAReference() {
+          this.e_badcast(node.value.pos, it)
+        }
+        if it.value.isNotAPointer() {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+      case CastKind.Ptr2Ptr {
+        if it.dst.isNotAPointer() {
+          this.e_badcast(node.value.pos, it)
+        }
+        if it.value.isNotAPointer() {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+      case CastKind.Ptr2Int {
+        if it.dst.isa64BitInteger() || it.dst.isBool() {
+          // Do nothing.
+        } else if it.dst.isSigned() { // (T& ⟶ Int64) ⟶ I|E
+          node.value = this.cast(node.value, ast.tyInt64, CastKind.Ptr2Int)
+        } else if it.dst.isUnsigned() { // (T& ⟶ UInt64) ⟶ I|E
+          node.value = this.cast(node.value, ast.tyUInt64, CastKind.Ptr2Int)
+        } else {
+          this.e_badcast(node.value.pos, it)
+        }
+        if it.value.isNotAPointer() {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+      case CastKind.Int2Ref {
+        if it.dst.isNotAReference() {
+          this.e_badcast(node.value.pos, it)
+        } else if it.value.isa64BitInteger() {
+          // Do nothing.
+        } else if it.value.isSigned() { // (I|E ⟶ Int64) ⟶ T&
+          node.value = this.cast(node.value, ast.tyInt64, CastKind.Numeric)
+        } else if it.value.isUnsigned() { // (I|E ⟶ UInt64) ⟶ T&
+          node.value = this.cast(node.value, ast.tyUInt64, CastKind.Numeric)
+        } else {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+      case CastKind.Int2Ptr {
+        if it.dst.isNotAPointer() {
+          this.e_badcast(node.value.pos, it)
+        } else if it.value.isa64BitInteger() {
+          // Do nothing.
+        } else if it.value.isSigned() { // (I|E ⟶ Int64) ⟶ T*
+          node.value = this.cast(node.value, ast.tyInt64, CastKind.Numeric)
+        } else if it.value.isUnsigned() { // (I|E ⟶ UInt64) ⟶ T*
+          node.value = this.cast(node.value, ast.tyUInt64, CastKind.Numeric)
+        } else {
+          this.e_badcast(node.value.pos, it)
+        }
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkSizeOf(this, node) {
+    const errors = this.typer.errors
+      node.value = this.check(node.value)
+    if !node.value {
+      return this.throwAway(node)
+    }
+    assert node.value.type.size() == 0
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkUnaryOp(this, node) {
+    const errors = this.typer.errors
+      node.value = this.check(node.value)
+    if !node.value {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, op = node.op, value = node.value.type }
+    if it.dst != it.value {
+      this.cberr(node.pos, it) with {
+        println("unary.op type check failed\r\n\t\
+          → expected: #{it.value}\r\n\t\
+          →    found: #{it.dst}")
+      }
+    }
+
+    switch it.op {
+      case Tok.Minus {
+        if it.dst.isNotANumber() {
+          this.cberr(node.value.pos, it) with {
+            println("unary.op value type check failed\r\n\t\
+              → expected: Number\r\n\t\
+              →    found: #{it.value}")
+          }
+        }
+      }
+      case Tok.Tilde {
+        if it.dst.isNotIntegral() {
+          this.cberr(node.value.pos, it) with {
+            println("unary.op value type check failed\r\n\t\
+              → expected: Integer\r\n\t\
+              →    found: #{it.value}")
+          }
+        }
+      }
+      default {
+        this.cberr(node.pos, it) with {
+          println("unary.op operator check faile\r\n\t\
+            → found: #{it.op.value()}")
+        }
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkUnaryAssignment(this, node) {
+    const errors = this.typer.errors
+      node.value = this.check(node.value)
+    if !node.value {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, op = node.op, value = node.value.type }
+    if it.dst != it.value {
+      this.cberr(node.pos, it) with {
+        println("unary.assignment type check failed\r\n\t\
+          → expected: #{it.value}\r\n\t\
+          →    found: #{it.dst}")
+      }
+    }
+    if it.op < Tok.MinusMinus || it.op > Tok.PlusPlus {
+      this.cberr(node.pos, it) with {
+        println("unary.assignment operator check failed\r\n\t\
+          → expected: -- or ++\r\n\t\
+          →    found: #{it.op.value()}")
+      }
+    }
+
+    if it.value.isNotAPointerOrANumber() {
+      this.cberr(node.pos, it) with {
+        println("unary.assignment.value type check failed\r\n\t\
+          → expected: Pointer or Integer\r\n\t\
+          →    found: #{it.dst}")
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkAddress(this, node) {
+    const errors = this.typer.errors
+      node.value = this.check(node.value)
+    if !node.value {
+      return this.throwAway(node)
+    }
+
+    const it = { dst = node.type, value = node.value.type }
+    if it.dst.isDirect() {
+      this.cberr(node.pos, it) with {
+        println("address type check failed\r\n\t\
+          → expected: Pointer or reference\r\n\t\
+          →    found: #{it.dst}")
+      }
+    } else if it.dst.isaPointer() {
+      if const name = node.value is ast.Name {
+        if const instance = name.symbol.instance {
+          switch instance {
+            case ast.Local     instance.addressIsTaken = true
+            case ast.Parameter instance.addressIsTaken = true
+            case ast.Global    instance.addressIsTaken = true
+          }
+        }
+      }
+    }
+
+    if const value = node.value is ast.Address {
+      this.cberr(node.pos, node) with {
+        println("eliminate address of address\r\n#{it.type}\r\n#{it.value.type}")
+      }
+    }
+
+    node.value = this.ensureIsLValue(node.value)
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn ensureIsLValue(this, node): ast.Node* {
+    switch node {
+      case ast.Cast {
+        if node.value = this.ensureIsLValue(node.value) {
+          return node
+        }
+      }
+      case ast.Assignment  return node
+      case ast.Dereference return node
+
+      case ast.Initializer {
+        return node if node.type.isLoadable() || node.type.isVoid()
+        return this.makeLValue(node)
+      }
+
+      case ast.Call         return node if node.type.isaReference()
+                              else this.makeLValue(node) if node.type.isNotLoadable() && node.type.isNotVoid()
+      case ast.Intrinsic    return node if node.type.isaReference()
+      case ast.ArrayIndex   return node
+
+      case ast.Name         return this.ensureSymbolIsLValue(node, node.symbol)
+      case ast.MemberName {
+        if node.base = this.ensureIsLValue(node.base) {
+          return this.ensureSymbolIsLValue(node, node.symbol)
+        }
+      }
+
+      case ast.Quoted      return this.makeLValue(node)
+      case ast.QuotedUtf16 return this.makeLValue(node)
+      case ast.Constant    return node if node.type.isLoadable()
+                             else this.makeLValue(node)
+    }
+    this.cberr(node.pos, node) with {
+      println("expected lvalue\r\n\t\
+        → found: #{nameof(it)}: #{it.type}")
+    }
+    return this.throwAway(node)
+  }
+
+
+  fn ensureSymbolIsLValue(this, node, symbol) {
+    if !symbol.instance {
+      this.cberr(node.pos, node) with {
+        println("uninstantiated symbol cannot be an lvalue\r\n\t\
+          → found: #{it.type}")
+      }
+      return this.throwAway(node)
+    }
+    switch symbol.instance {
+      case ast.Local     return node
+      case ast.Parameter return node
+      case ast.Field     return node
+      case ast.Global    return node
+
+      case ast.Function  return node
+
+      case ast.Array      return this.makeLValue(node)
+      case ast.Object     return this.makeLValue(node)
+      case ast.FixedArray return this.makeLValue(node)
+    }
+    this.cberr(node.pos, node) with {
+      println("symbol cannot be an lvalue\r\n\t\
+        → found: #{nameof(it)}: #{it.type}")
+    }
+    return this.throwAway(node)
+  }
+
+
+  fn makeLValue(this, node) {
+    const          name = this.typer.random("lvalue")
+    const         local = new ast.Local{ pos = node.pos, modifiers = src.Modifiers{}, name = name, type = node.type }
+    const (symbol, dup) = this.scope.appendSymbol(name, this.typer.nullTemplate, local)
+    assert !dup
+    this.added += 2
+    return new ast.Assignment{
+       pos = node.pos,
+       lhs = new ast.Name{ pos = node.pos, symbol = symbol, type = node.type },
+        op = Tok.Assign,
+       rhs = node,
+      type = node.type
+    }
+  }
+
+
+  fn checkDereference(this, node) {
+    const errors = this.typer.errors
+      node.value = this.check(node.value)
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkInitializer(this, node) {
+    const errors = this.typer.errors
+    for argument in node.arguments {
+      if argument.value = this.check(argument.value) {
+        argument.type = argument.value.type
+      }
+    }
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkCall(this, node) {
+    const errors = this.typer.errors
+
+    for argument in node.arguments {
+      if argument.value = this.check(argument.value) {
+        argument.type = argument.value.type
+      }
+    }
+
+    if errors != this.typer.errors {
+      // Do nothing.
+    } else if node.name = this.check(node.name) {
+      if const    functionSymbol = node.name.type.isaFunctionSymbol() {
+        if const currentFunction = functionSymbol.instance as ast.Function* {
+          assert node.type == currentFunction.fnreturn
+          return this.tryRetargetingCallSite(node, functionSymbol)
+        }
+        this.cberr(node.name.pos, node.name) with {
+          println("cannot retarget call because the target function is not instantiated\r\n\t\
+            → found: #{nameof(it)}: #{it.type}")
+        }
+      }
+    }
+
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn tryRetargetingCallSite(this, call, functionSymbol): ast.Node* {
+    if const replacer = functionSymbol.replacedBy {      
+      if functionSymbol.isCompilerGenerated {
+        this.cberr(call.pos, functionSymbol.instance as ast.Function*) with {
+          println("cannot retarget compiler generated function\r\n\t\
+            → found: #{it.type}")
+        }
+        return this.throwAway(call)
+      }
+      if call = this.retargetCallArguments(call, functionSymbol, replacer) {
+        return this.retargetCallName(call, functionSymbol, replacer)
+      }
+    }
+    return call
+  }
+
+
+  fn retargetCallArguments(this, call, functionSymbol, replacer): ast.Call* {
+    const          errors = this.typer.errors  
+    const currentFunction = functionSymbol.instance as ast.Function*
+    const     newFunction = replacer.instance as ast.Function*
+
+    assert call.arguments.length == currentFunction.parameters.length
+    assert call.arguments.length == newFunction.parameters.length
+
+    for i, argument in call.arguments {
+      const parameter = newFunction.parameters.items[i].instance as ast.Parameter*
+      if parameter.type.isaFunction() && argument.type.isaFunction() {
+           argument.value = this.cast(argument.value, parameter.type, CastKind.Object)
+        if argument.value = this.check(argument.value) {
+          argument.type = argument.value.type
+        }
+      } else if const c = sema.cast(parameter.type, argument.type, isImplicit = true) {
+        if c != CastKind.NoCast {
+             argument.value = this.cast(argument.value, parameter.type, c)
+          if argument.value = this.check(argument.value) {
+            argument.type = argument.value.type
+          }
+        }
+      } else this.cberr(argument.pos, { i = i, argument = argument.type, parameter = parameter.type, currentFunction = currentFunction, newFunction = newFunction }) with {
+        println("cannot convert callsite argument (@#{it.i}) to match parameter for retargeting\r\n\t\
+          → expected: #{it.parameter}\r\n\t\
+          →    found: #{it.parameter}\r\n\t\
+          →  current: #{it.currentFunction.type}\r\n\t\
+          →      new: #{it.newFunction.type}")
+      }
+    }
+    ++this.retargeted
+    return call if errors == this.typer.errors
+      else this.throwAway(call) as ast.Call*
+  }
+
+
+  fn retargetCallName(this, call, functionSymbol, replacer) { 
+    if const name = call.name.isaName() {
+      const currentFunction = functionSymbol.instance as ast.Function*
+      const     newFunction = replacer.instance as ast.Function*
+      assert call.type == currentFunction.fnreturn
+      name.retarget(replacer)
+      call.type = newFunction.fnreturn
+      if const c = sema.cast(currentFunction.fnreturn, call.type, isImplicit = false) {
+        return this.cast(call, currentFunction.fnreturn, c)
+      }
+      this.cberr(call.pos, { currentFunction = currentFunction, newFunction = newFunction }) with {
+        println("cannot finish retargeting call because new target function's fnreturn is incompatible \
+          with previous function's fnreturn\r\n\t\
+          →   tried: #{it.newFunction.fnreturn} as #{it.currentFunction.fnreturn}\r\n\t\
+          → current: #{it.currentFunction.type}\r\n\t\
+          →     new: #{it.newFunction.type}")
+      }
+    } else this.cberr(call.name.pos, call.name) with {
+      println("cannot retarget call because call.name is not a name\r\n\t\
+        → found: #{nameof(it)}")
+    }
+    return this.throwAway(call)
+  }
+
+
+  fn checkIntrinsic(this, node) {
+    const errors = this.typer.errors    
+    for argument in node.arguments {
+      if argument.value = this.check(argument.value) {
+        argument.type = argument.value.type
+      }
+    }
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkArrayIndex(this, node) {
+    const errors = this.typer.errors 
+       node.base = this.check(node.base)
+      node.index = this.check(node.index)
+    if node.index {
+      if node.index.type.isa64BitInteger() || node.index.type.isa32BitInteger() {
+        // Do nothing.
+      } else if node.index.type.isSigned() {
+        node.index = this.cast(node.index, ast.tyInt64, CastKind.Numeric)
+      } else if node.index.type.isUnsigned() {
+        node.index = this.cast(node.index, ast.tyUInt64, CastKind.Numeric)
+      } else this.cberr(node.index.pos, node.index) with {
+        println("invalid array index type\r\n\t\
+          → expected: Integer\r\n\t\
+          →    found: #{it.type}")
+      }
+    }
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkName(this, node) {
+     assert node.type == node.symbol.type()
+     return this.checkNamedSymbol(node)
+  }
+
+
+  fn checkMemberName(this, node) {
+    assert node.type == node.symbol.type()
+    assert node.base.type.isDirect()
+    const errors = this.typer.errors 
+       node.base = this.check(node.base)
+
+    if node.base {
+      if node.base = this.ensureIsLValue(node.base) {
+        return this.checkNamedSymbol(node)
+      }
+    }
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn checkNamedSymbol(this, node) {
+    const errors = this.typer.errors
+
+    if !node.symbol.instance {
+      this.cberr(node.pos, node) with {
+        println("uninstantiated symbol\r\n\t\
+          → found: #{it.type}")
+      }
+      return this.throwAway(node)
+    }
+
+    switch node.symbol.instance {
+      case def: ast.Define {
+        def.value = this.check(def.value)
+      }      
+      case array: ast.Array {
+        for i, child in array.children {
+          if const checked = this.check(child) {
+            array.children.items[i] = checked
+          } else {
+            array.children.items[i] = new ast.Name{ pos = node.pos, symbol = node.symbol, type = node.type }
+          }
+        }
+      }
+      case object: ast.Object {
+        for item in object.scope.symbols {
+          const value = item.value
+          if const field = value.instance is ast.Field {
+            field.value = this.check(field.value)
+          }
+        }
+      }
+    }
+    return this.throwAway(node) if errors != this.typer.errors
+      else node
+  }
+
+
+  fn isaCondition(this, node) {
+    switch node {
+      case ast.BinaryCondition return true
+      case ast.UnaryCondition  return true
+      case ast.Intrinsic       return node.keyword == this.typer.ids.kw_atomic_cmpxchg
+    }
+    return false
+  }
+
+
+  fn isNotACondition(this, node) = !this.isaCondition(node)
+
+
+  fn cast(this, value, type, kind): ast.Node* {
+    return value if kind == CastKind.NoCast
+    ++this.added
+    return new ast.Cast{
+        pos = value.pos,
+      value = value,
+       kind = kind,
+       type = type
+    }
+  }
+
+
+  fn err(this, pos, msg) {
+    this.typer.err(pos, msg)
+  }
+
+
+  fn cberr(this, pos, ctx, cb) {
+    this.typer.cberr(pos, ctx, cb)
+  }
+
+
+  fn e_badcast(this, pos, ctx) {
+    this.cberr(pos, ctx) with {
+      println("illegal cast\r\n\t\
+        → kind: #{nameof(it.kind)}
+        → cast: #{it.value} as #{it.dst}")
+    }
+  }
+
+
+  fn throwAway(this, node) {
+    ast.ndispose(node)
+    ++this.removed
+    return ast.Node*{}
+  }
+}

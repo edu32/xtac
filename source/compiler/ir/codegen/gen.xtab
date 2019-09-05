@@ -1,0 +1,1011 @@
+import gprs, xmms from codegen
+
+define MAX_COPY_YMMWORDS 8
+
+define opsrc 0
+
+define oplhs 0
+define oprhs 1
+define   op3 2
+
+struct Function {
+  const function = ssa.Function*{}
+  const   buffer = Buffer{}
+  const  patches = List(Patch){}
+
+  fn dispose(this) {
+    delete this.buffer
+    delete this.patches
+  }
+}
+
+struct Gen {
+  const   function = ssa.Function*{}
+  readonly    emit = Emitter{}
+  readonly encoder = Encoder{}
+  const     buffer = Buffer{}
+  const    patches = List(Patch){}
+
+
+  fn run(this, context) {
+    this.encoder = Encoder{ buffer = this.buffer, patches = this.patches }
+       this.emit = Emitter{ encode = this.encoder }
+    this.renumber()
+    this.emitPrologue()
+    this.emitBlocks()
+    this.emitEpilogue()
+    this.emit.ret()
+    return Function{
+      function = this.function,
+        buffer = this.buffer,
+       patches = this.patches
+    }
+  }
+
+
+  fn emitPrologue(this) {
+    /*  Do:
+          push {nvgprs}
+          sub rsp, {size - nvgprs}
+          vmovdqa {nvymms}
+    */
+    const frame = this.function.frame
+    const  size = frame.size
+    return if !size // Empty frame.
+    for nvgpr in frame.nvgprs {
+      this.emit.pushq(Reg.ofGpr(ssa.tyInt64, nvgpr.name))
+    }
+    const    nvgprs = frame.nvgprs.length * SIZE_OF_POINTER // Total size of nvgprs.
+    const remaining = size - nvgprs                  // Size of the stack frame less nvgprs.
+    if remaining {
+      // sub rsp, {size - nvgprs}
+      const rsp = Reg.ofReg(ssa.tyInt64, gprs.rsp)
+      this.emit.subq(rsp, Reg.ofImmediate(ssa.tyInt64, remaining))
+      //  vmovdqa {nvymms}
+      for nvymm in frame.nvymms {
+        const dst = Reg.ofRsp(ssa.tyInt64x4, nvymm.offset)
+        const src = Reg.ofXmm(ssa.tyInt64x4, nvymm.name)
+        this.emit.vmovqqu(dst, src)
+      }
+    }
+  }
+
+
+  fn emitEpilogue(this) {
+    /*  Do:
+          vmovdqa {nvymms}
+          add rsp, {size - nvgprs}
+          pop {nvgprs}
+    */
+    const frame = this.function.frame
+    const  size = frame.size
+    return if !size // Empty frame.
+    const    nvgprs = frame.nvgprs.length * SIZE_OF_POINTER // Total size of nvgprs.
+    const remaining = size - nvgprs                         // Size of the stack frame less nvgprs.
+    if remaining {
+      //  vmovdqa {nvymms}
+      for var i = frame.nvymms.length; --i >= 0;  {
+        const nvymm = frame.nvymms.items[i]
+        const dst = Reg.ofRsp(ssa.tyInt64x4, nvymm.offset)
+        const src = Reg.ofXmm(ssa.tyInt64x4, nvymm.name)
+        this.emit.vmovqqu(dst, src)
+      }
+      // add rsp, {size - nvgprs}
+      const rsp = Reg.ofReg(ssa.tyInt64, gprs.rsp)
+      this.emit.addq(rsp, Reg.ofImmediate(ssa.tyInt64, remaining))
+    }
+    for var i = frame.nvgprs.length; --i >= 0;  {
+      const nvgpr = frame.nvgprs.items[i]
+      this.emit.popq(Reg.ofGpr(ssa.tyInt64, nvgpr.name))
+    }
+  }
+
+
+  fn renumber(this) {
+    var bidx = 0, vidx = 0
+    for var  block = this.function.body.first; block; block = block.qnext {
+      block.offset = -1
+      block.index  = bidx++
+      for var expr = block.body.first; expr; expr = expr.qnext {
+        expr.offset = -1
+        expr.index  = vidx++
+      }
+    }
+  }
+
+
+  fn emitBlocks(this) {
+    for var  block = this.function.body.first; block; block = block.qnext {
+      this.emitBlock(block)
+    }
+  }
+
+
+  fn emitBlock(this, block) {
+    block.offset = this.buffer.length
+    for var expr = block.body.first; expr; expr = expr.qnext {
+      this.emitExpr(expr)
+    }
+  }
+
+
+  fn emitExpr(this, expr) {
+    expr.offset = this.buffer.length
+    switch expr {
+      case ssa.Value                {} // Do nothing.
+      case ssa.ElementAt            {} // Do nothing.
+      case ssa.Store                this.emitStore(expr)
+      case ssa.Assign               this.emitAssign(expr)
+      case ssa.Fill                 this.emitFill(expr)
+      case ssa.Exchange             this.emitExchange(expr)
+      case ssa.XAdd                 this.emitXAdd(expr)
+
+      case ssa.RetVal               {} // Do nothing.
+      case ssa.Local                {} // Do nothing.
+      case ssa.Parameter            {} // Do nothing.
+
+      case ssa.Compare              this.emitCompare(expr)
+      case ssa.CompareExchange      this.emitCompareExchange(expr)
+
+      case ssa.Assert               this.emitAssert(expr)
+      case ssa.Pause                this.emitPause(expr)
+
+      case ssa.Yield                this.emitYield(expr)
+      case ssa.Jump                 this.emitJump(expr)
+      case ssa.JumpIf               this.emitJumpIf(expr)
+      case ssa.Return               this.emitReturn(expr)
+
+      case ssa.Load                 this.emitLoad(expr)
+      case ssa.Argument             this.emitArgument(expr)
+      case ssa.Address              this.emitAddress(expr)
+      case ssa.Decrement            this.emitDecrement(expr)
+      case ssa.Increment            this.emitIncrement(expr)
+      case ssa.Negate               this.emitNegate(expr)
+      case ssa.BitwiseNot           this.emitBitwiseNot(expr)
+      case ssa.SignExtend           this.emitSignExtend(expr)
+      case ssa.ZeroExtend           this.emitZeroExtend(expr)
+      case ssa.NarrowingCast        this.emitNarrowingCast(expr)
+      case ssa.NumericCast          this.emitNumericCast(expr)
+      case ssa.BitCast              this.emitBitCast(expr)
+      case ssa.Round                this.emitRound(expr)
+      case ssa.SquareRoot           this.emitSquareRoot(expr)
+      case ssa.Abs                  this.emitAbs(expr)
+
+      case ssa.Arithmetic           {} // Do nothing.
+      case ssa.Or                   this.emitOr(expr)
+      case ssa.XOr                  this.emitXOr(expr)
+      case ssa.And                  this.emitAnd(expr)
+      case ssa.LeftShift            this.emitLeftShift(expr)
+      case ssa.RightShift           this.emitRightShift(expr)
+      case ssa.UnsignedRightShift   this.emitUnsignedRightShift(expr)
+      case ssa.Subtract             this.emitSubtract(expr)
+      case ssa.Add                  this.emitAdd(expr)
+      case ssa.Remainder            this.emitRemainder(expr)
+      case ssa.DivRem               this.emitDivRem(expr)
+      case ssa.Divide               this.emitDivide(expr)
+      case ssa.Multiply             this.emitMultiply(expr)
+      case ssa.Min                  this.emitMin(expr)
+      case ssa.Max                  this.emitMax(expr)
+      case ssa.RotateLeft           this.emitRotateLeft(expr)
+      case ssa.RotateRight          this.emitRotateRight(expr)
+
+      case ssa.Call                 this.emitCall(expr)
+      case ssa.Phi                  {} // Do nothing.
+
+      default assert with nameof(expr)
+    }
+  }
+
+
+  fn emitStore(this, expr) {
+    const dst = Reg.ofOperand(expr.operands.items[oplhs])
+    const src = Reg.ofOperand(expr.operands.items[oprhs])
+    assert dst.type == src.type
+    assert dst.reg.isMemory()
+    if const immediate = src.immediate { //  [dst] ⟵ imm
+      if immediate.u64 {
+        this.emitImmediateToMemoryStore(dst, src)
+      } else {
+        this.emitZeroMemory(dst)
+      }
+    } else if src.reg.isMemory() { //  [dst] ⟵ [src]
+      this.emitMemoryToMemoryStore(dst, src)
+    } else { //  [dst] ⟵ src:gpr/xmm/ymm
+      this.emit.mov(dst, src)
+    }
+  }
+
+
+  fn emitAssign(this, expr) {
+    const dst = Reg.ofOperand(expr.operands.items[oplhs])
+    const src = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emitRegisterStore(dst, src, expr.reason)
+  }
+
+
+  fn emitFill(this, expr) {
+    const dst = Reg.ofOperand(expr.operands.items[oplhs])
+    const src = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.mov(dst, src)
+  }
+
+
+  fn emitExchange(this, expr) {
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    if expr.reason == ssa.MoveReason.None {
+      this.emit.xchg(lhs, rhs)
+    } else {
+      assert expr.reason == ssa.MoveReason.Transfer
+      assert lhs.reg.isaGpr() && rhs.reg.isaGpr()
+      this.emit.xchgq(lhs, rhs)
+    }
+  }
+
+
+  fn emitXAdd(this, expr) {
+    const dst = Reg.ofOperand(expr.operands.items[oplhs])
+    const src = Reg.ofOperand(expr.operands.items[oprhs])
+    assert dst.type == src.type
+    this.emit.xadd(dst, src)
+  }
+
+
+  fn emitCompare(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.cmp(lhs, rhs)
+    if dst.reg.isValid() {
+      this.emit.setcc(dst, expr.op)
+    }
+  }
+
+
+  fn emitCompareExchange(this, expr) {
+    const       dst = Reg.ofValue(expr)
+    const     value = Reg.ofOperand(expr.operands.items[oplhs])
+    const comparand = Reg.ofOperand(expr.operands.items[oprhs])
+    const  exchange = Reg.ofOperand(expr.operands.items[op3])
+    this.emit.cmpxchg(value, comparand, exchange)
+    if dst.reg.isValid() {
+      this.emit.setcc(dst, expr.op)
+    }
+  }
+
+
+  fn emitAssert(this, expr) {
+    this.emit.int3()
+  }
+
+
+  fn emitPause(this, expr) {
+    this.emit.pause()
+  }
+
+
+  fn emitYield(this, expr) {
+    //  jmp [rip + offsetof( exitBlock )]
+  }
+
+
+  fn emitJump(this, expr) {
+    const   target = Reg.ofOperand(expr.operands.items[oplhs])
+    if const block = target.node is ssa.Block {
+      return if expr.parent.qnext == block // fallthrough
+    }
+    this.emit.jmp(target)
+  }
+
+
+  fn emitJumpIf(this, expr) {
+    const    iftrue = Reg.ofOperand(expr.operands.items[oplhs])
+    const condition = Reg.ofOperand(expr.operands.items[oprhs])
+    const    ifalse = Reg.ofOperand(expr.operands.items[op3])
+    assert iftrue.reg.isRipRelative()
+    assert ifalse.reg.isRipRelative()
+    if const cmp = condition.node is ssa.Compare {
+      this.emit.jcc(cmp.op, iftrue)
+    } else if const cmpxchg = condition.node is ssa.CompareExchange {
+      this.emit.jcc(cmpxchg.op, iftrue)
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn emitReturn(this, expr) {
+    //  epilogue
+    //  ret
+  }
+
+
+  fn emitLoad(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emitRegisterStore(dst, src, expr.reason)
+  }
+
+
+  fn emitArgument(this, expr) {
+    return if expr.argumentIndex >= MAX_REGISTER_ARGUMENTS
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emitRegisterStore(dst, src, ssa.MoveReason.None)
+  }
+
+
+  fn emitAddress(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.lea(dst, src)
+  }
+
+
+  fn emitDecrement(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.dec(dst, src)
+  }
+
+
+  fn emitIncrement(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.inc(dst, src)
+  }
+
+
+  fn emitNegate(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.neg(dst, src)
+  }
+
+
+  fn emitBitwiseNot(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.not(dst, src)
+  }
+
+
+  fn emitSignExtend(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.movsx(dst, src)
+  }
+
+
+  fn emitZeroExtend(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.movzx(dst, src)
+  }
+
+
+  fn emitNarrowingCast(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.mov(dst, src)
+  }
+
+
+  fn emitNumericCast(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.cvt(dst, src, truncate = false)
+  }
+
+
+  fn emitBitCast(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    assert dst.type.size() == src.type.size()
+    if const elem = src.isMemory() {
+      if elem.baseIsCodeSection() {
+        this.emit.lea(dst, src)
+        return
+      }
+    }
+    this.emit.bitcast(dst, src)
+  }
+
+
+  fn emitRound(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    if dst.reg.isanXmm() {
+      if src.reg.isanXmm() {
+        //  dst:xmm ⟵ round src:xmm
+      } else if src.reg.isMemory() {
+        //  dst:xmm ⟵ round src:[mem]
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn emitSquareRoot(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    if dst.reg.isanXmm() {
+      if src.reg.isanXmm() {
+        //  dst:xmm ⟵ sqrt src:xmm
+      } else if src.reg.isMemory() {
+        //  dst:xmm ⟵ sqrt src:[mem]
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn emitAbs(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const src = Reg.ofOperand(expr.operands.items[opsrc])
+    if dst.reg.isanXmm() {
+      if src.reg.isanXmm() {
+        //  dst:xmm ⟵ abs src:xmm
+      } else if src.reg.isMemory() {
+        //  dst:xmm ⟵ abs src:[mem]
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn emitOr(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.or(dst, lhs, rhs)
+  }
+
+
+  fn emitXOr(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.xor(dst, lhs, rhs)
+  }
+
+
+  fn emitAnd(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.and(dst, lhs, rhs)
+  }
+
+
+  fn emitLeftShift(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.shl(dst, lhs, rhs)
+  }
+
+
+  fn emitRightShift(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.sar(dst, lhs, rhs)
+  }
+
+
+  fn emitUnsignedRightShift(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.shr(dst, lhs, rhs)
+  }
+
+
+  fn emitSubtract(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.sub(dst, lhs, rhs)
+  }
+
+
+  fn emitAdd(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.add(dst, lhs, rhs)
+  }
+
+
+  fn emitRemainder(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    /*      rax ⟵ lhs:gpr/mem
+        rdx:rax ⟵ rax / rhs:gpr/mem
+        ; result in rdx
+    */
+    const rax = Reg{ type = dst.type, reg = gprs.rax }
+    this.emit.rem(dst, rax, lhs, rhs)
+  }
+
+
+  fn emitDivRem(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    assert 0
+  }
+
+
+  fn emitDivide(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.div(dst, lhs, rhs)
+  }
+
+
+  fn emitMultiply(this, expr) {
+    const  dst = Reg.ofValue(expr)
+    const  lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const  rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.mul(dst, lhs, rhs)
+  }
+
+
+  fn emitMin(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    assert 0
+  }
+
+
+  fn emitMax(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    assert 0
+  }
+
+
+  fn emitRotateLeft(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.rol(dst, lhs, rhs)
+  }
+
+
+  fn emitRotateRight(this, expr) {
+    const dst = Reg.ofValue(expr)
+    const lhs = Reg.ofOperand(expr.operands.items[oplhs])
+    const rhs = Reg.ofOperand(expr.operands.items[oprhs])
+    this.emit.ror(dst, lhs, rhs)
+  }
+
+
+  fn emitCall(this, expr) {
+    const callee = Reg.ofOperand(expr.operands.items[opsrc])
+    this.emit.call(callee) 
+  }
+
+  //―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+  fn emitMemoryToMemoryStore(this, dst, src) {
+    const type = dst.type
+    const size = dst.type.size()
+    const elem = src.node is ssa.ElementAt
+    assert elem
+    if elem.baseIsCodeSection() {
+      //  lea r11, [rip + offsetof(index) ]
+      //  mov qword [dst], r11
+      const r11 = Reg.ofReg(type, gprs.r11)
+      this.emit.lea(r11, src)
+      this.emit.movq(dst, r11)
+      return
+    }
+    if size <= MIN_MEMCOPY_BYTES {
+      this.emitLessThanMaxMemCopy(dst, src, size)
+    } else {
+      this.emitGreaterThanMemCopy(dst, src, size)
+    }
+  }
+
+  fn emitLessThanMaxMemCopy(this, dst, src, size) {
+    var    rem = size
+    const xmm5 = Reg.ofReg(dst.type, xmms.xmm5)
+    const  r11 = Reg.ofReg(dst.type, gprs.r11)
+    if const ymmwords = rem / SIZE_OF_YMM {
+      this.copyYmmWords(dst, src, xmm5, ymmwords)
+      rem = size % SIZE_OF_YMM
+    }
+    if const xmmwords = rem / SIZE_OF_XMM {
+      assert xmmwords == 1
+      this.copyXmmWord(dst, src, xmm5)
+      rem = size % SIZE_OF_XMM
+    }
+    if const qwords = rem / SIZE_OF_POINTER {
+      assert qwords == 1
+      this.copyQWord(dst, src, r11)
+      rem = size % SIZE_OF_POINTER
+    }
+    if const dwords = rem / SIZE_OF_INT {
+      assert dwords == 1
+      this.copyDWord(dst, src, r11)
+      rem = size % SIZE_OF_INT
+    }
+    if const words = rem / SIZE_OF_WORD {
+      assert words == 1
+      this.copyWord(dst, src, r11)
+      rem = size % SIZE_OF_WORD
+    }
+    if rem {
+      assert rem == 1
+      this.copyByte(dst, src, r11)
+    }  }
+
+  fn copyYmmWords(this, dst, src, ymm5, ymmwords) {
+    for var i = 0; i < ymmwords; ++i {
+      //  vmovdqu ymm5, ymmword [src + offset]
+      //  vmovdqu ymmword [dst + offset], ymm5
+      this.emit.vmovqqu(ymm5, src)
+      this.emit.vmovqqu(dst, ymm5)
+      dst.reg.addDisplacement(SIZE_OF_YMM)
+      src.reg.addDisplacement(SIZE_OF_YMM)
+    }
+  }
+
+  fn copyXmmWord(this, dst, src, xmm5) {
+    //  vmovdqu xmm5, xmmword [src + offset]
+    //  vmovdqu xmmword [dst + offset], xmm5
+    this.emit.vmovdqu(xmm5, src)
+    this.emit.vmovdqu(dst, xmm5)
+    dst.reg.addDisplacement(SIZE_OF_XMM)
+    src.reg.addDisplacement(SIZE_OF_XMM)
+  }
+
+  fn copyQWord(this, dst, src, r11) {
+    //  mov r11, qword [src + offset]
+    //  mov qword [dst + offset], r11
+    this.emit.movq(r11, src)
+    this.emit.movq(dst, r11)
+    dst.reg.addDisplacement(SIZE_OF_POINTER)
+    src.reg.addDisplacement(SIZE_OF_POINTER)
+  }
+
+  fn copyDWord(this, dst, src, r11d) {
+    //  mov r11d, dword [src + offset]
+    //  mov dword [dst + offset], r11d
+    this.emit.movl(r11d, src)
+    this.emit.movl(dst, r11d)
+    dst.reg.addDisplacement(SIZE_OF_INT)
+    src.reg.addDisplacement(SIZE_OF_INT)
+  }
+
+  fn copyWord(this, dst, src, r11w) {
+    //  mov r11w, word [src + offset]
+    //  mov word [dst + offset], r11w
+    this.emit.movw(r11w, src)
+    this.emit.movw(dst, r11w)
+    dst.reg.addDisplacement(SIZE_OF_WORD)
+    src.reg.addDisplacement(SIZE_OF_WORD)
+  }
+
+  fn copyByte(this, dst, src, r11b) {
+    //  mov r11b, byte [src + offset]
+    //  mov byte [dst + offset], r11b
+    this.emit.movb(r11b, src)
+    this.emit.movb(dst, r11b)
+  }
+
+  fn emitGreaterThanMemCopy(this, dst, src, size) {
+    const ecx = Reg.ofReg(ssa.tyInt32, gprs.rcx)
+    //  lea rdi, qword [dst]
+    const rdi = Reg{ type = dst.type, node = dst.node, reg = gprs.rdi }
+    this.emit.lea(rdi, dst)
+    //  lea rsi, qword [src]
+    const rsi = Reg{ type = dst.type, node = src.node, reg = gprs.rsi }
+    this.emit.lea(rsi, dst)
+    //  cld ; Clear the direction flag so that rdi and rsi are incremented
+    this.emit.cld()
+    var rem = size
+    //  ; qwords ⟵ rem / SIZE_OF_POINTER
+    //  ;    rem ⟵ rem % SIZE_OF_POINTER
+    if const qwords = rem / SIZE_OF_POINTER {
+      //  mov ecx, {qwords}
+      this.emit.movl(ecx, Reg.ofImmediate(ecx.type, qwords))
+      //  repnz movsq
+      this.emit.movsq(repeatUntilZero = true)
+      rem %= SIZE_OF_POINTER
+    }
+    //  ; dwords ⟵ rem / SIZE_OF_INT
+    //  ;    rem ⟵ rem % SIZE_OF_INT
+    if const dwords = rem / SIZE_OF_INT {
+      assert dwords == 1
+      //  movsl
+      this.emit.movsl(repeatUntilZero = false)
+      rem %= SIZE_OF_INT
+    }
+    //  ; words ⟵ rem / SIZE_OF_WORD
+    //  ;   rem ⟵ rem % SIZE_OF_WORD
+    if const words = rem / SIZE_OF_WORD {
+      assert words == 1
+      //  movsw
+      this.emit.movsw(repeatUntilZero = false)
+      rem %= SIZE_OF_WORD
+    }
+    //  ; bytes ⟵ rem
+    if const bytes = rem {
+      assert bytes == 1
+      //  movsw
+      this.emit.movsb(repeatUntilZero = false)
+    }
+  }
+
+  //―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+  fn emitImmediateToMemoryStore(this, dst, src) {
+    const      type = dst.type
+    const immediate = src.immediate
+    const      size = type.size()
+    if type.isaDouble() {
+      //  movabs r11, imm64
+      //  vmovq qword [dst], r11
+      const r11 = Reg{ type = dst.type, reg = gprs.r11 }
+      this.emit.movabs(r11, src.immediate.u64)
+      this.emit.vmovq(dst, r11)
+    } else if type.isaFloat() {
+      //  mov r11d, imm32
+      //  vmovd dword [dst], r11d
+      const r11 = Reg{ type = dst.type, reg = gprs.r11 }
+      this.emit.movl(r11, src)
+      this.emit.vmovd(dst, r11)
+    } else if src.reg.isNotValid() {
+      //  movabs r11, imm64
+      //  mov qword [dst], r11
+      const r11 = Reg{ type = dst.type, reg = gprs.r11 }
+      this.emit.movabs(r11, src.immediate.u64)
+      this.emit.mov(dst, r11)
+    } else switch size {
+      case SIZE_OF_BYTE, SIZE_OF_WORD, SIZE_OF_INT, SIZE_OF_POINTER this.emit.mov(dst, src)
+      default assert with "#{size}"
+    }
+  }
+
+  fn emitZeroMemory(this, dst) {
+    const type = dst.type
+    const size = type.size()
+    switch size {
+      case SIZE_OF_BYTE {
+        const zero = Reg.ofZero(type)
+        this.emit.movb(dst, zero)
+        return
+      }
+      case SIZE_OF_WORD {
+        const zero = Reg.ofZero(type)
+        this.emit.movw(dst, zero)
+        return
+      }
+      case SIZE_OF_INT {
+        //  mov dword [dst], 0
+        const zero = Reg.ofZero(ssa.tyInt32)
+        this.emit.movl(dst, zero)
+        return
+      }
+      case SIZE_OF_POINTER {
+        //  mov qword [dst], 0
+        const zero = Reg.ofZero(ssa.tyInt64)
+        this.emit.movq(dst, zero)
+        return
+      }
+      case SIZE_OF_XMM {
+        //  vpxor xmm5, xmm5
+        //  vmov xmmword [dst], xmm5
+        const xmm5 = Reg{ type = dst.type, reg = xmms.xmm5 }
+        this.emit.vxordq(xmm5, xmm5, xmm5)
+        this.emit.vmovdqu(dst, xmm5)
+        return
+      }
+      case SIZE_OF_YMM {
+        //  vpxor ymm5, ymm5
+        //  vmov ymmword [dst], ymm5
+        const ymm5 = Reg{ type = dst.type, reg = xmms.xmm5 }
+        this.emit.vxorqq(ymm5, ymm5, ymm5)
+        this.emit.vmovqqu(dst, ymm5)
+        return
+      }
+    }
+    if size <= MIN_MEMCOPY_BYTES {
+      this.emitLessThanMaxZeroMemory(dst, size)
+    } else {
+      this.emitGreaterThanMaxZeroMemory(dst, size)
+    }
+  }
+
+  fn emitLessThanMaxZeroMemory(this, dst, size) {
+    var    rem = size
+    const zero = Reg.ofImmediate(dst.type, 0)
+    const xmm5 = Reg.ofReg(dst.type, xmms.xmm5)
+    if rem >= SIZE_OF_YMM {
+      this.emit.vxordq(xmm5, xmm5, xmm5)
+    } else if rem >= SIZE_OF_XMM {
+      this.emit.vxorqq(xmm5, xmm5, xmm5)
+    }
+    if const ymmWords = rem / SIZE_OF_YMM {
+      this.zeroYmmWords(dst, xmm5, ymmWords)
+      rem = size % SIZE_OF_YMM
+    }
+    if const xmmwords = rem / SIZE_OF_XMM {
+      assert xmmwords == 1
+      this.zeroXmmWord(dst, xmm5)
+      rem = size % SIZE_OF_XMM
+    }
+    if const qwords = rem / SIZE_OF_POINTER {
+      assert qwords == 1
+      this.zeroQWord(dst, zero)
+      rem = size % SIZE_OF_POINTER
+    }
+    if const dwords = rem / SIZE_OF_INT {
+      assert dwords == 1
+      this.zeroDWord(dst, zero)
+      rem = size % SIZE_OF_INT
+    }
+    if const words = rem / SIZE_OF_WORD {
+      assert words == 1
+      this.zeroWord(dst, zero)
+      rem = size % SIZE_OF_WORD
+    }
+    if rem {
+      assert rem == 1
+      this.zeroByte(dst, zero)
+    }
+  }
+
+  fn zeroYmmWords(this, dst, ymm5, ymmwords) {
+    for var i = 0; i < ymmwords; ++i {
+      //  vmovdqu ymmword [dst + offset], ymm5
+      this.emit.vmovqqu(dst, ymm5)
+      dst.reg.addDisplacement(SIZE_OF_YMM)
+    }
+  }
+
+  fn zeroXmmWord(this, dst, xmm5) {
+    //  vmovdqu xmmword [dst + offset], xmm5
+    this.emit.vmovdqu(dst, xmm5)
+    dst.reg.addDisplacement(SIZE_OF_XMM)
+  }
+
+  fn zeroQWord(this, dst, zero) {
+    //  mov qword [dst + offset], 0
+    this.emit.movq(dst, zero)
+    dst.reg.addDisplacement(SIZE_OF_POINTER)
+  }
+
+  fn zeroDWord(this, dst, zero) {
+    //  mov dword [dst + offset], 0
+    this.emit.movl(dst, zero)
+    dst.reg.addDisplacement(SIZE_OF_INT)
+  }
+
+  fn zeroWord(this, dst, zero) {
+    //  mov word [dst + offset], 0
+    this.emit.movw(dst, zero)
+    dst.reg.addDisplacement(SIZE_OF_WORD)
+  }
+
+  fn zeroByte(this, dst, zero) {
+    //  mov byte [dst + offset], 0
+    this.emit.movb(dst, zero)
+  }
+
+  fn emitGreaterThanMaxZeroMemory(this, dst, size) {
+    const ecx = Reg.ofReg(ssa.tyInt32, gprs.rcx)
+    //  xor rax, rax
+    const rax = Reg.ofReg(dst.type, gprs.rax)
+    this.emit.xorq(rax, rax)
+    //  lea rdi, qword [dst]
+    const rdi = Reg{ type = dst.type, node = dst.node, reg = gprs.rdi }
+    this.emit.lea(rdi, dst)
+    //  cld ; Clear the direction flag so that rdi and rsi are incremented
+    this.emit.cld()
+    var rem = size
+    //  ; qwords ⟵ rem / SIZE_OF_POINTER
+    //  ;    rem ⟵ rem % SIZE_OF_POINTER
+    if const qwords = rem / SIZE_OF_POINTER {
+      //  mov ecx, {qwords}
+      this.emit.movl(ecx, Reg.ofImmediate(ecx.type, qwords))
+      //  repnz stosq
+      this.emit.stosq(repeatUntilZero = true)
+      rem %= SIZE_OF_POINTER
+    }
+    //  ; dwords ⟵ rem / SIZE_OF_INT
+    //  ;    rem ⟵ rem % SIZE_OF_INT
+    if const dwords = rem / SIZE_OF_INT {
+      assert dwords == 1
+      //  stosl
+      this.emit.stosl(repeatUntilZero = false)
+      rem %= SIZE_OF_INT
+    }
+    //  ; words ⟵ rem / SIZE_OF_WORD
+    //  ;   rem ⟵ rem % SIZE_OF_WORD
+    if const words = rem / SIZE_OF_WORD {
+      assert words == 1
+      //  stosw
+      this.emit.stosw(repeatUntilZero = false)
+      rem %= SIZE_OF_WORD
+    }
+    //  ; bytes ⟵ rem
+    if const bytes = rem {
+      assert bytes == 1
+      //  stosb
+      this.emit.stosb(repeatUntilZero = false)
+    }
+  }
+
+  //―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+  fn emitRegisterStore(this, dst, src, reason) {
+    assert dst.type == src.type
+    assert dst.reg.isaRegister()
+    if const immediate = src.immediate {
+      if dst.type.isaDouble() {
+        if immediate.u64 {
+          //  movabs r11, imm64
+          //  vmovq xmm64, r11
+          const r11 = Reg{ type = dst.type, reg = gprs.r11 }
+          this.emit.movabs(r11, src.immediate.u64)
+          this.emit.vmovq(dst, r11)
+        } else {
+          //  vxorpd xmm128, xmm128
+          this.emit.vxorpd(dst, dst, dst)
+        }
+      } else if dst.type.isaFloat() {
+        if immediate.u64 {
+          if src.reg.isNotValid() {
+            src.reg.setImmediate(immediate.i32)
+          }
+          //  mov r11, imm32
+          //  vmovd xmm32, r11
+          const r11 = Reg{ type = dst.type, reg = gprs.r11 }
+          this.emit.movl(r11, src)
+          this.emit.vmovd(dst, r11)
+        } else {
+          //  vxorps xmm128, xmm128
+          this.emit.vxorps(dst, dst, dst)
+        }
+      } else if src.reg.isNotValid() {
+        //  movabs gpr64, imm64
+        this.emit.movabs(dst, src.immediate.u64)
+      } else if immediate.u64 {
+        //  mov gpr8/16/32/64, imm8/16/32
+        this.emit.mov(dst, src)
+      } else if reason {
+        //  mov gpr8/16/32/64, 0
+        this.emit.mov(dst, src)
+      } else {
+        //  xor gpr8/16/32/64, gpr8/16/32/64
+        this.emit.xor(dst, dst, dst)
+      }
+    } else if const elem = src.isMemory() {
+      if elem.baseNode() is ssa.CodeSection {
+        //  lea gpr, [mem]
+        this.emit.lea(dst, src)
+      } else {
+        //  mov gpr/xmm, [mem]
+        this.emit.mov(dst, src)
+      }
+    } else {
+      //  mov gpr/xmm, gpr/xmm
+      this.emit.mov(dst, src)
+    }
+  }
+}

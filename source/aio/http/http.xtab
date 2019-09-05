@@ -1,0 +1,347 @@
+export Url from std.uri
+import Folders from _folders
+
+//-----------------------------------------------------------------------------------------------------
+define DEFAULT_SEND_RECV_TIMEOUT 0x1000 // Milliseconds.
+
+//-----------------------------------------------------------------------------------------------------
+define MAX_REQUEST_LINE_LENGTH                  0x1000 /* 4 KB */
+define MAX_HEADERS_LENGTH                       0x2000 /* 8 KB */
+
+//-----------------------------------------------------------------------------------------------------
+define UNKNOWN_STATUS                           000i16
+define STATUS_MORE_DATA                         001i16
+define STATUS_CONNECTION_CLOSED                 002i16
+
+define STATUS_OK                                200i16
+
+define STATUS_NOT_MODIFIED                      304i16
+
+define STATUS_BAD_REQUEST                       400i16
+define STATUS_FORBIDDEN                         403i16
+define STATUS_NOT_FOUND                         404i16
+define STATUS_PRECONDITION_FAILED               412i16
+define STATUS_URI_TOO_LONG                      414i16
+define STATUS_UNSUPPORTED_MEDIA_TYPE            415i16
+define STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE   431i16
+
+define STATUS_INTERNAL_SERVER_ERROR             500i16
+define STATUS_NOT_IMPLEMENTED                   501i16
+define STATUS_HTTP_VERSION_NOT_SUPPORTED        505i16
+
+//-----------------------------------------------------------------------------------------------------
+struct Header {
+  readonly name = String{}
+  readonly value = String{}
+
+  fn dispose(this) {
+    delete this.name
+    delete this.value
+  }
+
+  fn format(this, s, fmt = "") {
+    s.append(this.name).append(": ").append(this.value)
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Headers {
+  readonly list = List(Header*){}
+
+  fn dispose(this) {
+    delete this.list with fn(x) = delete x
+  }
+
+  fn format(this, s, fmt = "") {
+    for var i = 0; i < this.list.length; ++i {
+      s.append("\r\n") if i
+      this.list[i].format(s)
+    }
+  }
+
+  fn find(this, name) {
+    for header in this.list {
+      return header if header.name == name
+    }
+    return null
+  }
+
+  fn [](this, name) {
+    assert name.length    
+    for header in this.list {
+      return header if header.name == name
+    }
+    const header = this.list.append(new Header{})
+    header.name.append(name)
+    return header
+  }
+
+  fn contains(this, name) {
+    for header in this.list {
+      return header if header.name == name
+    }
+    return null
+  }
+
+  fn append(this, name, value) {
+    assert name.length
+    const header = this.list.append(new Header{})
+    header.name.appendTitleCase(name)
+    header.value.append(value)
+    return header
+  }
+
+  fn iterator(this) {
+    return this.list.iterator()
+  }
+
+  fn contentType(this) {
+    if const header = this.contains("Content-Type") {
+      return &header.value
+    }
+    return null
+  }
+
+  fn contentLength(this) {
+    if const header = this.contains("Content-Length") {
+      return &header.value
+    }
+    return null
+  }
+
+  fn transferEncoding(this) {
+    if const header = this.contains("Transfer-Encoding") {
+      return &header.value
+    }
+    return null
+  }
+
+  fn contentEncoding(this) {
+    if const header = this.contains("Content-Encoding") {
+      return &header.value
+    }
+    return null
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Request {
+  readonly folders = Folders*{}
+  readonly url = Url{}
+  readonly method = String{}
+  readonly version = String{}
+  readonly headers = Headers{}
+  readonly parseStatus = UNKNOWN_STATUS
+  readonly hasDrained = false
+
+  fn dispose(this) {
+    delete this.url
+    delete this.method
+    delete this.version
+    delete this.headers
+    this.parseStatus = UNKNOWN_STATUS
+    this.hasDrained = false
+  }
+
+  fn hasParseError(this) = this.parseStatus != STATUS_OK
+
+  fn setParseStatus(this, status) {
+    this.parseStatus = status
+  }
+
+  fn setMethod(this, methodName) {
+    assert this.method.isEmpty()
+    this.method.appendUpperCase(methodName)
+    return true
+  }
+
+  fn setUrlEncodedUrl(this, urlEncodedBuffer) {
+    import parseUrl from std.uri
+    assert this.url.raw.isEmpty()
+    delete this.url
+    var ok = false
+    (this.url, ok) = parseUrl(urlEncodedBuffer)
+    return ok
+  }
+
+  fn setVersion(this, versionName) {
+    assert this.version.isEmpty()
+    this.version.appendUpperCase(versionName)
+    return true
+  }
+
+  fn appendHeader(this, name, value) {
+    const header = this.headers.append(name, value)
+    return header
+  }
+
+  fn form(this, stream) {
+    import _body
+    assert !this.hasDrained
+    this.hasDrained = true
+    return _body.form(this, stream)
+  }
+
+  fn multipart(this, stream) {
+    import _body
+    assert !this.hasDrained
+    this.hasDrained = true
+    return _body.multipart(this, stream)
+  }
+
+  fn drain(this, stream) {
+    import _body
+    if !this.hasDrained {
+      this.hasDrained = true
+      return _body.drain(this.headers, stream)
+    }
+    return null
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+struct Response {
+  readonly folders = Folders*{}
+  readonly version = String{}
+  readonly phrase = String{}
+  readonly headers = Headers{}
+  readonly status = UNKNOWN_STATUS
+  readonly parseStatus = UNKNOWN_STATUS
+
+  fn dispose(this) {
+    delete this.version
+    delete this.phrase
+    delete this.headers
+    this.status = UNKNOWN_STATUS
+    this.parseStatus = UNKNOWN_STATUS
+  }
+
+  fn setParseStatus(this, status) {
+    this.parseStatus = status
+  }
+
+  fn setStatus(this, status) {
+    assert this.status == UNKNOWN_STATUS
+    this.status = status
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+async fn serve(port, dispatcher, maxConnections = 32) {
+  import ip from aio
+  import Socket from net
+  import Router from _router
+
+  async fn listen(server, address) {
+    import Synchronized from std.collections.queue
+    const refs    = 0
+    const sockets = Synchronized(Socket){} 
+    auto  socket  = Socket.open(address.family())
+    if socket.listen(address) {
+      println("Serving '#{server.folders.public}' from #{address} @ #{socket} with \
+               maxConnections = #{server.maxConnections}")
+      aio.run(accept(self))
+      await
+    } else {
+      println("Failed to serve '#{server.folders.public}' from #{address} @ #{socket} with \
+               maxConnections = #{server.maxConnections}")
+    }
+    socket.close()
+    sockets.srw.lock()
+    each s in sockets.iterator() {
+      s.close()
+    }
+    sockets.srw.unlock()
+    for refs > 0 {
+      atomic.pause()
+    }
+    assert refs == 0 && sockets.isEmpty() with "refs = #{refs}; sockets.isEmpty() = #{sockets.isEmpty()}"
+  }
+
+  async auto fn accept(listener) {
+    atomic.increment(&listener.refs)
+    defer atomic.decrement(&listener.refs)
+
+    atomic.increment(&listener.server.refs)
+    defer atomic.decrement(&listener.server.refs)
+
+    auto socket = Socket.open(listener.address.family())
+    defer socket.close()
+
+    if listener.socket.isOpen() {
+      //println("Accepting on #{socket}")
+      auto acceptor = socket.accept(listener.socket)
+      if await acceptor {
+        import requests from _incoming.headers
+        aio.run(accept(listener))
+        listener.sockets.append(socket)
+        auto buffer     = String{}
+        auto byteStream = socket.receive(buffer)
+        auto request    = Request{ folders  = &listener.server.folders }
+        auto response   = Response{ folders = &listener.server.folders }
+        auto dispatcher = listener.server.dispatcher(self, byteStream, request, response)
+        auto requestStream = requests(byteStream, request, response)
+        await each status in requestStream {
+          request.setParseStatus(status)
+          const (ok, done) = await dispatcher
+          break if !ok || done || listener.socket.isClosed()
+        }
+        listener.sockets.remove(socket)
+      } 
+    }
+  }
+  auto router = Router{}
+  auto folders = Folders{}
+  auto addresses = List(ip.Address){}
+  var listeners = List(Resumable((Void*, Bool))*){}
+  var refs = 0
+  folders.initialize()
+  {
+    each adpater in auto ip.enumerateAdapterAddresses() {
+      continue if !adpater.isUpStatus()
+      each address in auto adpater.unicastAddresses() {
+        addresses.append(*address)
+      }
+    }
+  }
+  if addresses.isEmpty() {
+    println("Cannot start services on host machine because no ip addresses were found")
+  } each address in addresses.iterator() {
+    address.setPort(port)
+    var listener = listen(self, address)
+    listeners.append(listener as Resumable((Void*, Bool))*)
+    aio.run(listener)
+  }
+  await
+  each listener in listeners.iterator() {
+    listener.next()
+  } for refs > 0 {
+    atomic.pause()
+  }
+  assert refs == 0
+  delete listeners with fn(x) = delete x
+}
+
+//-----------------------------------------------------------------------------------------------------
+import _outgoing
+
+fn sendTextResponse(connection, request, response, content, contentType) {
+  return _outgoing.sendTextResponse(connection.socket, request, response, content, contentType)
+}
+
+fn sendAwaitableResponse(connection, request, response, content, contentType) {
+  return _outgoing.sendAwaitableResponse(connection.socket, request, response, content, contentType)
+}
+
+fn sendFileResponse(connection, request, response, content) {
+  return _outgoing.sendFileResponse(connection.socket, request, response, content)
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn isaNonStandardStatus(status)    = status < 100 || status >= 600
+fn isanInformationalStatus(status) = status >= 100 && status < 200
+fn isaSuccessStatus(status)        = status >= 200 && status < 300
+fn isaRedirectStatus(status)       = status >= 300 && status < 400
+fn isanErrorStatus(status)         = status >= 400 && status < 600
+  fn isaClientErrorStatus(status)  = status >= 400 && status < 500
+  fn isaServerErrorStatus(status)  = status >= 500 && status < 600

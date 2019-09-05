@@ -1,0 +1,75 @@
+struct BarGroup {
+  const name = String{}
+  var   range = { start = 0, count = 0 }
+
+  fn dispose(this) {
+    delete this.name
+  }
+
+  fn computeSize(this, axis) {
+    const szText = computeTextSize(this.name)
+    var width = 0f
+    var height = 0f
+    if axis.show.verticalLabels {
+      width  = CHAR_BOX_HEIGHT
+      height = szText.width
+    } else {
+      width  = szText.width
+      height = CHAR_BOX_HEIGHT
+    }
+    return Size{ width = width, height = height }
+  }
+}
+
+struct BarChart : Chart {
+  const seriesY = List(Series*){}
+  const seriesX = Series*{}
+  const groups = List(BarGroup){}
+  const axisGroups = Axis*{}
+
+
+  fn dispose(this) {
+    delete this.seriesY
+    delete this.groups with fn(x) = delete x
+    super.dispose()
+  }
+
+
+  fn addBarGroup(this, name, startOfLabelsRange) {
+    const group = this.groups.appendOne()
+    group.name.append(name)
+    group.range.start = startOfLabelsRange
+    return group
+  }
+
+
+  fn createAxes(this, area) {
+    assert this.seriesX && this.groups.length && this.seriesY.length
+    if const axis = this.axisX {
+      assert 0
+    } else {
+      this.axisX = area.getAxis(Orientation.Horizontal, Location.Bottom, Type.Text)
+    }
+
+    if const axis = this.axisY {
+      assert 0
+    } else {
+      this.axisY = area.getAxis(Orientation.Vertical, Location.Left, this.seriesY.first().type())
+    }
+  }
+
+
+  fn computeSize(this, size) {
+    this.axisY.computeSize(this.axisX, this.seriesY, size)
+    println("axis: #{this.axisY.range.min.i64} -- #{this.axisY.range.max.i64}")
+    println("computed: #{this.axisY.computed.min.f64} -- #{this.axisY.computed.max.f64}")
+    this.axisX.computeSize(this.axisY, [ this.seriesX ], size)
+    size.center = size.center.max(MIN_CHART_SIZE, MIN_CHART_SIZE)
+  }
+
+
+  html render(this, s, rect, center) {
+    #{ }
+    <text>fasdfasdf</text>
+  }
+}

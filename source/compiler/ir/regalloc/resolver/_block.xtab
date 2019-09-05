@@ -1,0 +1,273 @@
+struct Block {
+  const        block = ssa.Block*{}
+  const     resolver = Resolver&{}
+  const predecessors = Predecessors{}
+  const   successors = Successors{}
+  const      liveins = List(UseRange*){}
+  const     liveouts = List(UseRange*){}
+  const      bundles = List(Bundle){}
+  const         phis = { first = Definition*{},   last = Definition*{} }
+  const         span = {   top = Definition*{}, bottom = Definition*{} }
+
+
+  fn dispose(this) {
+    delete this.predecessors
+    delete this.successors
+    delete this.bundles with fn(x) = delete x
+    delete this.liveins
+    delete this.liveouts
+  }
+
+
+  fn ==(this, other) = this.block == other.block
+  fn !=(this, other) = this.block != other.block
+
+
+  fn numberOfPredecessors(this) = this.predecessors.list.length
+  fn numberOfSuccessors(this)   = this.successors.list.length
+
+
+  fn setup(this, defs) {
+    each value in this.block.values() {
+      switch value {
+        case ssa.Phi {
+          if !this.phis.first {
+            this.phis.first = defs.items[value.index]
+          }
+          this.phis.last = defs.items[value.index]
+        }
+        default break
+      }
+    }
+    this.predecessors = Predecessors{ owner = this }
+      this.successors = Successors{ owner = this }
+       this.span.top = defs.items[this.block.body.first.index]
+    this.span.bottom = defs.items[this.block.body.last.index]
+  }
+
+
+  fn appendMove(this, dst, src, pos) {
+    import  MidBundle from _mid
+    import EdgeBundle from _edge
+    const bundle = this.bundleAt(pos)
+    if this.isMidPos(pos) {
+      const mid = MidBundle{ bundle = bundle }
+      mid.append(dst, src)
+    } else {
+      const edge = EdgeBundle{ bundle = bundle }
+      edge.append(dst, src)
+    }
+  }
+
+
+  fn ensureLiveIns(this) {
+    import EdgeBundle from _edge
+    for livein in this.liveins {
+      const      def = livein.owner
+      const variable = this.resolver.variables.items[def.value.index]
+      for predecessor in this.predecessors.list {
+        const  inpred = variable.lifetimes.items[predecessor.block.index]
+        const liveout = inpred.end
+        continue if !liveout // Dead at bottom of {predecessor}.
+        if liveout.slot != livein.slot {
+          const bundle = predecessor.bottom()
+          const   edge = EdgeBundle{ bundle = bundle }
+          edge.append(livein, liveout)
+        }
+      }
+    }
+  }
+
+
+  fn ensureLiveOuts(this) {
+    import PairedBundles from _pair
+    return if this.successors.list.isEmpty()
+    const bottom = this.bottom()
+    for liveout in this.liveouts {
+      const       def = liveout.owner
+      const lifetimes = this.resolver.variables.items[def.value.index].lifetimes
+      for var i = 0; i < this.successors.list.length; ++i {
+        const successor = this.successors.list.items[i]
+        const    insucc = lifetimes.items[successor.block.index]
+        continue if !insucc.start // Dead at top of {successor}.
+        const top = successor.top()
+        const pair = PairedBundles{ bottomOfPredecessor = bottom, topOfSuccessor = top }
+        if pair.ensure(def) {
+          i = 0
+        }
+      }
+    }
+  }
+
+
+  fn bundleAt(this, pos) {
+    if this.bundles.isEmpty() {
+      return this.bundles.append(Bundle{ pos = pos, parent = this })
+    }
+    for var i = 0; i < this.bundles.length; ++i {
+      const bundle = this.bundles.items[i]
+      if pos < bundle.pos {
+        return this.bundles.insert(i, Bundle{ pos = pos, parent = this })
+      }
+      return bundle if bundle.pos == pos
+    }
+    return this.bundles.append(Bundle{ pos = pos, parent = this })
+  }
+
+
+  fn top(this) {
+    const pos = this.span.top
+    if this.bundles.isEmpty() {
+      return this.bundles.append(Bundle{ pos = pos, parent = this })
+    }
+    const first = this.bundles.first()
+    return first if first.pos == pos
+    assert pos < first.pos
+    return this.bundles.prepend(Bundle{ pos = pos, parent = this })
+  }
+
+
+  fn nopBeforeBottom(this) {
+    const bottom = this.span.bottom
+    const    nop = bottom.qprev
+    assert nop && (nop.value is ssa.Value)
+    if this.bundles.isEmpty() {
+      return this.bundles.append(Bundle{ pos = nop, parent = this })
+    }
+    const last = this.bundles.last()
+    return last if last.pos == nop
+    if last.pos == bottom {
+      if this.bundles.length > 1 {
+        const prev = this.bundles.items[this.bundles.length - 2]
+        return prev if prev.pos == nop
+      }
+      return this.bundles.insert(this.bundles.length - 1, Bundle{ pos = nop, parent = this })
+    }
+    assert nop > last.pos
+    return this.bundles.append(Bundle{ pos = nop, parent = this })
+  }
+
+
+  fn bottom(this) {
+    const pos = this.span.bottom
+    if this.bundles.isEmpty() {
+      return this.bundles.append(Bundle{ pos = pos, parent = this })
+    }
+    const last = this.bundles.last()
+    return last if last.pos == pos
+    assert pos > last.pos
+    return this.bundles.append(Bundle{ pos = pos, parent = this })
+  }
+
+
+  fn hasTop(this) {
+    if this.bundles.length {
+      const first = this.bundles.items[0]
+      if first.pos == this.span.top {
+        return &first
+      }
+    }
+    return null
+  }
+
+
+  fn hasBottom(this) {
+    if this.bundles.length {
+      const last = this.bundles.items[this.bundles.length - 1]
+      if last.pos == this.span.bottom {
+        return &last
+      }
+    }
+    return null
+  }
+
+
+  fn isMidPos(this, pos) {
+    assert pos >= this.span.top && pos <= this.span.bottom
+    return pos > this.span.top && pos < this.span.bottom
+  }
+
+
+  fn findLiveOutClobberedBy(this, dst) {
+    assert dst.slot
+    const def = dst.owner
+    for liveout in this.liveouts {
+      continue if !liveout.slot
+      return liveout if liveout.slot == dst.slot 
+    }
+    return null
+  }
+}
+
+
+struct WhereIs {
+  enum Kind { None, Spill, Register, Mixed }
+  var slot = Slot*{}
+  var kind = Kind{}
+
+  fn ==(this, other) = this.slot == other.slot && this.kind == other.kind
+  fn !=(this, other) = this.slot != other.slot || this.kind != other.kind
+  fn isNotValid(this) = !this.kind
+}
+
+
+abstract struct BlockList {
+  const  list = List(Block*){}
+  const owner = Block*{}
+
+
+  fn dispose(this) {
+    delete this.list
+  }
+
+
+  fn append(this, block) {
+    this.list.append(block)
+  }
+}
+
+struct Predecessors : BlockList {
+}
+
+
+struct Successors : BlockList {
+  fn whereis(this, def) {
+    const     block = this.owner
+    const lifetimes = block.resolver.variables.items[def.value.index].lifetimes
+    var       found = WhereIs{}
+    for successor in this.list {
+      const lifetime = lifetimes.items[successor.block.index]
+      const  livein  = lifetime.start
+      continue if !livein
+      if const top = successor.hasTop() {
+        const  tmp = top.whereisLiveInOf(def)
+        if found.isNotValid() {
+          if tmp.isNotValid() {
+            found.slot = livein.slot
+            found.kind = (WhereIs.Kind.Register if livein.slot else WhereIs.Kind.Spill)
+          } else {
+            found = tmp
+          }
+        } else if found != tmp {
+          found.slot = null
+          found.kind = WhereIs.Kind.Mixed
+          break
+        }
+      } else if found.isNotValid() {
+        found.slot = livein.slot
+        found.kind = (WhereIs.Kind.Register if livein.slot else WhereIs.Kind.Spill)
+      } else {
+        const tmp = WhereIs {
+          slot = livein.slot,
+          kind = (WhereIs.Kind.Register if livein.slot else WhereIs.Kind.Spill)
+        }
+        if found != tmp {
+          found.slot = null
+          found.kind = WhereIs.Kind.Mixed
+          break
+        }
+      }
+    }
+    return found
+  }
+}

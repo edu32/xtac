@@ -1,0 +1,260 @@
+struct List(T) {
+  readonly items    = T*{}
+  readonly length   = 0
+  readonly capacity = 0
+
+
+  fn dispose(this) {
+    import mfree from memory
+    this.items = mfree(this.items)
+    this.length = 0
+    this.capacity = 0
+  }
+
+
+  fn disposeWith(this, disposer) {
+    if !disposer {
+      disposer = disposer{ &*this.items }
+    }
+    for var i = 0; i < this.length; ++i {
+      disposer(this.items[i])
+    }
+    this.dispose()
+  }
+
+
+  fn clear(this): this {
+    this.length = 0
+  }
+
+
+  fn clearWith(this, disposer) {
+    if !disposer {
+      disposer = disposer{ &*this.items }
+    }
+    for var i = 0; i < this.length; ++i {
+      disposer(this.items[i])
+    }
+    return this.clear()
+  }
+
+
+  fn format(this, s, fmt = "") {
+    s.append("[")
+    for var i = 0; i < this.length; ++i {
+      s.append(", ") if i
+      this.items[i].format(s)
+    }
+    s.append("]")
+  }
+
+
+  fn setLength(this, newLength) {
+    assert newLength >= 0
+    const extra = newLength - this.length
+    if extra > 0 {
+      this.reserve(extra)
+    }
+    this.length = newLength
+    return this
+  }
+
+
+  fn setLengthWith(this, newLength, disposer) {
+    assert newLength >= 0
+    if newLength < this.length {
+      if !disposer {
+        disposer = disposer{ &*this.items }
+      }
+      for var i = newLength; i < this.length; ++i {
+        disposer(this.items[i])
+      }
+      this.length = newLength
+      return this
+    }
+    return this.setLength(newLength)
+  }
+
+
+  fn isEmpty(this)    = this.length == 0
+  fn isNotEmpty(this) = this.length > 0
+
+
+  fn first(this) {
+    assert this.length > 0
+    return &*this.items[0]
+  }
+
+
+  fn last(this) {
+    assert this.length > 0
+    return &*this.items[this.length - 1]
+  }
+
+
+  fn begin(this) = this.items
+  fn end(this)   = this.items + this.length
+
+
+  fn [](this, index) {
+    assert index >= 0 && index < this.length with "Index #{index} out of bounds: 0 - #{this.length - 1}"
+    return &*this.items[index]
+  }
+
+
+  fn iterator(this) {
+    return {
+      pos  = this.items,
+      end  = this.items + this.length,
+      next = fn(self) {
+        assert self.pos <= self.end
+        if self.pos < self.end {
+          return (*&self.pos++, false)
+        }
+        return (T&{}, true)
+      }
+    }
+  }
+
+
+  fn reserve(this, length) {
+    import malloc from memory
+    assert length >= 0 with "Invalid length: #{length}"
+    const cap = this.length + length
+    return this if cap <= this.capacity
+    if !this.capacity {
+      this.capacity = math.max(cap, 4)
+    } else for this.capacity < cap {
+      this.capacity <<= 1
+    }
+    /*import mblock from memory
+    this.items = malloc(this.items, sizeof(T) * this.capacity)
+    assert mblock(this.items).id != 2724725*/
+    this.items = malloc(this.items, sizeof(T) * this.capacity)
+    return this
+  }
+
+
+  fn appendOne(this) {
+    this.reserve(1)
+    return this.items[this.length++]
+  }
+
+
+  fn append(this, item) {
+    this.reserve(1)
+    this.items[this.length] = item
+    return this.items[this.length++]
+  }
+
+
+  fn appendRange(this, items, length) {
+    if length {
+      this.reserve(length)
+      os.memcpy(this.items + this.length, items, sizeof(T) * length)
+      this.length += length
+    }
+  }
+
+
+  fn prepend(this, item) {
+    return this.insert(0, item)
+  }
+
+
+  fn insert(this, index, item) {
+    import mmove from memory
+    if index == this.length {
+      return append(this, item)
+    }
+    assert index >= 0
+    this.reserve(1)
+    const dst = index + 1
+    mmove(this.items + dst, this.items + index, sizeof(T) * (this.length - index))
+    this.items[index] = item
+    ++this.length
+    return this.items[index]
+  }
+
+
+  fn removeAt(this, index) {
+    import mcopy from memory
+    assert index >= 0 && index < this.length
+    const removed = this.items[index]
+    const    next = index + 1
+    if next < this.length {
+      mcopy(this.items + index, this.items + next, sizeof(T) * (this.length - next))
+    }
+    --this.length
+    return removed
+  }
+
+
+  fn removeFirst(this) {
+    return this.removeAt(0)
+  }
+
+
+  fn removeLast(this) {
+    return this.removeAt(this.length - 1)
+  }
+
+
+  fn sort(this, sorter) {
+    return if this.length < 2
+    sorter = sorter{ *this.items, *this.items }
+    const comparer = compare{ sorter, this.items, this.items }
+    os.qsort_s(this.items, this.length, sizeof(T), comparer, sorter)
+    fn compare(sorter, ptra, ptrb) {
+      const a = *ptra
+      const b = *ptrb
+      return sorter(a, b)
+    }
+  }
+
+
+  fn clone(this) {
+    import malloc, mcopy from memory
+    var result = List(T){}
+    if this.length {
+      result.items = malloc(result.items, sizeof(T) * this.length)
+      mcopy(result.items, this.items, sizeof(T) * this.length)
+      result.length = this.length
+      result.capacity = this.length
+    }
+    return result
+  }
+
+
+  fn indexOf(this, ctx, cb) {
+    for var i = 0; i < this.length; ++i {
+      return i if cb(ctx, this.items[i])
+    }
+    return -1
+  }
+
+
+  fn contains(this, ctx, cb) {
+    for var i = 0; i < this.length; ++i {
+      return true if cb(ctx, this.items[i])
+    }
+    return false
+  }
+
+
+  fn compact(this): this {
+    import malloc, mfree from memory
+    if this.capacity {
+      if this.length {
+        if this.length < this.capacity {
+          this.items = malloc(this.items, sizeof(T) * this.length)
+          this.capacity = this.length
+        }
+      } else {
+        this.items = mfree(this.items)
+        this.length = 0
+        this.capacity = 0
+      }
+    }
+  }
+}

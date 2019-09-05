@@ -1,0 +1,136 @@
+import Task from aio 
+
+//-------------------------------------------------------------------------------
+readonly completionPort = CompletionPort{}
+readonly     threadPool = ThreadPool{}
+
+//-------------------------------------------------------------------------------
+// {this} module's lifetime.
+fn startup {
+  println("Starting #{__file__}")
+  completionPort.open()
+  threadPool.open()
+}
+
+fn shutdown {
+  println("Stopping #{__file__}")
+  threadPool.close()
+  completionPort.close()
+}
+
+//-------------------------------------------------------------------------------
+struct CompletionPort {
+  readonly handle = null
+  readonly references = 0
+
+  fn open(this) {
+    assert !this.handle && !this.references
+    this.handle = os.CreateIoCompletionPort(os.INVALID_HANDLE_VALUE, null, null, 0)
+    assert this.handle with "os.CreateIoCompletionPort failed with #{os.GetLastError()}"
+    println("IOCP created: #{UInt64(this.handle)}")
+  }
+
+  fn close(this) {
+    assert this.handle && !this.references
+    assert os.CloseHandle(this.handle) with "os.CloseHandle failed with #{os.GetLastError()}"
+    this.handle = null
+  }
+
+  fn isOpen(this)   = threadPool.isOpen()
+  fn isClosed(this) = threadPool.isClosed()
+
+  fn associate(this, completionHandle) {
+    assert this.handle && this.references >= 0 && completionHandle && completionHandle != os.INVALID_HANDLE_VALUE
+    const result = os.CreateIoCompletionPort(completionHandle, this.handle, null, 0)
+    assert result with "os.CreateIoCompletionPort failed with #{os.GetLastError()} for completionHandle = #{UInt64(completionHandle)}"
+    this.addReference()
+  }
+
+  fn disassociate(this, completionHandle) {
+    assert this.handle && this.references > 0 && completionHandle == os.INVALID_HANDLE_VALUE with
+      "handle = #{UInt64(this.handle)}; references = #{this.references}; completionHandle = #{UInt64(completionHandle)}"
+    this.removeReference()
+  }
+
+  fn addReference(this) {
+    assert this.isOpen() && this.references >= 0
+    atomic.increment(&this.references)
+  }
+
+  fn removeReference(this) {
+    assert this.references > 0
+    atomic.decrement(&this.references)
+  }
+}
+
+//-------------------------------------------------------------------------------
+struct ThreadPool {
+  readonly threads = List(Void*){}
+  readonly status = os.STATUS_CLOSED
+  readonly references = 0
+
+  fn isOpen(this)   = this.status == os.STATUS_OPEN
+  fn isClosed(this) = this.status == os.STATUS_CLOSED
+
+  fn open(this) {
+    assert this.threads.isEmpty() && this.status == os.STATUS_CLOSED && !this.references
+    const processors = sys.numberOfProcessors()
+    const threads = math.min(math.max(processors * 2, 4), os.MAXIMUM_WAIT_OBJECTS)
+    println("Creating thread pool with #{threads} threads")
+    this.status = os.STATUS_OPEN
+    for var i = 0; i < threads; ++i {
+      const thread = os.CreateThread(null, 0, loop{ this }, this, 0, null)
+      if thread
+        this.threads.append(thread)
+      else
+        assert with "os.CreateThread failed with #{os.GetLastError()}"
+    }
+    for this.references < this.threads.length {
+      atomic.pause()
+    }
+    assert this.references == this.threads.length
+  }
+
+  fn close(this) {
+    if atomic.cmpxchg(&this.status, os.STATUS_OPEN, os.STATUS_CLOSED) {
+      if this.threads.length {
+        println("Waiting for #{this.threads.length} threads to exit gracefully")
+        assert os.WaitForMultipleObjectsEx(this.threads.length, this.threads.items, os.TRUE, os.INFINITE_TIMEOUT, os.FALSE) == os.WAIT_OBJECT_0
+        for this.references > 0 {
+          atomic.pause()
+        }
+        assert this.status == os.STATUS_CLOSED && this.references == 0
+        this.threads.dispose()
+      }
+    }
+  }
+
+  //-----------------------------------------------------------------------------
+  fn loop(this) {
+    const id = os.GetCurrentThreadId()
+    println("\tThread(#{id}#[%0x%<gray>]) entered")
+    atomic.increment(&this.references)
+    for this.status == os.STATUS_OPEN || completionPort.references > 0 {
+      var bytesTransferred = 0
+      var completionKey = null
+      var overlapped = os.OVERLAPPED*{}
+      var hResult = os.S_OK
+      const result = os.GetQueuedCompletionStatus(completionPort.handle, &bytesTransferred, &completionKey, &overlapped, 1)
+      if !result {
+        hResult = os.GetLastError()
+        continue if hResult == os.WAIT_TIMEOUT
+      }
+      assert overlapped
+      handleCompletion(bytesTransferred, completionKey, overlapped, hResult)
+    }
+    assert this.status == os.STATUS_CLOSED && completionPort.references == 0
+    println("\tThread(#{id}#[%0x%<gray>]) exited")
+    atomic.decrement(&this.references)
+
+    fn handleCompletion(bytesTransferred, completionKey, overlapped, hResult) {
+      var task = Task*{ overlapped }
+      assert task.iocallback with "Invalid task"
+      task.iocallback(bytesTransferred, hResult)
+    }
+  }
+}

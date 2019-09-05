@@ -1,0 +1,193 @@
+
+enum Upper { None, Equal, Left, Right }
+
+fn run(context, overloaded) {
+  var    ub = ast.Symbol*{}
+  var fails = 0
+
+  assert overloaded.template && overloaded.template.template
+
+  return if overloaded.template.template !is src.Function
+
+  for symbol in overloaded.symbols {
+    if ub {
+      const lhs = ub.instance     as ast.Function*
+      const rhs = symbol.instance as ast.Function*
+      switch upperBoundOfFunctions(lhs, rhs) {
+        case Upper.None {
+          ub = null
+          ++fails
+        }
+        case Upper.Equal {
+          // Do nothing.
+        }
+        case Upper.Left {
+          ub = ub
+        }
+        case Upper.Right {
+          ub = symbol
+        }
+      }
+    } else {
+      ub = symbol
+    }
+  }
+
+  if ub && fails {
+    for symbol in overloaded.symbols {
+      const lhs = ub.instance     as ast.Function*
+      const rhs = symbol.instance as ast.Function*
+      switch upperBoundOfFunctions(lhs, rhs) {
+        case Upper.None {
+          ub = null
+          break
+        }
+        case Upper.Equal {
+          // Do nothing.
+        }
+        case Upper.Left {
+          ub = ub
+        }
+        case Upper.Right {
+          ub = symbol
+        }
+      }
+    }
+  }
+
+  if ub {
+    overloaded.upperBound = ub
+    context.eliminate(overloaded.symbols.length - 1)
+    for symbol in overloaded.symbols {
+      continue if symbol == ub
+      symbol.replacedBy = ub
+    }
+  }
+}
+
+fn upperBoundOfFunctions(lhsFunction, rhsFunction) {
+  return Upper.None if lhsFunction.parameters.length != rhsFunction.parameters.length
+
+  var countLhsUpper = 0
+  var countRhsUpper = 0
+  for i, lhsParameterSymbol in lhsFunction.parameters {
+    const rhsParameterSymbol = rhsFunction.parameters.items[i]
+    const       lhsParameter = lhsParameterSymbol.instance as ast.Parameter*
+    const       rhsParameter = rhsParameterSymbol.instance as ast.Parameter*
+    switch upperBoundOf(lhsParameter.type, rhsParameter.type) {
+      case Upper.None {
+        return Upper.None
+      }
+      case Upper.Equal {
+        ++countLhsUpper
+        ++countRhsUpper
+      }
+      case Upper.Left {
+        ++countLhsUpper
+      }
+      case Upper.Right {
+        ++countRhsUpper
+      }
+    }
+  }
+
+  switch upperBoundOf(lhsFunction.fnreturn, rhsFunction.fnreturn) {
+    case Upper.None {
+      return Upper.None
+    }
+    case Upper.Equal {
+      ++countLhsUpper
+      ++countRhsUpper
+    }
+    case Upper.Left {
+      ++countLhsUpper
+    }
+    case Upper.Right {
+      ++countRhsUpper
+    }
+  }
+
+  const maxCount = lhsFunction.parameters.length + 1
+  if countLhsUpper == maxCount {
+    return Upper.Equal if countRhsUpper == maxCount
+      else Upper.Left
+  } 
+  if countRhsUpper == maxCount {
+    return Upper.Right
+  }
+  return Upper.None
+}
+
+
+fn upperBoundOf(lhs, rhs) {
+  import sema
+
+  return Upper.Equal if lhs == rhs
+
+  return Upper.Equal if lhs.isaFunction() && rhs.isaFunction()
+
+  return Upper.Equal if (lhs.isaPointer() && rhs.isNull()) ||
+                        (lhs.isNull() && rhs.isaPointer())
+
+  if lhs.isNumeric() && rhs.isNumeric() {
+    return widerOf(lhs, rhs)
+  }
+
+  if sema.cast(lhs, rhs, isImplicit = true) {
+    if sema.cast(rhs, lhs, isImplicit = true) {
+      return Upper.Equal
+    }
+    return Upper.Left
+  }
+  if sema.cast(rhs, lhs, isImplicit = true) {
+    return Upper.Right
+  }
+  return Upper.None
+}
+
+
+fn widerOf(lhs, rhs) {
+  define SIZE_OF_POINTER 8
+
+  const lsign = lhs.isSigned()
+  const rsign = rhs.isSigned()
+  const lsize = lhs.size()
+  const rsize = rhs.size()
+
+  return Upper.None if lsign != rsign
+
+  if lsize == rsize {
+    return Upper.Left if lhs.isaReal()
+      else Upper.Right
+  }
+
+  if lsize > SIZE_OF_POINTER {
+    return Upper.Right if rsize > SIZE_OF_POINTER
+      else Upper.None
+  }
+  return Upper.None if rsize > SIZE_OF_POINTER
+
+  if lhs.isaFloat() {
+    return Upper.Right if rhs.isaDouble()
+      else Upper.Left if rsize <= sizeof(Float)
+      else Upper.None
+  }
+
+  if lhs.isaDouble() {
+    return Upper.Left if rsize <= sizeof(Double)
+      else Upper.None
+  }
+
+  if rhs.isaFloat() {
+    return Upper.Right if lsize <= sizeof(Float)
+      else Upper.None
+  }
+
+  if rhs.isaDouble() {
+    return Upper.Right if lsize <= sizeof(Double)
+      else Upper.None
+  }
+
+  return Upper.Left if lsize > rsize
+    else Upper.Right
+}

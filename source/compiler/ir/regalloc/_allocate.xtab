@@ -1,0 +1,950 @@
+fn run(allocator) {
+  auto unhandled = Unhandled{}
+  auto    active = Active{ unhandled = unhandled }
+  auto   handler = Handler{
+     function = allocator.function,
+     gprSlots = allocator.gprSlots,
+     xmmSlots = allocator.xmmSlots,
+    unhandled = unhandled,
+       active = active
+  }
+
+  handler.setup()
+
+  for def in allocator.defs {
+    each range in def.ranges.iterator() {
+      unhandled.append(range)
+    }
+  }
+
+  for const range = unhandled.removeFirst() {
+    handler.handle(range)
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+//  Sorted by end position from earliest to latest.
+struct Active {
+  readonly  first = UseRange*{}
+  readonly   last = UseRange*{}
+  var         pos = Definition*{}
+  const unhandled = Unhandled&{}
+
+  fn validate(this) {
+    for var range = this.first; range; range = range.xnext {
+      assert range.slot
+      assert range.slot.range
+      assert range.slot.range == range
+      if this.pos {
+        assert range.end >= this.pos
+      }
+      assert range.slot.state == SlotState.Busy
+      if const prev = range.xprev {
+        assert prev.end <= range.end
+      }
+      if const next = range.xnext {
+        assert range.end <= next.end
+      }
+    }
+  }
+
+
+  fn append(this, range) {
+    assert !range.xprev && !range.xnext
+    var taken = false
+
+    if !this.first {
+      this.first = range
+       this.last = range
+           taken = true
+    } else for var curr = this.first; curr; curr = curr.xnext {
+      if range.end <= curr.end {
+        //  prev > range > curr
+        if const prev = curr.xprev {
+           prev.xnext = range
+          range.xprev = prev
+        } else {
+          this.first = range
+        }
+        range.xnext = curr
+         curr.xprev = range
+              taken = true
+        break
+      }
+    }
+
+    if !taken {
+      this.last.xnext = range
+          range.xprev = this.last
+      this.last = range
+    }
+  }
+
+
+  fn remove(this, range) {
+    assert range.isAllocated()
+    assert range.slot.state == SlotState.Busy
+    if const   next = range.xnext {
+      if const prev = range.xprev {
+        prev.xnext = next
+        next.xprev = prev
+      } else {
+        next.xprev = null
+        this.first = next
+      }
+    } else if const prev = range.xprev {
+      prev.xnext = null
+      this.last = prev
+    } else {
+      assert range == this.first && range == this.last
+       this.first = null
+        this.last = null
+    }
+    range.xnext = null
+    range.xprev = null
+    //this.validate()
+  }
+
+
+  fn removeExpired(this, handler) {
+    for var range = this.first; range; {
+      assert range.slot
+      assert range.slot.state == SlotState.Busy
+      break if range.end >= this.pos
+      // Release slot and return to free list.
+      range.release()
+      handler.returnSlot(range.slot)
+      //  prev > range > next
+      const  next = range.xnext
+      const  prev = range.xprev
+      range.xnext = null
+      range.xprev = null
+      if next {
+        if prev {
+          prev.xnext = next
+        } else {
+           this.first = next
+        }
+        next.xprev = prev
+      } else if prev {
+        prev.xnext = null
+        this.last = prev
+      } else {
+        this.first = null
+        this.last = null
+      }
+      range = next
+    }
+  }
+
+
+  fn reallocate(this, range, slot) {
+    assert range.start < this.pos && range.end < this.pos
+    range.allocate(slot)
+    this.append(range)
+  }
+
+
+  fn allocate(this, range, slot) {
+    assert range.start <= this.pos && range.end >= this.pos
+    range.allocate(slot)
+    this.append(range)
+  }
+
+
+  fn findSpillableFor(this, range) {
+    // Try finding a hole of the same kind as {range}
+    const regKind = range.regKind()
+    for var  curr = this.last; curr; curr = curr.xprev {
+      continue if curr.slot.isPreserved
+      continue if curr.isNotSpillable()
+      continue if range.avoidR12 && curr.slot.isR12()
+      return curr if curr.regKind() == regKind
+    }
+    assert 0
+    return null
+  }
+
+
+  fn findFastAllocatableFor(this, range) {
+    for var curr = this.first; curr; curr = curr.xnext {
+      if curr.end == this.pos {
+        continue if range.avoidR12 && curr.slot.isR12()
+        continue if curr.slot.isPreserved || curr.isFixed || curr.isaWrite ||
+                    curr.qnext || curr.regKind() != range.regKind()
+        return curr if !curr.isaMemoryOperand
+      } else {
+        break
+      }
+    }
+    return null
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+//  Sorted by starting position from earlest start to latest start.
+struct Unhandled {
+  readonly first = UseRange*{}
+  readonly  last = UseRange*{}
+
+
+  fn validate(this) {
+    for var   range = this.first; range; range = range.xnext {
+      assert range.isNotAllocated()
+      if const prev = range.xprev {
+        assert prev.start <= range.start
+      }
+      if const next = range.xnext {
+        assert range.start <= next.start
+      }
+    }
+  }
+
+
+  fn append(this, range) {
+    assert !range.xnext && !range.xprev
+    assert range.isNotAllocated()
+
+    //this.validate()
+
+    var taken = false
+
+    if !this.first {
+      this.first = range
+       this.last = range
+           taken = true
+    } else for var curr = this.first; curr; curr = curr.xnext {
+      if range.start < curr.start {
+        //  prev > range > curr
+        insertBefore(this, range, curr)
+        taken = true
+        break
+      }
+
+      if range.start == curr.start {
+        if range.isaRead() {
+          //  prev > range > curr     ; so that we allocate reads before writes.
+          insertRead(this, range, curr)
+          taken = true
+          break
+        }
+        //  curr > range > next
+        insertWrite(this, range, curr)
+        taken = true
+        break
+      }
+    }
+
+    if !taken {
+      this.last.xnext = range
+          range.xprev = this.last
+      this.last = range
+    }
+
+    //this.validate()
+
+    fn insertRead(list, range, curr) {
+      if range.isFixed {
+        //  Insert fixed reads before all fixed/non-fixed reads/writes.
+        insertBefore(list, range, curr)
+        return
+      } 
+      // Insert non-fixed reads after fixed reads but before writes.
+      var found = curr
+      for {
+        if found.isaWrite {  // Non-fixed reads before fixed/non-fixed writes.
+          insertBefore(list, range, found)
+          break
+        }
+        if found.isFixed { // Non-fixed reads after fixed reads.
+          insertAfter(list, range, found)
+          break
+        }
+        if const next = found.xnext {
+          if next.start == found.start {
+            found = next
+            continue
+          }
+        } // No fixed read or write up to here.
+        insertAfter(list, range, found)
+        break
+      }
+    }
+
+    fn insertWrite(list, range, curr) {
+      //  Insert writes after reads.
+      var found = curr
+      for {
+        break if found.isaWrite
+        if const next = found.xnext {
+          if next.start == found.start {
+            found = next
+            continue
+          }
+        }
+        insertAfter(list, range, curr)
+        return
+      }
+      if range.isFixed {
+        // Fixed writes after non-fixed writes.
+        for {
+          if found.isFixed {
+            insertAfter(list, range, curr)
+            break
+          }
+          if const next = found.xnext {
+            if next.start == found.start {
+              found = next
+              continue
+            }
+          }
+          insertAfter(list, range, curr)
+        }
+      } else {
+        //  Non-fixed writes after reads.
+        insertBefore(list, range, found)
+      }
+    }
+
+    fn insertBefore(list, range, curr) {
+      if const prev = curr.xprev {
+         prev.xnext = range
+        range.xprev = prev
+      } else {
+        list.first = range
+      }
+      range.xnext = curr
+       curr.xprev = range
+    }
+
+    fn insertAfter(list, range, curr) {
+      if const next = curr.xnext {
+        range.xnext = next
+         next.xprev = range
+      } else {
+        list.last = range
+      }
+       curr.xnext = range
+      range.xprev = curr
+    }
+  }
+
+
+  fn removeFirst(this) {
+    if const range = this.first {
+      this.first = range.xnext
+      if this.first {
+        this.first.xprev = null
+      } else {
+        this.last = null
+      }
+      range.xprev = null
+      range.xnext = null
+      return range
+    }
+    return null
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+struct FreeSlots {
+  const unused = Queue(Slot){} // Ordered by preference from most wanted to least wanted.
+  const   used = Queue(Slot){} // Ordered by recency of use from least recent to most recent.
+  const   uses = { volatiles = 0, nonVolatiles = 0 }
+
+
+  fn appendSorted(this, slot) {
+    assert slot.reg.isValid() && !slot.uses
+    const slotPreference = slot.reg.preference()
+    assert slotPreference
+    slot.limbo2free()
+    for var item = this.unused.first; item; item = item.qnext {
+      const itemPreference = item.reg.preference()
+      assert itemPreference
+      if slotPreference < itemPreference {
+        this.unused.insertBefore(slot, item)
+        return slot
+      }
+      if slotPreference == itemPreference {
+        this.unused.insertAfter(slot, item)
+        return slot
+      }
+    }
+    this.unused.append(slot)
+    return slot
+  }
+
+
+  fn put(this, slot) {
+    assert slot.isFree() && slot.uses
+    slot.limbo2free()
+    this.used.append(slot) // Most recently used last.
+    return slot
+  }
+
+
+  fn remove(this, slot) {
+    assert slot.isFree()
+    slot.free2limbo()
+    if slot.uses {
+      this.used.remove(slot)
+    } else {
+      this.unused.remove(slot)
+    }
+    if slot.reg.isVolatile() {
+      ++this.uses.volatiles
+    } else {
+      ++this.uses.nonVolatiles
+    }
+    return slot
+  }
+
+
+  fn findSlotFor(this, range): Slot* {
+    return null if this.used.isEmpty() && this.unused.isEmpty()
+
+    const     hint = range.hint
+    const avoidR12 = range.avoidR12
+
+    //  Return the {hint} slot for {range} if {range} is hinted for {slot}.
+    if hint && hint.hint == range && hint.isFree() && hint.isNotPreserved() {
+      if avoidR12 {
+        return this.remove(hint) if hint.isNotR12()
+      } else {
+        return this.remove(hint)
+      }
+    }
+
+    //  First try to find the first least recently used unpreserved and unhinted slot.
+    for var slot = this.used.first; slot; slot = slot.qnext {
+      continue if slot.isPreserved
+      continue if avoidR12 && slot.isR12()
+      if slot.isNotHinted() {
+        return this.remove(slot)
+      }
+    }
+
+    //  Getting here means that we did not find an unhinted slot.
+    //  We start using non-volatiles if and only if we have run out of volatiles.
+    if !this.uses.nonVolatiles {
+      for var slot = this.used.first; slot; slot = slot.qnext {
+        continue if slot.isPreserved
+        continue if avoidR12 && slot.isR12()
+        assert slot.reg.isVolatile()
+        return this.remove(slot)
+      }
+    }
+
+    //  Getting here means that we have either used at least 1 non-volatile or all available slots are
+    //  preserved.
+    //  Now pop from the unused list using the order of preference.
+    for var slot = this.unused.first; slot; slot = slot.qnext {
+      continue if slot.isPreserved
+      continue if avoidR12 && slot.isR12()
+      return this.remove(slot)
+    }
+
+    //  Otherwise just try the least recently used first ignoring hints.
+    for var slot = this.used.first; slot; slot = slot.qnext {
+      continue if slot.isPreserved
+      continue if avoidR12 && slot.isR12()
+      return this.remove(slot)
+    }
+    return null
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+struct Handler {
+  const     function = ssa.Function*{}
+  const     freeGprs = FreeSlots{}
+  const     freeXmms = FreeSlots{}
+  const    unhandled = Unhandled&{}
+  const       active = Active&{}
+  const     gprSlots = GprSlots&{}
+  const     xmmSlots = XmmSlots&{}
+  readonly preserved = 0
+
+
+  fn dispose(this) {
+  }
+
+
+  fn setup(this) {
+    var slots = &this.gprSlots as Slot*
+    for var i = 0; i < ssa.MAX_GPRS; ++i {
+      const slot = slots[i]
+      if slot.reg.preference() {
+        this.freeGprs.appendSorted(&slot)
+      }
+    }
+
+    slots = &this.xmmSlots as Slot*
+    for var i = 0; i < ssa.MAX_XMMS; ++i {
+      const slot = slots[i]
+      if slot.reg.preference() {
+        this.freeXmms.appendSorted(&slot)
+      }
+    } 
+  }
+
+
+  fn handle(this, range) {
+    assert range.isNotAllocated()
+     
+    this.setPosition(range.start)
+
+    if range.regKind() == RegKind.None {
+      assert range.owner.value is ssa.Call
+      return
+    }
+
+    if this.tryFastAllocate(range) {
+      return
+    }
+
+    if const slot = range.isFixed {
+      assert slot.reg.isValid()
+      if const busy = slot.range {
+        this.kickOut(busy, removeSlot = true)
+      } else {
+        this.removeSlot(slot)
+      }
+      this.active.allocate(range, slot)
+    } else if const slot = this.tryFindSlotFor(range) {
+      this.active.allocate(range, slot)
+    } else if range.isaHole() {
+      this.spill(range)
+    } else {
+      this.active.allocate(range, this.spillOneFor(range))
+    }
+    assert range.isAllocated() || range.isaHole()
+  }
+
+
+  fn tryFastAllocate(this, range) {
+    // If {range} is a write, we try to find a read that ends at the current pos and allocate that.
+    if range.isActive {
+      return false if range.isFixed //  Can't fast allocate fixed registers. Have to kick out.
+      return false if range.owner != this.active.pos  //  {range} must be the a range of {this.active.pos}.
+      return false if range.owner.value is ssa.Phi    //  Ignore phis because they have no inputs.
+      return false if range.owner.value.type.isaRealOrPacked() // Fast allocate only works for integers.
+
+      assert range.isaWrite
+
+      const dst = range //  We've established that {range} is the destination of {this.active.pos}.
+      const def = dst.owner
+      // Find a {src} that ends at {this.active.pos} that is occupying a register that we can use for
+      // {dst}. The {src} must not be rhs of a binary operation.
+
+      const nulhs = ssa.Value*{}
+      const  expr = this.active.pos.value
+      switch expr {
+        case ssa.Load {
+          return this.findAndfastAllocate(dst, nulhs)
+        }
+        case ssa.NarrowingCast {
+          const dstType = def.value.type
+          const srcType = def.value.operands.items[ssa.op1].type()
+          return this.findAndfastAllocate(dst, nulhs)
+        }
+        case ssa.BitCast {
+          const dstType = def.value.type
+          const srcType = def.value.operands.items[ssa.op1].type()
+          //  Let {dst} and {src} share a register if the bitcast is a cast between gprs.
+          if !dstType.isaRealOrPacked() && !srcType.isaRealOrPacked() {
+            return this.findAndfastAllocate(dst, nulhs)
+          }
+        }
+        case ssa.Compare            return this.findAndfastAllocate(dst, nulhs)
+        case ssa.Or                 return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.XOr                return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.And                return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.LeftShift          return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.RightShift         return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.UnsignedRightShift return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.Subtract           return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.Add                return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+        case ssa.Multiply           return this.findAndfastAllocate(dst, expr.lhs().isaNode())
+      }
+      return false
+    }
+
+    if const prev = range.qprev {
+      if prev.isaHole() && prev.isNotAllocated() {
+        //  If the previous range was a hole that was spilled and the current one is also a hole,
+        //  spill it.
+        this.spill(range)
+        assert 0
+        return true
+      }
+    }
+    return false
+  }
+
+
+  fn findAndfastAllocate(this, dst, lhs) {
+    if const src = this.active.findFastAllocatableFor(dst) {
+      if !lhs || src.owner.value == lhs {
+        this.releaseFromActiveList(src)          
+        this.active.allocate(dst, this.removeSlot(src.slot))
+        return true
+      }
+    }
+    return false
+  }
+
+
+  fn kickOut(this, range, removeSlot) {
+    assert range.start <= this.active.pos
+
+    const slot = range.slot
+
+    if range.end < this.active.pos { // Expired and being kicked out.
+      assert !removeSlot
+
+      if range.isFixed {
+        this.releaseFromActiveList(range)
+      }
+      else if const found = this.tryFindSlotFor(range) {
+        this.invalidateFromActiveList(range)
+        this.active.reallocate(range, found)
+      }
+      else if range.isaHole() {
+        this.invalidateFromActiveList(range)
+        this.spill(range)
+      }
+      else {
+        this.invalidateFromActiveList(range)
+        this.active.reallocate(range, this.spillOneFor(range))
+      }
+    }
+
+    else if range.isFixed {
+      this.releaseFromActiveList(range)
+    } 
+
+    else if range.start == this.active.pos {
+      this.returnToUnhandledList(range)
+    } 
+
+    else {
+      assert range.isaHole()
+      if const found = this.tryFindSlotFor(range) {
+        const  split = this.split(range)
+        this.releaseFromActiveList(range)
+        this.active.allocate(split, found)
+      } else {
+        this.invalidateFromActiveList(range)
+        this.spill(range)
+      }
+    }
+
+    if removeSlot {
+      return this.removeSlot(slot)
+    }
+    return slot
+  }
+
+
+  fn split(this, range) {
+    //  {range} is split such that it ends just before {active.pos} and the next range is a hole starting
+    //  at {active.pos}.
+    const  owner = range.owner
+    const ranges = UseRanges{ ranges = owner.ranges, owner = owner }
+    return ranges.split(range, this.active.pos)
+  }
+
+
+  fn spill(this, range) {
+    //  {range} will be assigned a spill slot.
+    //  Nothing to do here.
+    assert range.isaHole() && range.isNotAllocated()
+  }
+
+
+  fn tryFindSlotFor(this, range) {
+    switch const kind = range.regKind() {
+      case RegKind.Gpr {
+        if const found = this.freeGprs.findSlotFor(range) {
+          return found
+        }
+      }
+      case RegKind.Xmm {
+        assert !range.avoidR12 with "#{nameof(range.regKind())}; isActive = #{range.isActive}; \
+          isaWrite = #{range.isaWrite}; #{nameof(range.owner.value)}; #{range.owner.value.type}; \
+          pos = #{nameof(this.active.pos.value)}"
+        if const found = this.freeXmms.findSlotFor(range) {
+          return found
+        }
+      }
+      default assert with nameof(kind)
+    }
+    return null
+  }
+
+
+  fn releaseFromActiveList(this, range) {
+    const slot = range.slot
+    this.active.remove(range)
+    range.release()
+    this.returnSlot(slot)
+    return slot
+  }
+
+
+  fn invalidateFromActiveList(this, range) {
+    const slot = range.slot
+    this.active.remove(range)
+    range.invalidate()
+    this.returnSlot(slot)
+    return slot
+  }
+
+
+  fn returnToUnhandledList(this, range) {
+    const slot = range.slot
+    this.active.remove(range)
+    range.invalidate()
+    this.returnSlot(slot)
+    this.unhandled.append(range)
+    return slot
+  }
+
+
+  fn returnSlot(this, slot) {
+    switch const kind = slot.reg.regKind() {
+      case RegKind.Gpr {
+        this.freeGprs.put(slot)
+      }
+      case RegKind.Xmm {
+        this.freeXmms.put(slot)
+      }
+      default assert with nameof(kind)
+    }
+    return slot
+  }
+
+
+  fn removeSlot(this, slot) {
+    switch const kind = slot.reg.regKind() {
+      case RegKind.Gpr {
+        this.freeGprs.remove(slot)
+      }
+      case RegKind.Xmm {
+        this.freeXmms.remove(slot)
+      }
+      default assert with nameof(kind)
+    }
+    return slot
+  }
+
+
+  fn spillOneFor(this, range) {
+    assert range.isActive
+    const found = this.active.findSpillableFor(range)
+    const  slot = found.slot
+    
+    //  Cause {found} to be in the state such that it is as if it was never allocated.
+    this.invalidateFromActiveList(found)
+
+    //  Now allocate to a spill slot.
+    this.spill(found)
+
+    return this.removeSlot(slot)
+  }
+
+
+  fn setPosition(this, pos) {
+    //println("pos.#{pos.value.index}")
+    if this.active.pos {
+      assert this.active.pos <= pos
+      if this.active.pos != pos {
+        this.active.pos = pos
+        this.unpreserve()
+        this.preserve()
+        this.active.removeExpired(this)
+      }
+    } else {
+      this.active.pos = pos
+    }
+  }
+
+
+  fn unpreserve(this) {
+    if this.preserved {
+      var slots = &this.gprSlots as Slot*
+      for var i = 0; i < ssa.MAX_GPRS; ++i {
+        const slot = slots[i]
+        slot.isPreserved = false
+      }
+
+      slots = &this.xmmSlots as Slot*
+      for var i = 0; i < ssa.MAX_XMMS; ++i {
+        const slot = slots[i]
+        slot.isPreserved = false
+      }
+      this.preserved = 0
+    }
+  }
+
+
+  fn preserve(this) { 
+    const value = this.active.pos.value
+    const  type = value.type
+    switch value {
+      case ssa.Assign
+        this.preserveLoadingFloatingPoint(type, value.operands.items[ssa.op2])
+
+      case ssa.Load
+        this.preserveLoadingFloatingPoint(type, value.operands.items[ssa.op1])
+
+      case ssa.Argument
+        this.preserveLoadingFloatingPoint(type, value.operands.items[ssa.op1])
+
+      case ssa.Call
+        this.preserveVolatiles()
+
+      case ssa.Store {
+        const     src = value.operands.items[ssa.op2]
+        const    size = type.size()
+        if const elem = src.isMemory() {
+          if elem.baseIsCodeSection() {
+            //  lea r11, qword [src]
+            //  mov qword [dst], r11
+            this.preserveSlot(this.gprSlots.r11)
+          } else if type.isVoid() {
+            // Do nothing.
+          } else if type.isaRealOrPacked() {
+            this.preserveSlot(this.xmmSlots.xmm5)
+          } else if type.isaPointerOrInteger() {
+            this.preserveSlot(this.gprSlots.r11)
+          } else if size <= MIN_MEMCOPY_BYTES { // 1 < {size} <= MIN_MEMCOPY_BYTES
+            if size >= SIZE_OF_XMM { // 16 <= {size} <= MIN_MEMCOPY_BYTES
+              this.preserveSlot(this.xmmSlots.xmm5)
+              if size % SIZE_OF_XMM { // size is not a multiple of SIZE_OF_XMM
+                this.preserveSlot(this.gprSlots.r11)
+              }
+            } else { // {size} < 16
+              this.preserveSlot(this.gprSlots.r11)
+            }
+          } else {  // {size} > 256
+            this.preserveSlot(this.gprSlots.rcx)
+            this.preserveSlot(this.gprSlots.rdi)
+            this.preserveSlot(this.gprSlots.rsi)
+          }
+        } else if const immediate = src.isanImmediate() {
+          if immediate.value.u64 {
+            switch size {
+              case SIZE_OF_BYTE, SIZE_OF_WORD {}
+              case SIZE_OF_INT, SIZE_OF_POINTER {
+                if type.isaReal() {
+                  this.preserveSlot(this.gprSlots.r11)
+                }
+              }
+              default assert 0
+            }  
+          } else switch size {
+            case SIZE_OF_BYTE, SIZE_OF_WORD, SIZE_OF_INT, SIZE_OF_POINTER {}
+            case SIZE_OF_XMM, SIZE_OF_YMM this.preserveSlot(this.xmmSlots.xmm5)
+            default {
+              if size < SIZE_OF_POINTER {
+                this.preserveSlot(this.gprSlots.r11)
+              } else if size < SIZE_OF_YMM {
+                this.preserveSlot(this.gprSlots.r11)
+                this.preserveSlot(this.xmmSlots.xmm5)
+              } else if size <= MIN_MEMCOPY_BYTES {
+                if size >= SIZE_OF_XMM {
+                  this.preserveSlot(this.xmmSlots.xmm5)
+                }
+              } else { // size > MIN_MEMCOPY_BYTES
+                this.preserveSlot(this.gprSlots.rax)
+                this.preserveSlot(this.gprSlots.rcx)
+                this.preserveSlot(this.gprSlots.rdi)
+              }
+            }
+          }
+        }
+      }
+    }
+    return this.preserved
+  }
+
+
+  fn preserveVolatiles(this) {
+    var slots = &this.gprSlots as Slot*
+    for var i = 0; i < ssa.MAX_GPRS; ++i {
+      const slot = slots[i]
+      assert slot.isNotPreserved()
+      if slot.reg.isVolatile() {
+        slot.isPreserved = true
+        ++this.preserved
+      }
+    }
+
+    slots = &this.xmmSlots as Slot*
+    for var i = 0; i < ssa.MAX_XMMS; ++i {
+      const slot = slots[i]
+      assert slot.isNotPreserved()
+      if slot.reg.isVolatile() {
+        slot.isPreserved = true
+        ++this.preserved
+      }
+    }
+
+    slots = &this.gprSlots as Slot*
+    for var i = 0; i < ssa.MAX_GPRS; ++i {
+      const slot = slots[i]
+      continue if slot.isNotPreserved() || slot.isFree()
+      const range = slot.range
+      if range.isNotFixed() && range.end >= this.active.pos {
+        this.kickOut(range, removeSlot = false)
+      }
+    }
+
+    slots = &this.xmmSlots as Slot*
+    for var i = 0; i < ssa.MAX_XMMS; ++i {
+      const slot = slots[i]
+      continue if slot.isNotPreserved() || slot.isFree()
+      const range = slot.range
+      if range.isNotFixed() && range.end >= this.active.pos {
+        this.kickOut(range, removeSlot = false)
+      }
+    }
+  }
+
+
+  fn preserveLoadingFloatingPoint(this, type, src) {
+    //    Preserve the slots required for loading floating point values.
+    //    dst:T ⟵ src:imm
+    //  +―――――――――――+―――――――――――――――――――――――+
+    //  | typeof(T) | ops                   |
+    //  +―――――――――――+―――――――――――――――――――――――+
+    //  |   fp      | r11:I  ⟵ imm        |
+    //  |           | dst:T  ⟵ r11        |
+    //  +―――――――――――+―――――――――――――――――――――――+
+    if type.isaRealOrPacked() {
+      if const immediate = src.isanImmediate() {
+        if immediate.value.i64 {
+          this.preserveSlot(this.gprSlots.r11)
+        }
+      }
+    }
+  }
+
+
+  fn preserveSlot(this, slot) {
+    assert slot.isNotPreserved()
+    slot.isPreserved = true
+    if const range = slot.range {
+      if range.isNotFixed() && range.end >= this.active.pos {
+        this.kickOut(range, removeSlot = false)
+      }
+    }
+    ++this.preserved
+  }
+}

@@ -1,0 +1,320 @@
+struct Line {
+  var     pos = 0
+  var  length = 0
+  var     hot = { pos = 0, length = 0 }
+  var  number = 0
+  var   ellip = false
+}
+
+fn error(source, range, pass, msg) {
+  print("#{source.name}#[%<gray>](#{range}#[%<darkgray>]) «#{'error'}#[%<red>]@#{pass}#[%<darkred>]» ")
+  println(msg)
+  highlight(source.value, range, HighlightOptions{})
+}
+
+fn info(source, range, pass, msg) {
+  print("#{source.name}#[%<darkgray>](#{range}#[%<gray>]) «#{'info'}#[%<yellow|black>]@#{pass}#[%<darkyellow|black>]» ")
+  println(msg)
+  highlight(source.value, range, HighlightOptions{ isInfo = true })
+}
+
+fn errorWithCallBack(source, range, pass, ctx, callBack) {
+  print("#{source.name}#[%<gray>](#{range}#[%<darkgray>]) «#{'error'}#[%<red>]@#{pass}#[%<darkred>]» ")
+  callBack(ctx)
+  highlight(source.value, range, HighlightOptions{})
+}
+
+fn infoWithCallBack(source, range, pass, ctx, callBack) {
+  print("#{source.name}#[%<darkgray>](#{range}#[%<gray>]) «#{'info'}#[%<yellow|black>]@#{pass}#[%<darkyellow|black>]» ")
+  callBack(ctx)
+  highlight(source.value, range, HighlightOptions{ isInfo = true })
+}
+
+struct HighlightOptions {
+  var maxLinesAbove = 0i8
+  var maxLinesBelow = 0i8
+  var        isInfo = false
+  var       showHot = true
+}
+
+define DEFAULT_ERROR_LINES_ABOVE_OR_BELOW 3
+define  DEFAULT_INFO_LINES_ABOVE_OR_BELOW 2
+define                    MAX_LINES_ABOVE 3
+define                    MAX_LINES_BELOW 3
+
+fn highlight(src, range, opts) {
+  if !opts.maxLinesAbove {
+    opts.maxLinesAbove = (DEFAULT_INFO_LINES_ABOVE_OR_BELOW if opts.isInfo else DEFAULT_ERROR_LINES_ABOVE_OR_BELOW)
+  }
+  if !opts.maxLinesBelow {
+    opts.maxLinesBelow = (DEFAULT_INFO_LINES_ABOVE_OR_BELOW if opts.isInfo else DEFAULT_ERROR_LINES_ABOVE_OR_BELOW)
+  }
+  each line in auto lines(src, range, opts.maxLinesAbove, opts.maxLinesBelow) {
+    if line.hot.length {
+      if opts.isInfo {
+        print('#{line.number}#[%wl7%<yellow>] #{"→"}#[%<darkyellow>]  ')
+      } else {
+        print('#{line.number}#[%wl7%<red>] #{"→"}#[%<darkred>]  ')
+      }
+    } else {
+      print('#{line.number}#[%wl7%<green>] #{"|"}#[%<gray>]  ')
+    }
+    const str = string{ text = src.text + line.pos, length = line.length }
+    if line.ellip {
+      print(str)
+      println("…")
+    } else {
+      println(str)
+    }
+    if opts.showHot && line.hot.length {
+      showHot(11, line, opts.isInfo)
+    }
+  }
+}
+
+
+fn showHot(prefix, line, isInfo) {
+  return if line.length == 0
+  for var i = 0; i < prefix; ++i {
+    print(" ")
+  }
+  const toHot = line.hot.pos - line.pos
+  for var i = 0; i < toHot; ++i {
+    print(" ")
+  }
+  if isInfo {
+    if line.hot.length == 1 {
+      print('#{"↑"}#[%<yellow>] ')
+    } else for var i = 0; i < line.hot.length; ++i {
+      print('#{"^"}#[%<yellow>]')
+    }
+  } else if line.hot.length == 1 {
+    print('#{"↑"}#[%<darkred|white>] ')
+  } else for var i = 0; i < line.hot.length; ++i {
+    print('#{"^"}#[%<red>]')
+  }
+  println("")
+}
+
+fn lines(const src, const hotRange, maxLinesAbove, maxLinesBelow) {
+  if maxLinesAbove < 0 || maxLinesAbove >= MAX_LINES_ABOVE {
+    maxLinesAbove = MAX_LINES_ABOVE
+  }
+  if maxLinesBelow < 0 || maxLinesBelow >= MAX_LINES_BELOW {
+    maxLinesBelow = MAX_LINES_BELOW
+  }
+  const     lineno = hotRange.start.line
+  const      above = Line[ MAX_LINES_ABOVE]
+  const      below = Line[ MAX_LINES_BELOW]
+  const  (pos, lf) = makeRangeOfHotLine(src, hotRange)
+  const linesAbove = makeLinesAbove(src, pos, lineno, above, maxLinesAbove)
+  const linesBelow = makeLinesBelow(src, lf, lineno, below, maxLinesBelow)
+  const    hotLine = makeHot(src, pos, lf, hotRange)
+
+  for var i = linesAbove; --i >= 0; {
+    yield &above[i]
+  }
+
+  yield &hotLine
+
+  for var i = 0; i < linesBelow; ++i {
+    yield &below[i]
+  }
+
+  fn makeRangeOfHotLine(const src, const hotRange) {
+    const srcstart = src.text
+    const   srcend = src.end()
+    const   hotPos = src.text + hotRange.start.pos
+    var        pos = hotPos
+    var         lf = hotPos
+    assert hotPos >= srcstart && hotPos <= srcend
+    // Let {lf} be at · the first '\n' after {hotPos} or
+    //                · {hotPos} if {hotPos} is '\n' or
+    //                · {srcend} if there's no '\n' before {srcend}.
+    for ; lf < srcend && *lf != '\n'; ++lf {}
+    // Let {pos} be at · the 1st '\n' before {hotPos} or
+    //                 · {hotPos} if {hotPos} is '\n' or
+    //                 · {srcstart} if there's no '\n' before {srcstart}
+    for ; pos > srcstart && *pos != '\n'; --pos {}
+    return (pos, lf)
+  }
+
+
+  fn makeLinesAbove(const src, pos, lineno, const list, const maxLines) {
+    const srcstart = src.text
+    return 0 if pos == srcstart
+    var end = pos
+    if *pos == '\n' {
+      --lineno
+      --pos
+    }
+    var i = 0
+    for ; pos >= srcstart && i < maxLines && i < list.length; --pos {
+      if pos == srcstart {
+        list[i++] = Line{
+             pos = pos - srcstart,
+          length = end - pos,
+          number = lineno--
+        }
+      } else if *pos == '\n' {
+        const start = pos + (1 if pos < end)
+        list[i++] = Line{
+             pos = start - srcstart,
+          length = end - start,
+          number = lineno--
+        }
+        end = pos - (1 if pos[-1] == '\r')
+      }
+    }
+    return i
+  }
+
+
+  fn makeLinesBelow(const src, pos, lineno, const list, const maxLines) {
+    const srcstart = src.text
+    const   srcend = src.end()
+    return 0 if pos == srcend
+    ++lineno
+    var start = ++pos
+    var     i = 0
+    for ; pos <= srcend && i < maxLines && i < list.length; ++pos {
+      if pos == srcend {
+        list[i++] = Line{
+             pos = start - srcstart,
+          length = pos - start,
+          number = lineno++
+        }
+      } else if *pos == '\n' {
+        list[i++] = Line{
+             pos = start - srcstart,
+          length = pos - start,
+          number = lineno++
+        }
+        start = pos + 1
+      }
+    }
+    return i
+  }
+
+
+  fn makeHot(const src, linestart, linend, const hotRange) {
+    const srcstart = src.text
+    const   srcend = src.end()
+    var   hotstart = srcstart + hotRange.start.pos
+    var     hotend = srcstart + hotRange.end.pos
+    var      ellip = false
+
+    assert hotstart <= hotend
+    assert hotstart >= linestart && hotstart <= linend
+    assert hotend >= linestart
+
+    if hotend > linend {
+      hotend = linend
+       ellip = true
+    }
+
+    if linestart > srcstart && linestart < hotstart {
+      ++linestart
+    }
+    if linend < srcend && linend >= hotend {
+      if linend - 1 >= linestart && linend[-1] == '\r' {
+        if linend == hotend && hotend - 1 >= hotstart {
+          --hotend
+        }
+        --linend
+      }
+    }
+
+    if hotstart == hotend {
+      if hotend < srcend {
+        ++hotend
+      } else {
+        hotstart = linestart
+        hotend = linend
+      }
+    }
+
+    return Line{
+      pos    = linestart - srcstart,
+      length = linend - linestart,
+      ellip  = ellip,
+      number = hotRange.start.line,
+      hot    = {
+        pos    = Int32(hotstart - srcstart),
+        length = Int32(hotend - hotstart)
+      }
+    }
+  }
+}
+
+fn highlightCallSite(source, range, index) {
+  define MAX_FILE_NAME 0xc
+  define         ELLIP 0x2
+  const src = source.value
+  const end = src.end()
+  var   pos = src.text + range.start.pos
+  var    lf = pos
+  assert pos >= src.text && pos <= end
+  for ; lf < end; ++lf {
+    if *lf == '\n' {
+      if lf > pos && lf[-1] == '\r' {
+        --lf
+      }
+      break
+    }
+  }
+  // Put {pos} at just past the 1st '\n' before {pos}
+  for ; pos > src.text; --pos {
+    if *pos == '\n' {
+      if pos < lf {
+        ++pos
+      }
+      break
+    }
+  }
+  // [ellip] filename ':' lineno SP ':' SP str
+  const  str = string.fromRange(pos, lf)
+  const name = source.name
+  if name.length > MAX_FILE_NAME {
+    print("..") // ELLIP
+    const namepos = name.text + (name.length - MAX_FILE_NAME)
+    const tmp = string.fromTextAndLength(namepos, MAX_FILE_NAME)
+    print("#{tmp}#[%<darkgray>]")
+  } else {
+    var gap = (ELLIP + MAX_FILE_NAME) - name.length
+    for --gap >= 0 {
+      print(" ")
+    }
+    print("#{name}#[%<darkgray>]")
+  }
+  print(":")
+  if index == 0 {
+    print("#{range.start.line}#[%wl5%<gray>] #{'·'}#[%<darkgray>] ")
+  } else {
+    print("#{range.start.line}#[%wl5%<gray>] #{'↑'}#[%<darkgray>] ")
+  }
+
+  var  rangend = src.text + range.end.pos
+  var rangepos = src.text + range.start.pos
+  assert rangepos <= rangend
+  if rangend > lf {
+    rangend = lf
+    print(str)
+    println("…")
+  } else {
+    println(str)
+  }
+  if pos < rangepos {    
+    var gap = ELLIP + MAX_FILE_NAME + 1 /* : */ + 5 /* lineno */ + 3 /* SP '|' SP */
+    for --gap >= 0 {
+      print(" ")
+    }
+    for pos++ < rangepos {
+      print(" ")
+    }
+    for rangepos++ < rangend {
+      print('#{"‾"}#[%<red>]')
+    }
+    println("")
+  }
+}

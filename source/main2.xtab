@@ -1,0 +1,10 @@
+
+fn compile() {
+  import compiler
+  auto binary = compiler.compile(0)
+  if binary.entry {
+    binary.run()
+  }
+}
+
+compile()

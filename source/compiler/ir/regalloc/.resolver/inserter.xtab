@@ -1,0 +1,187 @@
+import MoveReason as Reason from ssa
+
+struct Inserter {
+  const      resolver = Resolver&{}
+  readonly localIndex = 0
+  const         elems = List(ssa.ElementAt*){}
+  const           ids = Identifiers&{}
+
+
+  fn dispose(this) {
+    delete this.elems
+  }
+
+  fn run(this, defs) {
+    for def in defs {
+      switch def.value {
+        case local: ssa.Local {
+          if local.localIndex > this.localIndex {
+            this.localIndex = local.localIndex
+          }
+        }
+      }
+    }
+    if this.localIndex {
+      ++this.localIndex
+    }
+
+    for bb in this.resolver.blocks {
+      for group in bb.groups {
+        this.insertGroup(group)
+      }
+    }
+  }
+
+
+  fn insertGroup(this, group) {
+    const   pos = group.pos.value
+    const block = group.parent.block
+    for move in group.moves {
+      switch move {
+        case Transfer {
+          this.transfer(pos, move)
+        }
+        case Exchange {
+          this.exchange(pos, move)
+        }
+        case Spill {
+          this.spill(pos, move)
+        }
+        case Fill {
+          this.fill(pos, move)
+        }
+      }
+    }
+  }
+
+
+  fn transfer(this, pos, move) {
+    const  block = pos.parent
+    const    dst = move.dst
+    const    src = move.src
+    const  value = dst.owner.value
+    const assign = new ssa.Assign{ pos = pos.pos, parent = block, type = value.type, reason = Reason.Transfer }
+    assign.initialize(operands = ssa.2ops)
+    assign.operands.set(ssa.op1, value, ssa.Io.Write)
+    assign.operands.set(ssa.op2, value)
+    block.body.insertBefore(assign, pos)
+
+    assign.operands.items[ssa.op1].reg = dst.slot.reg
+    assign.operands.items[ssa.op2].reg = src.slot.reg
+  }
+
+
+  fn exchange(this, pos, move) {
+    const  block = pos.parent
+    const      dst = move.dst
+    const      src = move.src
+    const     type = maxType(dst.owner.value.type, src.owner.value.type)
+    const exchange = new ssa.Exchange{ pos = pos.pos, parent = block, type = type, reason = Reason.Transfer }
+    exchange.initialize(operands = ssa.2ops)
+    exchange.operands.set(ssa.op1, dst.owner.value, ssa.Io.Write)
+    exchange.operands.set(ssa.op2, src.owner.value, ssa.Io.Write)
+    block.body.insertBefore(exchange, pos)
+
+    exchange.operands.items[ssa.op1].reg = dst.slot.reg
+    exchange.operands.items[ssa.op2].reg = src.slot.reg
+
+    fn maxType(dst, src) {
+      const dstSize = dst.size()
+      const srcSize = src.size()
+      return dst if dstSize > srcSize
+        else src
+    }
+  }
+
+
+  fn spill(this, pos, move) {
+    const block = pos.parent
+    const   src = move.src
+    const   def = src.owner
+    const value = def.value
+    const  type = value.type
+    const spill = new ssa.Store{ pos = pos.pos, parent = block, type = type, reason = Reason.Spill }
+    spill.initialize(operands = ssa.2ops)
+    spill.operands.set(ssa.op1, this.localAt(def), ssa.Io.Write)
+    spill.operands.set(ssa.op2, value)
+    block.body.insertBefore(spill, pos)
+
+    spill.operands.items[ssa.op2].reg = src.slot.reg
+  }
+
+
+  fn fill(this, pos, move) {
+    const block = pos.parent
+    const   dst = move.dst
+    const   def = dst.owner
+    const value = def.value
+    const  type = value.type
+    const  fill = new ssa.Fill{ pos = pos.pos, parent = block, type = type }
+    fill.initialize(operands = ssa.2ops)
+    fill.operands.set(ssa.op1, value, ssa.Io.Write)
+    fill.operands.set(ssa.op2, this.localAt(def))
+    block.body.insertBefore(fill, pos)
+
+    fill.operands.items[ssa.op1].reg = dst.slot.reg
+  }
+
+
+  fn localAt(this, def) {
+    const     pos = insertionPosOf(def)
+    const   local = this.localOf(pos, def)
+    if const elem = this.elemOf(local) {
+      return elem
+    }
+
+    const block = pos.parent
+    const  elem = new ssa.ElementAt{ pos = pos.pos, parent = block, type = local.type }
+    elem.initialize(operands = ssa.2ops)
+    elem.operands.set(ssa.op1, this.resolver.function.frame)
+    elem.operands.set(ssa.op2, local)
+    block.body.insertBefore(elem, pos)
+    this.elems.append(elem)
+    return elem
+  }
+
+
+  fn insertionPosOf(def) {
+    const first = def.ranges.first
+    assert first
+    return first.start.value if first.start < def
+      else def.value
+  }
+
+
+  fn localOf(this, elemPos, def) {
+    const   pos = posOfLocal(elemPos)
+    const block = pos.parent
+    const value = def.value
+    if !def.spill {
+      def.spill = new ssa.Local{ pos = pos.pos, parent = pos.parent, type = value.type,
+        name = this.ids.random("spill"), isaSpill = true, localIndex = this.localIndex++ }
+      def.spill.initialize(operands = ssa.nops)
+      block.body.insertBefore(def.spill, pos)
+    }
+    return def.spill
+  }
+
+
+  fn posOfLocal(pos) {
+    for var qprev = pos.qprev; qprev; qprev = qprev.qprev {
+      switch qprev {
+        case ssa.Local {
+          return qprev.qnext
+        }
+      }
+    }
+    return pos.parent.body.first
+  }
+
+
+  fn elemOf(this, local) {
+    for elem in this.elems {
+      return elem if elem.operands.items[ssa.op2].value.node == local
+    }
+    return null
+  }
+}

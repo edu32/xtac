@@ -1,0 +1,634 @@
+export Vector from vector
+export Matrix from matrix
+
+define EPSILON       2.22e-16
+define FLOAT_EPSILON 1.19e-07
+
+//-----------------------------------------------------------------------------------------------------
+fn max(a, b) = a if a >= b else b
+
+fn min(a, b) = a if a <= b else b
+
+fn abs(a) = a if a >= 0 else -a
+
+fn roundup(a)   = __round_up__(a)
+fn rounddown(a) = __round_down__(a)
+fn truncate(a)  = __truncate__(a)
+
+fn exp(n) = os.exp(n as Double)
+fn log(n) = os.log(n as Double)
+fn log10(n) = os.log10(n as Double)
+fn pow(base, power) = os.pow(base as Double, power as Double)
+fn sqrt(n) =  __sqrt__(n as Double) // os.sqrt(n as Double)
+fn signbit(n) = os._dsign(n as Double)
+fn fabs(n) = os.fabs(n as Double)
+fn logb(a, b) = log(a) / log(b)
+
+fn expf(n) = os.expf(n as Float)
+fn logf(n) = os.logf(n as Float)
+fn log10f(n) = os.log10f(n as Float)
+fn powf(base, power) = os.powf(base as Float, power as Float)
+fn sqrtf(n) =  __sqrt__(n as Float) // os.sqrtf(n as Float)
+fn signbitf(n) = os._fdsign(n as Float)
+fn fabsf(n) = os.fabsf(n as Float)
+fn logbf(a, b) = logf(a) / logf(b)
+
+
+//-----------------------------------------------------------------------------------------------------
+fn randomBytes(text, length) {
+  var handle = null
+  const algo = os.BCRYPT_RNG_ALGORITHM
+  var status = os.BCryptOpenAlgorithmProvider(&handle, algo.text, null, 0)
+  assert status == os.S_OK with "os.BCryptOpenAlgorithmProvider failed with #{status}"
+
+  status = os.BCryptGenRandom(handle, text, length, 0)
+  assert status == os.S_OK with "os.BCryptGenRandom failed with #{status}"
+
+  status = os.BCryptCloseAlgorithmProvider(handle, 0)
+  assert status == os.S_OK with "os.BCryptCloseAlgorithmProvider failed with #{status}"
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+fn randomText(text, length, alphabetOnly = false) {
+  randomBytes(text, length)
+  for var i = 0; i < length; ++i {
+    text[i] = makePrintable(text[i], alphabetOnly)
+  }
+  fn makePrintable(ch, alphabetOnly) {
+    if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+      return ch // Digit | Lower | Upper
+    }
+    if alphabetOnly {
+      const lo   = Char(ch & 0xF)
+      var   hi   = Char((ch >> 4) & 0xF)
+      const diff = (lo + hi) - 25
+      if diff > 0 {
+        hi -= diff
+      }
+      if hi {
+        return Char('A' + hi + lo)
+      }
+      return Char('a' + hi + lo)
+    }
+    if (ch >= '!' && ch <= '/') || (ch >= ':' && ch <= '@') || (ch >= '[' && ch <= '`') || (ch >= '{' && ch <= '~') {
+      return ch // Punctuation
+    }
+    const lo = Char(ch & 0xF)
+    const hi = Char((ch >> 4) & 0xF)
+    return Char('!' + hi + lo)
+  }
+}
+
+fn randomstring(text, length, alphabetOnly = true) {
+  randomText(text, length, alphabetOnly)
+  return string{ text = text, length = length }
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+fn randomUInt16() {
+  const bytes = 0u16
+  randomBytes(&bytes, sizeof(bytes))
+  return bytes
+}
+fn randomInt16() {
+  const bytes = 0i16
+  randomBytes(&bytes, sizeof(bytes))
+  return bytes
+}
+fn randomUInt32() {
+  const bytes = 0u32
+  randomBytes(&bytes, sizeof(bytes))
+  return bytes
+}
+fn randomInt32() {
+  const bytes = 0i32
+  randomBytes(&bytes, sizeof(bytes))
+  return bytes
+}
+fn randomUInt64() {
+  const bytes = 0u64
+  randomBytes(&bytes, sizeof(bytes))
+  return bytes
+}
+fn randomInt64() {
+  const bytes = 0i64
+  randomBytes(&bytes, sizeof(bytes))
+  return bytes
+}
+fn randomFloat() {
+  const n = randomInt32()
+  if n < 0 {
+    return Float(n) / 0x8000_0000i32
+  }
+  return Float(n) / 0x7FFF_FFFFi32
+  //return Float(randomInt32() & 0x7FFF_FFFF) / Float(0x7FFF_FFFF)
+  //return Float(randomUInt32() & 0x7FFF_FFFF) / (0x7F7F_FFFF to Float)
+}
+fn randomDouble() {
+  const n = randomInt64()
+  if n < 0 {
+    return Double(n) / 0x8000_0000_0000_0000i64
+  }
+  return Double(n) / 0x7FFF_FFFF_FFFF_FFFFi64
+  //return Double(randomInt64() & 0x7FFF_FFFF_FFFF_FFFF) / Double(0x7FFF_FFFF_FFFF_FFFF)
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn randomDoubleBetween(lo, hi) {
+  return Double(lo) if lo == hi
+  if lo > hi {
+    const tmp = lo
+    lo = hi
+    hi = tmp
+  }
+  const range = Double(hi) - Double(lo)
+  const n = randomDouble()
+  return Double(lo) + (range * n)
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+fn hash32(input, inputLength, inputSeed) {
+  static PRIME32_1 = 2654435761u32
+  static PRIME32_2 = 2246822519u32
+  static PRIME32_3 = 3266489917u32
+  static PRIME32_4 =  668265263u32
+  static PRIME32_5 =  374761393u32
+
+  assert input && inputLength
+
+  const seed  = UInt32(inputSeed)
+  const len   = UInt32(inputLength)
+  var   p     = Byte*{ input }
+  const bEnd  = p + len
+  var   h32   = 0u32
+
+  if len >= 16u32 {
+    const limit = bEnd - 15u32
+    var   v1    = seed + PRIME32_1 + PRIME32_2
+    var   v2    = seed + PRIME32_2
+    var   v3    = seed + 0u32
+    var   v4    = seed - PRIME32_1
+
+    for {
+      v1 = XXH32_round(v1, *(UInt32*{ p }))
+      p += 4u32
+      v2 = XXH32_round(v2, *(UInt32*{ p }))
+      p += 4u32
+      v3 = XXH32_round(v3, *(UInt32*{ p }))
+      p += 4u32
+      v4 = XXH32_round(v4, *(UInt32*{ p }))
+      p += 4u32
+      break if p > limit
+    }
+
+    h32 = __rotate_left__(v1, 1u32)  + __rotate_left__(v2, 7u32)
+        + __rotate_left__(v3, 12u32) + __rotate_left__(v4, 18u32)
+  } else {
+    h32  = seed + PRIME32_5
+  }
+
+  h32 += len
+
+  return XXH32_finalize(h32, p, len & 15u32)
+
+  fn XXH32_round(seed, input) {
+    seed += input * PRIME32_2
+    seed  = __rotate_left__(seed, 13u32)
+    seed *= PRIME32_1
+    return seed
+  }
+  /* mix all bits */
+  fn XXH32_avalanche(h32) {
+      h32 ^= h32 >> 15u32
+      h32 *= PRIME32_2
+      h32 ^= h32 >> 13u32
+      h32 *= PRIME32_3
+      h32 ^= h32 >> 16u32
+      return h32
+  }
+  fn XXH32_finalize(h32, ptr, len32) {
+      var p     = Byte*{ ptr }
+      const len = UInt32{ len32 }
+      fn PROCESS1(h32, p) {
+        h32 += (*p) * PRIME32_5
+        p++
+        h32 = __rotate_left__(h32, 11u32) * PRIME32_1
+        return (h32, p)
+      }
+
+      fn PROCESS4(h32, p) {
+        h32 += *(UInt32*{ p}) * PRIME32_3
+        p   += 4u32
+        h32  = __rotate_left__(h32, 17u32) * PRIME32_4
+        return (h32, p)
+      }
+
+      const sw = len & 15u32
+
+      if sw == 12u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 8u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 4u32 {
+        (h32, p) = PROCESS4(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 13u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 9u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 5u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 14u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 10u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 6u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 15u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 11u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 7u32 {
+        (h32, p) = PROCESS4(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 3u32 {
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 2u32 {
+        (h32, p) = PROCESS1(h32, p)
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      if sw == 1u32 {
+        (h32, p) = PROCESS1(h32, p)
+        return XXH32_avalanche(h32)
+      }
+      assert 0
+      return h32   /* reaching this point is deemed impossible */
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn hash64(input, inputLength, inputSeed) {
+  static PRIME64_1 = 11400714785074694791u64
+  static PRIME64_2 = 14029467366897019727u64
+  static PRIME64_3 =  1609587929392839161u64
+  static PRIME64_4 =  9650029242287828579u64
+  static PRIME64_5 =  2870177450012600261u64
+
+  assert input && inputLength >= 0
+  
+  const seed  = UInt64(inputSeed)
+  const len   = UInt32(inputLength)
+  var   p     = Byte*{ input }
+  const bEnd  = p + len
+  var   h64   = 0u64
+
+  if len >= 32 {
+    const limit = bEnd - 32
+    var   v1 = seed + PRIME64_1 + PRIME64_2
+    var   v2 = seed + PRIME64_2
+    var   v3 = seed + 0
+    var   v4 = seed - PRIME64_1
+
+    for {
+      v1 = XXH64_round(v1, *(UInt64*{ p }))
+      p +=8
+      v2 = XXH64_round(v2, *(UInt64*{ p }))
+      p +=8
+      v3 = XXH64_round(v3, *(UInt64*{ p }))
+      p +=8
+      v4 = XXH64_round(v4, *(UInt64*{ p }))
+      p +=8
+      break if p > limit
+    }
+
+    h64 = __rotate_left__(v1, 1) + __rotate_left__(v2, 7) + __rotate_left__(v3, 12) + __rotate_left__(v4, 18)
+    h64 = XXH64_mergeRound(h64, v1)
+    h64 = XXH64_mergeRound(h64, v2)
+    h64 = XXH64_mergeRound(h64, v3)
+    h64 = XXH64_mergeRound(h64, v4)
+
+  } else {
+      h64  = seed + PRIME64_5
+  }
+
+  h64 += UInt64(len)
+
+  return XXH64_finalize(h64, p, len)
+
+
+  fn XXH64_round(acc, input) {
+    acc += input * PRIME64_2
+    acc  = __rotate_left__(acc, 31)
+    acc *= PRIME64_1
+    return acc
+  }
+  fn XXH64_mergeRound(acc, val) {
+    val  = XXH64_round(0u64, val)
+    acc ^= val
+    acc  = acc * PRIME64_1 + PRIME64_4
+    return acc
+  }
+  fn XXH64_avalanche(h64) {
+    h64 ^= h64 >> 33
+    h64 *= PRIME64_2
+    h64 ^= h64 >> 29
+    h64 *= PRIME64_3
+    h64 ^= h64 >> 32
+    return h64
+  }
+  fn XXH64_finalize(h64, p, len) {
+    fn PROCESS1_64(h64, p) {
+      h64 ^= (*p++) * PRIME64_5
+      h64 = __rotate_left__(h64, 11) * PRIME64_1
+      return (h64, p)
+    }
+    fn PROCESS4_64(h64, p) {
+      h64 ^= (UInt64)(*(UInt32*{ p })) * PRIME64_1
+      p   += 4
+      h64 = __rotate_left__(h64, 23) * PRIME64_2 + PRIME64_3
+      return (h64, p)
+    }
+    fn PROCESS8_64(h64, p) {
+      const k1 = XXH64_round(0u64, *(UInt64*{ p }))
+      p   += 8
+      h64 ^= k1
+      h64  = __rotate_left__(h64,27) * PRIME64_1 + PRIME64_4
+      return (h64, p)
+    }
+
+    const sw = len & 31
+
+    if sw == 24 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 16 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 8 {
+      (h64, p) = PROCESS8_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 28 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 20 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 12 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 4 {
+      (h64, p) = PROCESS4_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 25 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 17 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 9 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 29 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 21 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 13 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 5 {
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 26 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 18 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 10 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 30 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 22 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 14 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 6 {
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 27 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 19 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 11 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 31 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 23 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 15 {
+      (h64, p) = PROCESS8_64(h64, p)
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 7 {
+      (h64, p) = PROCESS4_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 3 {
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 2 {
+      (h64, p) = PROCESS1_64(h64, p)
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 1 {
+      (h64, p) = PROCESS1_64(h64, p)
+      return XXH64_avalanche(h64)
+    }
+    if sw == 0 {
+      return XXH64_avalanche(h64)
+    }
+
+    /* impossible to reach */
+    assert 0
+    return 0  /* unreachable, but some compilers complain without it */
+  }
+}

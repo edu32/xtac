@@ -1,0 +1,857 @@
+import Num from tokens
+
+fn read(path) {
+  auto (file, fileok) = fio.openRead(path)
+  if fileok {
+    const s = String{}
+    if file.readAll(s) {
+      return (s, true)
+    }
+  }
+  println("Scanner cannot open and/or read '#{path}'")
+  return (String{}, false)
+}
+
+
+struct Token {
+  const      value = string{}
+  const      range = Range{}
+  readonly   token = Tok{}
+  var      keyword = Tok{}
+  const  number = struct {
+    const value = union {
+      var  u8 = 0u8
+      var  i8 = 0i8
+      var u16 = 0u16
+      var i16 = 0i16
+      var u32 = 0u32
+      var i32 = 0i32
+      var u64 = 0u64
+      var i64 = 0i64
+      var f32 = 0f32
+      var f64 = 0f64
+    }
+    var kind = Num{}
+  }
+
+  fn format(this, stream, fmt = "") {
+    //stream.append(nameof(this.token))
+    //stream.append("('")
+    this.value.format(stream, fmt)
+    //stream.append("')")
+  }
+
+  fn set(this, token, startpos, endpos, vstart, numberValue = 0u64, numKind = Num.None) {
+    this.number.value.u64 = numberValue
+    this.number.kind = numKind
+    this.range.start = startpos
+    this.range.end = endpos
+    this.token = token
+    this.keyword = Tok{}
+    this.value.clear()
+    assert startpos.line <= endpos.line && startpos.pos <= endpos.pos
+    this.value.setFromTextAndLength(vstart + startpos.pos, endpos.pos - startpos.pos)
+  }
+
+  fn isWhiteSpace(this) = this.token == Tok.Space || this.token == Tok.NewLine ||
+                          this.token == Tok.Comment
+  fn isNotWhiteSpace(this) = this.token != Tok.Space && this.token != Tok.NewLine &&
+                             this.token != Tok.Comment
+  fn isanIdentifier(this) = this.token == Tok.Identifier
+  fn isNotAnIdentifier(this) = this.token != Tok.Identifier
+  fn isaNumber(this) = this.number.kind != Num.None
+  fn isUnknown(this) = this.token == Tok.Unknown
+  fn isEndOfFile(this) = this.token == Tok.EndOfFile
+  fn isNotEndOfFile(this) = this.token != Tok.EndOfFile
+  fn isOpenCurly(this) = this.token == Tok.OpenCurly
+  fn isCloseCurly(this) = this.token == Tok.CloseCurly
+  fn isNotOpenCurly(this) = this.token != Tok.OpenCurly
+  fn isNotCloseCurly(this) = this.token != Tok.CloseCurly
+  fn isOpenParen(this) = this.token == Tok.OpenParen
+  fn isCloseParen(this) = this.token == Tok.CloseParen
+  fn isNotCloseParen(this) = this.token != Tok.CloseParen
+  fn isComma(this) = this.token == Tok.Comma
+  fn isNotComma(this) = this.token != Tok.Comma
+  fn isaSpace(this) = this.token == Tok.Space
+  fn isNotASpace(this) = this.token != Tok.Space
+  fn isaNewLine(this) = this.token == Tok.NewLine
+  fn isNotANewLine(this) = this.token != Tok.NewLine
+  fn isOpenBracket(this) = this.token == Tok.OpenBracket
+  fn isCloseBracket(this) = this.token == Tok.CloseBracket
+  fn isNotCloseBracket(this) = this.token != Tok.CloseBracket
+  fn isColon(this) = this.token == Tok.Colon
+  fn isaQuote(this) = this.token == Tok.SingleQuote || this.token == Tok.DoubleQuote
+  fn isAssign(this) = this.token == Tok.Assign
+  fn isaBinaryOperator(this) = (this.token >= Tok.Assign && this.token <= Tok.Multiply) ||
+                               (this.keyword >= Tok.NotIn && this.keyword <= Tok.Is)
+
+  fn isaKeyword(this) = this.keyword != Tok.Unknown
+  fn isNotAKeyword(this) = this.keyword == Tok.Unknown
+  fn isaModifier(this) = this.keyword >= Tok.Static && this.keyword <= Tok.Abstract
+  fn isaTypeKeyword(this) = this.keyword >= Tok.Struct && this.keyword <= Tok.Blob
+}
+
+
+struct Line {
+  var start  = Char*{}
+  var number = 1
+}
+
+
+struct Scanner {
+  readonly start = Char*{}
+  readonly pos   = Char*{}
+  readonly end   = Char*{}
+  readonly line  = Line{}
+  readonly token = Token{}
+
+
+  fn initialize(this, file) {
+    this.start = file.source.text
+    this.end = file.source.text + file.source.length
+    this.pos = this.start
+    this.line.start = this.pos
+  }
+
+
+  fn tokens(this) {
+    for {
+      if this.pos == this.end {
+        return this.set(Tok.EndOfFile, this.currentPos())
+      }
+      if this.doWhiteSpace() {
+        yield this.token
+      } else if this.pos == this.end {
+        return this.set(Tok.EndOfFile, this.currentPos())
+      } else {
+        yield this.doScan()
+      }
+    }
+  }
+
+
+  fn doWhiteSpace(this) {
+    const startpos = this.currentPos()
+    const startline = this.line.number
+    for const mark = this.pos; this.pos < this.end; ++this.pos {
+      switch *this.pos {
+        case ' ', '\t'
+        case '\f', '\v'
+        case '\r'
+          continue
+        case '\n' {
+          this.line.start = this.pos + 1
+          ++this.line.number
+        }
+        default {
+          if mark == this.pos {
+            return false
+          }
+          if this.line.number == startline {
+            this.set(Tok.Space, startpos)
+          } else {
+            this.set(Tok.NewLine, startpos)
+          }
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+
+  fn doScan(this) {
+    const startpos = this.currentPos()
+    const ch = *this.pos++
+    switch ch {
+      case '/' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '=' return this.set(Tok.DivideAssign, startpos)
+            case '/' return this.set(Tok.OpenSingleLineComment, startpos)
+            case '*' return this.set(Tok.OpenMultiLineComment, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Divide, startpos)
+      }
+      case '.' {
+        if this.peek() == '.' {
+          ++this.pos
+          if this.peek() == '.' {
+            ++this.pos
+            return this.set(Tok.Ellipsis, startpos)
+          }
+          return this.set(Tok.DotDot, startpos)
+        }
+        return this.set(Tok.Dot, startpos)
+      }
+      case '=' {
+        if this.peek() == '=' {
+          ++this.pos
+          if this.peek() == '=' {
+            ++this.pos
+            return this.set(Tok.Equivalent, startpos)
+          }
+          return this.set(Tok.Equal, startpos)
+        }
+        return this.set(Tok.Assign, startpos)
+      }
+      case '*' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '*' return this.set(Tok.MultiplyMultiply, startpos)
+            case '=' return this.set(Tok.MultiplyAssign, startpos)
+            case '/' return this.set(Tok.CloseMultiLineComment, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Multiply, startpos)
+      }
+      case '%' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '%' return this.set(Tok.PercentPercent, startpos)
+            case '=' return this.set(Tok.RemainderAssign, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Remainder, startpos)
+      }
+      case '^' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '^' return this.set(Tok.XOrXOr, startpos)
+            case '=' return this.set(Tok.XOrAssign, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.XOr, startpos)
+      }
+      case '~' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '~' return this.set(Tok.TildeTilde, startpos)
+            case '=' return this.set(Tok.TildeAssign, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Tilde, startpos)
+      }
+      case '&' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '&' return this.set(Tok.AndAnd, startpos)
+            case '=' return this.set(Tok.AndAssign, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.And, startpos)
+      }
+      case '|' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '|' return this.set(Tok.OrOr, startpos)
+            case '=' return this.set(Tok.OrAssign, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Or, startpos)
+      }
+      case '+' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '+' return this.set(Tok.PlusPlus, startpos)
+            case '=' return this.set(Tok.PlusAssign, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Plus, startpos)
+      }
+      case '-' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '-' return this.set(Tok.MinusMinus, startpos)
+            case '=' return this.set(Tok.MinusAssign, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Minus, startpos)
+      }
+      case '<' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '<' {
+              if this.peek() == '=' {
+                ++this.pos
+                return this.set(Tok.LeftShiftAssign, startpos)
+              }
+              return this.set(Tok.LeftShift, startpos)
+            }
+            case '='
+              return this.set(Tok.LessOrEqual, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Less, startpos)
+      }
+      case '>' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '>' {
+              const peeked = this.peek()
+              if peeked == '=' {
+                ++this.pos
+                return this.set(Tok.RightShiftAssign, startpos)
+              }
+              if peeked == '>' {
+                ++this.pos
+                if peeked == '=' {
+                  ++this.pos
+                  return this.set(Tok.UnsignedRightShiftAssign, startpos)
+                }
+              }
+              return this.set(Tok.UnsignedRightShift, startpos)
+            }
+            case '='
+              return this.set(Tok.GreaterOrEqual, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Greater, startpos)
+      }
+      case '!' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '=' {
+              return this.set(Tok.NotEquivalent, startpos) if *this.pos++ == '='
+              --this.pos
+              return this.set(Tok.NotEqual, startpos)
+            }
+            case '!' return this.set(Tok.LogicalIs, startpos)
+            case '<' return this.set(Tok.GreaterOrEqual, startpos)
+            case '>' return this.set(Tok.LessOrEqual, startpos)
+            case 'i' {
+              if this.pos < this.end {
+                if *this.pos == 's' {
+                  ++this.pos
+                  if this.pos == this.end || isNotAlphaOrDigit(*this.pos) {
+                    return this.set(Tok.Identifier, startpos)
+                  }
+                  --this.pos
+                } else if *this.pos == 'n' {
+                  ++this.pos
+                  if this.pos == this.end || isNotAlphaOrDigit(*this.pos) {
+                    return this.set(Tok.Identifier, startpos)
+                  }
+                  --this.pos
+                }
+              }
+            }
+          }
+          --this.pos
+        }
+        return this.set(Tok.LogicalNot, startpos)
+      }
+      case '?' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '?' return this.set(Tok.QuestionQuestion, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Question, startpos)
+      }
+      case '#' {
+        if this.pos < this.end {
+          switch *this.pos++ {
+            case '{' return this.set(Tok.HashOpenCurly, startpos)
+            case '}' return this.set(Tok.HashCloseCurly, startpos)
+            case '[' return this.set(Tok.HashOpenBracket, startpos)
+          }
+          --this.pos
+        }
+        return this.set(Tok.Hash, startpos)
+      }
+      case '(' return this.set(Tok.OpenParen, startpos)
+      case ')' return this.set(Tok.CloseParen, startpos)
+      case '[' return this.set(Tok.OpenBracket, startpos)
+      case ']' return this.set(Tok.CloseBracket, startpos)
+      case '{' return this.set(Tok.OpenCurly, startpos)
+      case '}' return this.set(Tok.CloseCurly, startpos)
+      case ',' return this.set(Tok.Comma, startpos)
+      case ';' return this.set(Tok.SemiColon, startpos)
+      case ':' return this.set(Tok.Colon, startpos)
+      case '\'' return this.set(Tok.SingleQuote, startpos)
+      case '"' return this.set(Tok.DoubleQuote, startpos)
+      case '\\' return this.set(Tok.BackSlash, startpos)
+      case '@' return this.set(Tok.At, startpos)
+      case '`' return this.set(Tok.BackTick, startpos)
+    }
+    if isaDigit(ch) {
+      return this.doDecimal(startpos)
+    }
+    // Remember that {ch} is one behind {pos} i.e. {pos} is one ahead of {ch}.
+    const (length, ok) = utf8At(this.pos - 1, this.end, includeDigits = false) 
+    if length {
+      this.pos += length - 1
+      return this.doText(startpos) if ok
+    }
+    this.set(Tok.Unknown, startpos)
+    return this.token
+  }
+
+
+  fn doDecimal(this, startpos) {
+    const mark = this.pos - 1
+    var dot = Char*{}
+    return this.set(Tok.Number, startpos, char.toDigit(*mark), Num.i32) if this.pos == this.end
+    if *mark == '0' {
+      switch *this.pos {
+        case 'x', 'X' {
+          ++this.pos
+          return this.doHexadecimal(startpos, mark)
+        }
+        case 'b', 'B' {
+          ++this.pos
+          return this.doBinary(startpos, mark)
+        }
+        case 'o', 'O' {
+          ++this.pos
+          return this.doOctal(startpos, mark)
+        }
+      }
+    }
+    for ; this.pos < this.end; ++this.pos {
+      const ch = *this.pos
+      if ch == '.' {
+        if dot {
+          break
+        }
+        dot = this.pos
+      } else if ch == '_' {
+        break if this.pos[-1] == '.'  
+      } else if isNotADigit(ch) {
+        break
+      }
+    }
+    if this.pos[-1] == '.' {
+      --this.pos
+      dot = null
+    }
+    const raw = string.fromRange(mark, this.pos)
+    auto  str = removeUnderScores(raw)
+    if this.pos == this.end {
+      if dot {
+        const (n, nok) = str.tryParseDouble()
+        return this.set(Tok.Number, startpos, n to UInt64, Num.f64) if nok
+        return this.set(Tok.Unknown, startpos)
+      }
+      const (n, num) = computeNum(str, dot)
+      return this.set(Tok.Number, startpos, n, num) if num != Num.None
+      return this.set(Tok.Unknown, startpos)
+    }
+    if *this.pos == 'e' || *this.pos == 'E' {
+      return this.continueFromExponent(startpos, mark, dot)
+    }
+    switch const num = this.doNumberSuffix() {
+      case Num.f32 {
+        const (n, nok) = str.tryParseFloat()
+        return this.set(Tok.Number, startpos, (n to UInt32) as UInt64, Num.f32) if nok
+        return this.set(Tok.Unknown, startpos)
+      }
+      case Num.f64 {
+        const (n, nok) = str.tryParseDouble()
+        return this.set(Tok.Number, startpos, n to UInt64, Num.f64) if nok
+        return this.set(Tok.Unknown, startpos)
+      }
+      case Num.u8, Num.u16, Num.u32, Num.u64 {        
+        const (n, nok) = str.tryParseUInt()
+        return this.set(Tok.Number, startpos, n, num) if nok
+        return this.set(Tok.Unknown, startpos)
+      }
+      case Num.i8, Num.i16, Num.i32, Num.i64 {        
+        const (n, nok) = str.tryParseInt()
+        return this.set(Tok.Number, startpos, n as UInt64, num) if nok
+        return this.set(Tok.Unknown, startpos)
+      }
+    }
+    if isAlpha(*this.pos) {
+      return this.doText(startpos)
+    }
+    assert isNotADigit(*this.pos)
+    const (n, num2) = computeNum(str, dot)
+    return this.set(Tok.Number, startpos, n, num2) if num2 != Num.None
+    return this.set(Tok.Unknown, startpos)
+  }
+
+  fn continueFromExponent(this, startpos, mark, dot) {
+    ++this.pos // Past 'e' | 'E'
+    return this.set(Tok.Unknown, startpos) if this.pos == this.end
+    if *this.pos == '+' || *this.pos == '-' {
+      ++this.pos
+      return this.set(Tok.Unknown, startpos) if this.pos == this.end
+    }
+    return this.set(Tok.Unknown, startpos) if isNotADigit(*this.pos)
+    for ++this.pos; this.pos < this.end; ++this.pos {
+      const ch = *this.pos
+      break if isNotADigit(ch) && ch != '_'
+    }
+    const raw = string.fromRange(mark, this.pos)
+    auto str = removeUnderScores(raw)
+    if this.pos < this.end {
+      switch const num = this.doNumberSuffix() {
+        case Num.f32 {
+          const (n, nok) = str.tryParseFloat()
+          return this.set(Tok.Number, startpos, (n to UInt32) as UInt64, num) if nok
+          return this.set(Tok.Unknown, startpos)
+        }
+        case Num.f64 {
+          const (n, nok) = str.tryParseDouble()
+          return this.set(Tok.Number, startpos, n to UInt64, num) if nok
+          return this.set(Tok.Unknown, startpos)
+        }
+      }
+      return this.set(Tok.Unknown, startpos) if isAlpha(*this.pos) 
+    }  
+    const (n, nok) = str.tryParseDouble()
+    return this.set(Tok.Number, startpos, n to UInt64, Num.f64) if nok
+    return this.set(Tok.Unknown, startpos)
+  }
+
+
+  fn doHexadecimal(this, startpos, mark) {
+    return this.set(Tok.Identifier, startpos) if this.pos == this.end
+    return this.doText(startpos) if isNotHex(*this.pos)
+    for ++this.pos; this.pos < this.end; ++this.pos {
+      const ch = *this.pos
+      break if isNotHex(ch) && ch != '_'
+    }
+    const raw = string.fromRange(mark, this.pos)
+    auto str = removeUnderScores(raw)
+    const (n, computedKind) = this.computeNum(str, null, 16)
+    return this.set(Tok.Unknown, startpos) if !computedKind
+    return this.set(Tok.Number, startpos, n, computedKind) if this.pos == this.end
+    if const declaredSuffix = this.doNumberSuffix() {
+      return this.set(Tok.Number, startpos, n, declaredSuffix)
+    }
+    return this.doText(startpos) if this.pos < this.end && isAlpha(*this.pos)
+    return this.set(Tok.Number, startpos, n, computedKind)
+  }
+
+
+  fn doBinary(this, startpos, mark) {
+    return this.set(Tok.Identifier, startpos) if this.pos == this.end
+    return this.doText(startpos) if isNotBinary(*this.pos)
+    for ++this.pos; this.pos < this.end; ++this.pos {
+      const ch = *this.pos
+      break if isNotBinary(ch) && ch != '_'
+    }
+    const raw = string.fromRange(mark, this.pos)
+    auto str = removeUnderScores(raw)
+    const (n, computedKind) = this.computeNum(str, null, 2)
+    return this.set(Tok.Unknown, startpos) if !computedKind
+    return this.set(Tok.Number, startpos, n, computedKind) if this.pos == this.end
+    if const declaredSuffix = this.doNumberSuffix() {
+      return this.set(Tok.Number, startpos, n, declaredSuffix)
+    }
+    return this.doText(startpos) if this.pos < this.end && isAlphaOrDigit(*this.pos)
+    return this.set(Tok.Number, startpos, n, computedKind)
+  }
+
+
+  fn doOctal(this, startpos, mark) {
+    return this.set(Tok.Identifier, startpos) if this.pos == this.end
+    return this.doText(startpos) if isNotOctal(*this.pos)
+    for ++this.pos; this.pos < this.end; ++this.pos {
+      const ch = *this.pos
+      break if isNotOctal(ch) && ch != '_'
+    }
+    const raw = string.fromRange(mark, this.pos)
+    auto str = removeUnderScores(raw)
+    const (n, computedKind) = this.computeNum(str, null, 8)
+    return this.set(Tok.Unknown, startpos) if !computedKind
+    return this.set(Tok.Number, startpos, n, computedKind) if this.pos == this.end
+    if const declaredSuffix = this.doNumberSuffix() {
+      return this.set(Tok.Number, startpos, n, declaredSuffix)
+    }
+    return this.doText(startpos) if this.pos < this.end && isAlphaOrDigit(*this.pos)
+    return this.set(Tok.Number, startpos, n, computedKind)
+  }
+
+
+  fn doNumberSuffix(this) {
+    const mark = this.pos
+    switch *this.pos++ {
+      case 'u', 'U' {
+        return Num.u32 if this.pos == this.end
+        switch *this.pos++ {
+          case '8' {
+            return Num.u8 if isend(this)
+          }
+          case '1' {
+            return none(this, mark) if this.pos == this.end || *this.pos != '6'
+            ++this.pos
+            return Num.u16 if isend(this)
+          }
+          case '3' {
+            return none(this, mark) if this.pos == this.end || *this.pos != '2'
+            ++this.pos
+            return Num.u32 if isend(this)
+          }
+          case '6' {
+            return none(this, mark) if this.pos == this.end || *this.pos != '4'
+            ++this.pos
+            return Num.u64 if isend(this)
+          }
+          default {
+            --this.pos
+            return Num.u32 if isend(this)
+          }
+        }
+      }
+      case 'i', 'I' {
+        return Num.i32 if this.pos == this.end
+        switch *this.pos++ {
+          case '8'
+            return Num.i8 if isend(this)
+          case '1' {
+            return none(this, mark) if this.pos == this.end || *this.pos != '6'
+            ++this.pos
+            return Num.i16 if isend(this)
+          }
+          case '3' {
+            return none(this, mark) if this.pos == this.end || *this.pos != '2'
+            ++this.pos
+            return Num.i32 if isend(this)
+          }
+          case '6' {
+            return none(this, mark) if this.pos == this.end || *this.pos != '4'
+            ++this.pos
+            return Num.i64 if isend(this)
+          }
+          default {
+            --this.pos
+            return Num.i32 if isend(this)
+          }
+        }
+      }
+      case 'f', 'F' {
+        return Num.f32 if this.pos == this.end
+        switch *this.pos++ {
+            case '3' {
+              return none(this, mark) if this.pos == this.end || *this.pos != '2'
+              ++this.pos
+              return Num.f32 if isend(this)
+            }
+            case '6' {
+              return none(this, mark) if this.pos == this.end || *this.pos != '4'
+              ++this.pos
+              return Num.f64 if isend(this)
+            }
+            default {
+              --this.pos
+              return Num.f32 if isend(this)
+            }
+        }
+      }
+    }
+    return none(this, mark)
+    fn none(sc, mark) {
+      sc.pos = mark
+      return Num.None
+    }
+    fn isend(sc) {
+      return sc.pos == sc.end || isNotAlphaOrDigit(sc.pos[0])
+    }
+  }
+
+
+  fn computeNum(str, dot, base = 10) {
+    if dot {
+      const (n, nok) = str.tryParseDouble()
+      return (n to UInt64, Num.None) if !nok
+      return (n to UInt64, Num.f64)
+    }
+    const (n, nok) = str.tryParseUInt(base)
+    return (n, Num.None) if !nok
+    const         lo32 = Int32(n & 0xFFFF_FFFFu64)
+    const         hi32 = Int32((n & 0xFFFF_FFFF_0000_0000u64) >> 32)
+    const isUnsigned32 = (n & 0x8000_0000u64) == 0
+    const isUnsigned64 = ((n >> 63) & 0x1) == 0
+    if hi32 == 0 {
+      return (n, Num.i32) if isUnsigned32
+      return (n, Num.u32)
+    }
+    if hi32 == -1 {
+      return (n, Num.i32) if lo32 == -1
+    }
+    return (n, Num.i64) if isUnsigned64
+    return (n, Num.u64)
+  }
+
+
+  fn removeUnderScores(str) {
+    const s = String{}
+    var mark = str.text
+    const end = str.end()
+    for var pos = mark; pos < end; ++pos {
+      if *pos == '_' {
+        s.appendRange(mark, pos)
+        mark = pos + 1
+      }
+    }
+    s.appendRange(mark, end)
+    return s
+  }
+
+
+  fn doText(this, startpos) {
+    for this.pos < this.end {
+      const (length, ok) = utf8At(this.pos, this.end, includeDigits = true)
+      if !ok {
+        this.pos += length
+        return this.set(Tok.Unknown, startpos)
+      }
+      break if length == 0
+      this.pos += length
+    }
+    this.set(Tok.Identifier, startpos)
+    return this.token
+  }
+
+  fn peek(this, n = 0) {
+    if this.pos + n < this.end {
+      return this.pos[n]
+    }
+    return ''
+  }
+
+
+  fn set(this, kind, startpos, numberValue = 0u64, num = Num.None) {
+    assert this.pos <= this.end with "#{nameof(kind)}"
+    this.token.set(kind, startpos, this.currentPos(), this.start, numberValue, num)
+    if kind == Tok.Identifier {
+      struct Keyword {
+        const  name = ""
+        const value = Tok{}
+      }
+      static keywords = [
+        Keyword{ name = "if",       value = Tok.If },
+        Keyword{ name = "else",     value = Tok.Else },
+        Keyword{ name = "for",      value = Tok.For },
+        Keyword{ name = "each",     value = Tok.Each },
+        Keyword{ name = "switch",   value = Tok.Switch },
+        Keyword{ name = "case",     value = Tok.Case },
+        Keyword{ name = "default",  value = Tok.Default },
+        Keyword{ name = "defer",    value = Tok.Defer },
+        Keyword{ name = "return",   value = Tok.Return },
+        Keyword{ name = "yield",    value = Tok.Yield },
+        // yield from
+        Keyword{ name = "await",    value = Tok.Await },
+        Keyword{ name = "break",    value = Tok.Break },
+        Keyword{ name = "continue", value = Tok.Continue },
+        Keyword{ name = "static",   value = Tok.Static },
+        Keyword{ name = "const",    value = Tok.Const },
+        Keyword{ name = "readonly", value = Tok.ReadOnly },
+        Keyword{ name = "auto",     value = Tok.Auto },
+        Keyword{ name = "var",      value = Tok.Var },
+        Keyword{ name = "synchronized", value = Tok.Synchronized },
+        Keyword{ name = "async",    value = Tok.Async },
+        Keyword{ name = "abstract", value = Tok.Abstract },
+        Keyword{ name = "struct",   value = Tok.Struct },
+        Keyword{ name = "union",    value = Tok.Union },
+        Keyword{ name = "enum",     value = Tok.Enum },
+        Keyword{ name = "fn",       value = Tok.Fn },
+        Keyword{ name = "urlhandler",value = Tok.UrlHandler },
+        Keyword{ name = "extern",   value = Tok.Extern },
+        Keyword{ name = "html",     value = Tok.Html },
+        Keyword{ name = "css",      value = Tok.Css },
+        Keyword{ name = "json",     value = Tok.Json },
+        Keyword{ name = "sql",      value = Tok.Sql },
+        Keyword{ name = "blob",     value = Tok.Blob },
+        Keyword{ name = "false",    value = Tok.False },
+        Keyword{ name = "true",     value = Tok.True },
+        Keyword{ name = "null",     value = Tok.Null },
+        Keyword{ name = "void",     value = Tok.Void },
+        Keyword{ name = "import",   value = Tok.Import },
+        Keyword{ name = "export",   value = Tok.Export },
+        Keyword{ name = "define",   value = Tok.Define },
+        Keyword{ name = "assert",   value = Tok.Assert },
+        Keyword{ name = "from",     value = Tok.From },
+        Keyword{ name = "typeof",   value = Tok.TypeOf },
+        Keyword{ name = "sizeof",   value = Tok.SizeOf },
+        Keyword{ name = "nameof",   value = Tok.NameOf },
+        Keyword{ name = "new",      value = Tok.New },
+        Keyword{ name = "delete",   value = Tok.Delete },
+        Keyword{ name = "with",     value = Tok.With },
+        Keyword{ name = "!in",      value = Tok.NotIn },
+        Keyword{ name = "in",       value = Tok.In },
+        Keyword{ name = "to",       value = Tok.To },
+        Keyword{ name = "as",       value = Tok.As },
+        Keyword{ name = "!is",      value = Tok.IsNot },
+        Keyword{ name = "is",       value = Tok.Is }
+      ]
+      for kw in keywords {
+        if kw.name == this.token.value {
+          this.token.keyword = kw.value
+          break
+        }
+      }
+    }
+    return this.token
+  }
+
+
+  fn currentPos(this) {
+    return Location{ line = this.line.number,
+                      col = 1 + (this.pos - this.line.start),
+                      pos = this.pos - this.start }
+  }
+}
+
+
+fn isaDigit(ch)       = char.isaDigit(ch)
+fn isAlphaOrDigit(ch) = utf8Length(ch, includeDigits = true) > 0
+fn isAlpha(ch)        = utf8Length(ch, includeDigits = false) > 0
+fn isHex(ch)          = char.isHex(ch)
+fn isBinary(ch)       = ch == '0' || ch == '1'
+fn isOctal(ch)        = char.isOctal(ch)
+
+
+fn isNotADigit(ch)       = !char.isaDigit(ch)
+fn isNotAlphaOrDigit(ch) = utf8Length(ch, includeDigits = true) == 0
+fn isNotAlpha(ch)        = utf8Length(ch, includeDigits = false) == 0
+fn isNotHex(ch)          = !char.isHex(ch)
+fn isNotBinary(ch)       = ch != '0' && ch != '1'
+fn isNotOctal(ch)        = !char.isOctal(ch)
+
+
+fn utf8At(pos, end, includeDigits) {
+  const ch = *pos
+  var length = utf8Length(ch, includeDigits)
+  if length > 0 {
+    return (length, false) if !isaProperUtf8(length, pos, end)
+  }
+  return (length, true)
+}
+
+
+fn utf8Length(ch, includeDigits) {
+  return 1 if char.isAlpha(ch) || ch == '_' || ch == '$'
+  return 1 if includeDigits && char.isaDigit(ch)
+  if const length = char.isaUtf8LeadByte(ch) {
+    return length if length > 1
+  }
+  return 0
+}
+
+
+fn isaProperUtf8(length, pos, end) {
+  const posend = pos + length
+  return false if posend > end
+  for ++pos; pos < posend; ++pos {
+    return false if !char.isaUtf8FollowingByte(*pos)
+  }
+  return pos == posend
+}

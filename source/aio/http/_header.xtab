@@ -1,0 +1,175 @@
+struct Value {
+  var name = ""
+  var value = ""
+  var params = ""
+
+  fn format(this, s, fmt = "") {
+    if this.name.length {
+      s.append(this.name).append(" = ").append(this.value)
+    }
+    s.append(this.value)
+    if this.params.length {
+      s.append("; ")
+    }
+    s.append(this.params)
+  }
+}
+
+struct Param {
+  var name = ""
+  var value = ""
+
+  fn format(this, s, fmt = "") {
+    if this.name.length {
+      s.append(this.name).append(" = ").append(this.value)
+    }
+    s.append(this.value)
+  }
+}
+
+fn values(s) {
+  enum State {
+    Name,
+    Value,
+    Params
+  }
+  return {
+    pos = s.text,
+    end = s.end(),
+    next = fn(self) {
+      const result = Value{}
+      return (result, /* done = */ true) if self.pos == self.end
+      assert self.pos < self.end
+      // Skip junk.
+      for ; self.pos < self.end && 
+           (*self.pos == ',' || *self.pos == ';' || *self.pos == ' '); 
+           ++self.pos {}
+      return (result, /* done = */ true) if self.pos == self.end
+      result.name = string.fromTextAndLength(self.pos, 0)
+      var state = State.Name
+      for ; self.pos < self.end; ++self.pos {
+        if *self.pos == '=' {
+          if state == State.Name {
+            result.name = string.fromRange(result.name.text, self.pos)
+            result.name.trim()
+            result.value = string.fromTextAndLength(self.pos + 1, 0)
+            state = State.Value
+          }
+        } else if *self.pos == '\'' || *self.pos == '"' {
+          self.pos = skipQuoted(self.pos, self.end)
+          break if self.pos == self.end
+        } else if *self.pos == '(' {
+          self.pos = skipParenthesized(self.pos, self.end)
+          break if self.pos == self.end
+        } else if *self.pos == ';' {
+          if state == State.Name {
+            result.value = string.fromRange(result.name.text, self.pos)
+            result.value.trim()
+            result.params = string.fromTextAndLength(self.pos + 1, 0)
+            result.name.clear()
+          } else if state == State.Value {
+            result.value = string.fromRange(result.value.text, self.pos)
+            result.value.trim()
+            result.params = string.fromTextAndLength(self.pos + 1, 0)
+          }
+          state = State.Params
+        } else if *self.pos == ',' {
+          if state == State.Name {
+            result.value = string.fromRange(result.name.text, self.pos)
+            result.value.trim()
+            result.name.clear()
+          } else if state == State.Value {
+            result.value = string.fromRange(result.value.text, self.pos)
+            result.value.trim()
+          } else {
+            result.params = string.fromRange(result.params.text, self.pos)
+            result.params.trim()
+          }
+          return (result, /* done = */ false)
+        }
+      } if state == State.Name {
+        result.value = string.fromRange(result.name.text, self.pos)
+        result.value.trim()
+        result.name.clear()
+      } else if state == State.Value {
+        result.value = string.fromRange(result.value.text, self.pos)
+        result.value.trim()
+      } else {
+        result.params = string.fromRange(result.params.text, self.pos)
+        result.params.trim()
+      }
+      return (result, /* done = */ false)
+    }
+  }
+}
+
+fn params(s) {
+  return {
+    pos = s.text,
+    end = s.end(),
+    next = fn(self) {
+      const result = Param{}
+      return (result, /* done = */ true) if self.pos == self.end
+      assert self.pos < self.end
+      // Skip junk.
+      for ; self.pos < self.end && 
+           (*self.pos == ';' || *self.pos == ' '); 
+           ++self.pos {}
+      return (result, /* done = */ true) if self.pos == self.end
+      define NAME   1
+      define VALUE  2
+      result.name = string.fromTextAndLength(self.pos, 0)
+      var state = NAME
+      for ; self.pos < self.end; ++self.pos {
+        if *self.pos == '=' {
+          if state == NAME {
+            result.name = string.fromRange(result.name.text, self.pos)
+            result.name.trim()
+            result.value = string.fromTextAndLength(self.pos + 1, 0)
+            state = VALUE
+          }
+        } else if *self.pos == '\'' || *self.pos == '"' {
+          self.pos = skipQuoted(self.pos, self.end)
+          break if self.pos == self.end
+        } else if *self.pos == '(' {
+          self.pos = skipParenthesized(self.pos, self.end)
+          break if self.pos == self.end  
+        } else if *self.pos == ';' {
+          if state == NAME {
+            result.value = string.fromRange(result.name.text, self.pos)
+          } else {
+            result.value = string.fromRange(result.value.text, self.pos)
+          }
+          result.value.trim()
+          return (result, /* done = */ false)
+        }
+      } if state == NAME {
+        result.value = string.fromRange(result.name.text, self.pos)
+      } else {
+        result.value = string.fromRange(result.value.text, self.pos)
+      }
+      result.value.trim()
+      return (result, /* done = */ false)
+    },
+    result = Value{}
+  }
+}
+
+fn skipParenthesized(pos, end): pos {
+  for ++pos; pos < end && *pos != ')'; ++pos {
+    if *pos == '\'' || *pos == '"' {
+      pos = skipQuoted(pos, end)
+      break if pos == end
+    }
+  }
+}
+
+fn skipQuoted(pos, end): pos {
+  const quote = *pos
+  for ++pos; pos < end && *pos != quote; ++pos {
+    if *pos == '(' {
+      pos = skipParenthesized(pos, end)
+      break if pos == end
+    }
+  }
+}

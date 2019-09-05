@@ -1,0 +1,296 @@
+struct Buffer {
+  readonly    bytes = Byte*{}
+  readonly   length = 0
+  readonly capacity = 0
+
+  readonly displacement = Site{}
+  readonly    immediate = Site{}
+
+
+  fn dispose(this) {
+    delete this.bytes
+  }
+
+
+  fn reserve(this, length):this {
+    const cap = this.length + length
+    return this if cap < this.capacity
+    if this.capacity {
+      for this.capacity < cap {
+        this.capacity <<= 1
+      }
+    } else {
+      this.capacity = 0x100
+    }
+    import malloc from memory
+    this.bytes = malloc(this.bytes, this.capacity)
+  }
+
+
+  fn begin(this):this {
+    this.displacement = Site{}
+       this.immediate = Site{}
+  }
+
+
+  fn writeByte(this, value):this {
+    this.reserve(SIZE_OF_BYTE)
+    this.bytes[this.length++] = Byte(value)
+  }
+
+
+  fn writeInt16(this, value):this {
+    this.reserve(SIZE_OF_WORD)
+    *((this.bytes + this.length) as UInt16*) = UInt16(value)
+    this.length += SIZE_OF_WORD
+  }
+
+
+  fn writeInt32(this, value) {
+    this.reserve(SIZE_OF_INT)
+    *((this.bytes + this.length) as UInt32*) = UInt32(value)
+    this.length += SIZE_OF_INT
+  }
+
+
+  fn writeInt64(this, value) {
+    this.reserve(SIZE_OF_POINTER)
+    *((this.bytes + this.length) as UInt64*) = UInt64(value)
+    this.length += SIZE_OF_POINTER
+  }
+
+
+  fn writeDisp8(this, value) {
+    this.displacement.set(offset = this.length, size = SIZE_OF_BYTE)
+    this.writeByte(value)
+  }
+
+
+  fn writeDisp32(this, value) {
+    this.displacement.set(offset = this.length, size = SIZE_OF_INT)
+    this.writeInt32(value)
+  }
+
+
+  fn writeImm8(this, value) {
+    this.immediate.set(offset = this.length, size = SIZE_OF_BYTE)
+    this.writeByte(value)
+  }
+
+
+  fn writeImm16(this, value) {
+    this.immediate.set(offset = this.length, size = SIZE_OF_WORD)
+    this.writeInt16(value)
+  }
+
+
+  fn writeImm32(this, value) {
+    this.immediate.set(offset = this.length, size = SIZE_OF_INT)
+    this.writeInt32(value)
+  }
+
+
+  fn writeImm64(this, value) {
+    this.immediate.set(offset = this.length, size = SIZE_OF_POINTER)
+    this.writeInt64(value)
+  }
+
+
+  fn append(this, bytes, length) {
+    this.reserve(length)
+    import mcopy from memory
+    if bytes {
+      mcopy(this.bytes + this.length, bytes as Byte*, length)
+    }
+    this.length += length
+  }
+
+
+  fn appendNullTerminatedString(this, text, length) {
+    const totalSize = length + 1
+    this.reserve(totalSize)
+    import mcopy from memory
+    if text && *text {
+      mcopy(this.bytes + this.length, text as Byte*, length)
+    }
+    this.bytes[this.length + length] = 0u8
+    this.length += totalSize
+  }
+
+
+  fn writeRex(this, w, r, x, b, emitRexAlways) {
+    /*
+        7 6 5 4 3 2 1 0
+        ^ ^ ^ ^ ^ ^ ^ ^
+        | | | | | | | |
+        0 1 0 0 | | | B ⟶ 4th bit of ModRM.r/m (REX.B)
+                | | X   ⟶ 4th bit of SIB.index (REX.X)
+                | R     ⟶ 4th bit of ModRM.reg (REX.R)
+                W       ⟶ Specifies 64-bit operand size or default operand size (REX.W)
+    */
+    const rex = (w << 3) | 
+                (r << 2) | 
+                (x << 1) |
+                (b     )
+    if emitRexAlways || rex {
+      this.writeByte(rex | 0x40)
+    }
+  }
+
+  fn writeVex(this, v, r, x, b, l, map, pp, w) {
+    /*      Byte 1          Byte 0
+               |               |
+        +――――――+――――――+ +――――――+――――――+
+        |             | |             |
+        v             v v             v
+        7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0
+        ^ ^ ^ ^ ^ ^ ^ ^ ^             ^
+        | | | | | | | | |             |
+        | | | | | | | | +――――――+――――――+
+        | | | | | | | |        |
+        | | | | | | | |      0xC5
+        | | | | | | | |
+        | | | | | | p p     IMPLIED ADDITIONALPREFIX
+        | | | | | | 0 0 ⟶   No prefix ⟶ packed single
+        | | | | | | 0 1 ⟶ 0x66 prefix ⟶ packed double
+        | | | | | | 1 0 ⟶ 0xF3 prefix ⟶ scalar single
+        | | | | | | 1 1 ⟶ 0xF2 prefix ⟶ scalar double
+        | | | | | |
+        | | | | | L     VECTOR LENGTH
+        | | | | | 0 ⟶ 128 bit vector length
+        | | | | | 1 ⟶ 256 bit vector length
+        | | | | |
+        | v v v v ⟶ Encodes the first source register or destination register inverted (VEX.vvvv)
+        |
+        R ⟶ 4th bit of ModRM.reg inverted
+    */
+    /*  Choose 2 B VEX if:
+          VEX.m-mmmm ⟶ 1 i.e. VEX opcode map 1
+               VEX.B ⟶ 1 i.e. {b} inverted is 0b1xxx
+               VEX.X ⟶ 1 i.e. {x} inverted is 0b1xxx
+               VEX.W ⟶ 0
+    */
+    define REG_MASK 0b1111
+    if v == INVALID_REGISTER {
+      v = 0
+    }
+    const invb = ~b & REG_MASK
+    const invx = ~x & REG_MASK
+    const invr = ~r & REG_MASK
+    const invv = ~v & REG_MASK
+    if map == 1 && w == 0 && (invb & HI_MASK) && (invx & HI_MASK) {
+      const bytes = [
+        Byte(0xC5),                 // 2 B encoding escape
+        Byte(
+            ((invr & 0x8) << 0x4) | // VEX.R ⟶ copy 4th bit of {invr} to 8th position of byte
+            ((invv & 0xF) << 0x3) | // VEX.vvvv
+            (l            << 0x2) | // VEX.L
+            pp                      // VEX.pp
+          )
+      ]
+      this.append(bytes.text, bytes.length)
+      return
+    }
+
+    /*      Byte 2          Byte 1          Byte 0
+               |               |               |
+        +――――――+――――――+ +――――――+――――――+ +――――――+――――――+
+        |             | |             | |             |
+        v             v v             v  v             v
+        7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0
+        ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^             ^ 
+        | | | | | | | | | | | | | | | | |             | 
+        | | | | | | | | | | | | | | | | +――――――+――――――+
+        | | | | | | | | | | | | | | | |         |
+        | | | | | | | | | | | | | | | |       0xC4
+        | | | | | | | | | | | | | | | |
+        | | | | | | | | | | | m m m m m OPCODE MAP SELECTOR
+        | | | | | | | | | | | 0 0 0 0 1 ⟶ 0Fh    ⟶ VEX opcode map 1
+        | | | | | | | | | | | 0 0 0 1 0 ⟶ 0F 38h ⟶ VEX opcode map 2
+        | | | | | | | | | | | 0 0 0 1 1 ⟶ 0F 3Ah ⟶ VEX opcode map 3
+        | | | | | | | | | | B ⟶ 4th bit of ModRM.rm or SIB.base inverted (VEX.B)
+        | | | | | | | | | X   ⟶ 4th bit of SIB.index inverted (VEX.X)
+        | | | | | | | | R     ⟶ 4th bit of ModRM.reg inverted (VEX.R)
+        | | | | | | | |
+        | | | | | | p p     IMPLIED ADDITIONAL OPCODE EXTENSION PREFIX BYTE
+        | | | | | | 0 0 ⟶   No prefix ⟶ packed single
+        | | | | | | 0 1 ⟶ 0x66 prefix ⟶ packed double
+        | | | | | | 1 0 ⟶ 0xF3 prefix ⟶ scalar single
+        | | | | | | 1 1 ⟶ 0xF2 prefix ⟶ scalar double
+        | | | | | |
+        | | | | | L     VECTOR LENGTH
+        | | | | | 0 ⟶ 128 bit vector length
+        | | | | | 1 ⟶ 256 bit vector length
+        | | | | |
+        | v v v v ⟶ Encodes the first source register or destination register inverted (VEX.vvvv)
+        |
+        W ⟶ Specifies 64-bit operand, general opcode extension bit or operand order if set (VEX.W)
+    */
+    const bytes = [
+      Byte(0xC4),                          // 3 B encoding escape
+      Byte(
+          ((invr & 0x8) << 0x4) | // VEX.R ⟶ copy 4th bit of {invr} to 8th position of byte
+          ((invx & 0x8) << 0x3) | // VEX.X ⟶ copy 4th bit of {invx} to 7th position of byte
+          ((invb & 0x8) << 0x2) | // VEX.B ⟶ copy 4th bit of {invb} to 6th position of byte
+          map                     // VEX.m-mmmm
+        ),
+      Byte(
+          (w            << 0x7) | // VEX.W
+          ((invx & 0xF) << 0x3) | // VEX.vvvv
+          (l            << 0x2) | // VEX.L
+          pp                     // VEX.pp
+        )
+    ]
+    this.append(bytes.text, bytes.length)
+  }
+
+
+  fn writeModRM(this, mode, reg, rm) {
+    /*
+        7 6 5 4 3 2 1 0
+        ^ ^ ^ ^ ^ ^ ^ ^
+        | | |   | |   |
+        | | |   | +―+―+
+        | | |   |   |
+        | | |   |  r/m
+        | | +―+―+
+        | |   | 
+        | |  reg
+        | |
+        0 0 No displacement
+        0 1 r/m + disp8
+        1 0 r/m + disp32
+        1 1 Registers
+    */
+    const modRM = (mode           << 6) | 
+                  ((reg  & 0b111) << 3) | 
+                  (rm    & 0b111)
+    this.writeByte(modRM)
+  }
+
+
+  fn writeSIB(this, mode, reg, base, index, scale) {
+    /*
+        7 6 5 4 3 2 1 0
+        ^ ^ ^ ^ ^ ^ ^ ^
+        | | |   | |   |
+        | | |   | +―+―+
+        | | |   |   |
+        | | |   |  Lowest 3 bits of base register
+        | | +―+―+
+        | |   | 
+        | |  Lowest 3 bits of index register
+        | |
+        s s     SCALE
+        0 0 ⟶ index × 1
+        0 1 ⟶ index × 2
+        1 0 ⟶ index × 4
+        1 1 ⟶ index × 8
+    */
+    this.writeModRM(mode, reg, rsp)
+    const sib = (scale            << 6) | 
+                ((index  & 0b111) << 3) | 
+                (base    & 0b111)
+    this.writeByte(sib)
+  }
+}

@@ -1,0 +1,458 @@
+import Binder as Ctx from binder
+import sema
+
+struct Evaluator {
+  var ctx = Ctx*{}
+
+  //--------------------------------------------------------------------------------------------------------
+  fn negate(this, constant, pos): ast.Node* {
+    const immediate = constant.value
+    if constant.type.isIntegral() {
+      immediate.i64 = -immediate.i64
+    } else if constant.type.isaFloat() {
+      immediate.f32 = -immediate.f32
+    } else if constant.type.isaDouble() {
+      immediate.f64 = -immediate.f64
+    } else {
+      return new ast.UnaryOp{ pos = pos, value = constant, op = Tok.Minus, type = constant.type }
+    }
+    return constant
+  }
+
+
+  fn bitwiseNot(this, constant, pos): ast.Node* {
+    const immediate = constant.value
+    if constant.type.isIntegral() {
+      immediate.u64 = ~immediate.u64
+    } else {
+      return new ast.UnaryOp{ pos = pos, value = constant, op = Tok.Tilde, type = constant.type }
+    }
+    return constant
+  }
+
+  //-------------------------------------------------------------------------------------------------------
+  fn trySolveNumericCast(value, type, pos): ast.Node* {
+    const imm = value.value
+    const   s = value.type.isaBuiltin()
+    if type.isaFloat() {
+      switch s {
+        case ast.Kind.Char
+        case ast.Kind.Int8    imm.f32 = imm.i8  as Int32
+        case ast.Kind.Bool
+        case ast.Kind.UInt8   imm.f32 = imm.u8  as UInt32
+        case ast.Kind.Int16   imm.f32 = imm.i16 as Int32
+        case ast.Kind.WChar
+        case ast.Kind.UInt16  imm.f32 = imm.u16 as UInt32
+        case ast.Kind.Int32   imm.f32 = imm.i32
+        case ast.Kind.UInt32  imm.f32 = imm.u32
+        case ast.Kind.Int64   imm.f32 = imm.i64
+        case ast.Kind.UInt64  imm.f32 = imm.u64
+        case ast.Kind.Double  imm.f32 = imm.f64
+        default
+          return new ast.Cast{ pos = pos, value = value, kind = ast.CastKind.Numeric, type = type }
+      }
+      imm.hilo32.hi = 0
+      value.type = type
+      return value
+    }
+
+    if type.isaDouble() {
+      switch s {
+        case ast.Kind.Char
+        case ast.Kind.Int8    imm.f64 = imm.i8  as Int32
+        case ast.Kind.Bool
+        case ast.Kind.UInt8   imm.f64 = imm.u8  as UInt32
+        case ast.Kind.Int16   imm.f64 = imm.i16 as Int32
+        case ast.Kind.WChar
+        case ast.Kind.UInt16  imm.f64 = imm.u16 as UInt32
+        case ast.Kind.Int32   imm.f64 = imm.i32
+        case ast.Kind.UInt32  imm.f64 = imm.u32
+        case ast.Kind.Int64   imm.f64 = imm.i64
+        case ast.Kind.UInt64  imm.f64 = imm.u64
+        case ast.Kind.Float   imm.f64 = imm.f32
+        default
+          return new ast.Cast{ pos = pos, value = value, kind = ast.CastKind.Numeric, type = type }
+      }
+      value.type = type
+      return value
+    }
+
+    if type.isSigned() {
+      switch s {
+        case ast.Kind.Char
+        case ast.Kind.Int8    imm.i64 = imm.i8
+        case ast.Kind.Bool
+        case ast.Kind.UInt8   imm.i64 = imm.u8  as UInt64
+        case ast.Kind.Int16   imm.i64 = imm.i16
+        case ast.Kind.WChar
+        case ast.Kind.UInt16  imm.i64 = imm.u16 as UInt64
+        case ast.Kind.Int32   imm.i64 = imm.i32
+        case ast.Kind.UInt32  imm.i64 = imm.u32 as UInt64
+        case ast.Kind.UInt64  imm.i64 = imm.u64
+        case ast.Kind.Float   imm.i64 = imm.f32
+        case ast.Kind.Double  imm.i64 = imm.i64
+        default
+          return new ast.Cast{ pos = pos, value = value, kind = ast.CastKind.Numeric, type = type }
+      }
+      value.type = type
+      return value
+    }
+    if type.isUnsigned() {
+      switch s {
+        case ast.Kind.Char
+        case ast.Kind.Int8    imm.u64 = imm.i8  as Int64
+        case ast.Kind.Bool
+        case ast.Kind.UInt8   imm.u64 = imm.u8
+        case ast.Kind.Int16   imm.u64 = imm.i16 as Int64
+        case ast.Kind.WChar
+        case ast.Kind.UInt16  imm.u64 = imm.u16
+        case ast.Kind.Int32   imm.u64 = imm.i32 as Int64
+        case ast.Kind.UInt32  imm.u64 = imm.u32
+        case ast.Kind.Int64   imm.u64 = imm.u64
+        case ast.Kind.Float   imm.u64 = imm.f32
+        case ast.Kind.Double  imm.u64 = imm.i64
+        default
+          return new ast.Cast{ pos = pos, value = value, kind = ast.CastKind.Numeric, type = type }
+      }
+      value.type = type
+      return value
+    }
+    return new ast.Cast{ pos = pos, value = value, kind = ast.CastKind.Numeric, type = type }
+  }
+
+
+  fn arithmetic(this, lhs, op, rhs, pos): ast.Node* {
+    const type = lhs.type
+    const  imm = lhs.value
+
+    assert type == rhs.type with "#{lhs.type} == #{rhs.type}"
+
+    switch op {
+      case Tok.Or {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 | rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 | rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.XOr {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 ^ rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 ^ rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.And {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 & rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 & rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.LeftShift {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 << rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 << rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.RightShift {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 >> rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 >> rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.UnsignedRightShift {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 >>> rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 >>> rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.Plus {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 + rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 + rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaFloat() {
+          imm.f32 = lhs.value.f32 + rhs.value.f32
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaDouble() {
+          imm.f64 = lhs.value.f64 + rhs.value.f64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.Minus {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 - rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 - rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaFloat() {
+          imm.f32 = lhs.value.f32 - rhs.value.f32
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaDouble() {
+          imm.f64 = lhs.value.f64 - rhs.value.f64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.Remainder {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 % rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 % rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.Divide {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 / rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 / rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaFloat() {
+          imm.f32 = lhs.value.f32 / rhs.value.f32
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaDouble() {
+          imm.f64 = lhs.value.f64 / rhs.value.f64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      case Tok.Multiply {
+        if type.isSigned() {
+          imm.i64 = lhs.value.i64 * rhs.value.i64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isUnsigned() {
+          imm.u64 = lhs.value.u64 * rhs.value.u64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaFloat() {
+          imm.f32 = lhs.value.f32 * rhs.value.f32
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+        if type.isaDouble() {
+          imm.f64 = lhs.value.f64 * rhs.value.f64
+          lhs.pos = pos
+          this.throwAway(rhs)
+          return lhs
+        }
+      }
+      default {
+        assert with nameof(op)
+      }
+    }
+    return new ast.Arithmetic{ pos = pos, lhs = lhs, op = op, rhs = rhs, type = lhs.type }
+  }
+
+
+  fn unaryCondition(this, op, rhs, pos): ast.Node* {
+    const imm = rhs.value
+    switch op {
+      case Tok.LogicalIs {
+         imm.u64 = UInt64(imm.u64 != 0u64)
+        rhs.type = ast.tyBool
+        return new ast.UnaryCondition{ pos = pos, op = op, rhs = rhs, type = ast.tyBool}
+      }
+      case Tok.LogicalNot {
+         imm.u64 = UInt64(imm.u64 == 0u64)
+        rhs.type = ast.tyBool
+        return new ast.UnaryCondition{ pos = pos, op = op, rhs = rhs, type = ast.tyBool}
+      }
+    }
+    return new ast.UnaryCondition{ pos = pos, op = op, rhs = rhs, type = ast.tyBool }
+  }
+
+
+  fn binaryCondition(this, lhs, op, rhs, pos): ast.Node* {
+    const type = lhs.type
+
+    assert type == rhs.type with "#{lhs.type} == #{rhs.type}"
+
+    fn set(eval, lhs, rhs, value, pos) {
+      rhs.value.u64 = UInt64(value)
+            rhs.pos = pos
+           rhs.type = ast.tyBool
+      eval.throwAway(lhs)
+      return new ast.UnaryCondition{ pos = pos, op = Tok.LogicalIs, rhs = rhs, type = ast.tyBool }
+    }
+
+    switch op {
+      case Tok.OrOr {
+        if type.isaPointerOrANumber() {
+          return set(this, lhs, rhs, lhs.value.u64 || rhs.value.u64, pos)
+        }
+      }   
+      case Tok.AndAnd {
+        if type.isaPointerOrANumber() {
+          return set(this, lhs, rhs, lhs.value.u64 && rhs.value.u64, pos)
+        }
+      }  
+
+      case Tok.Equal {
+        if type.isaPointerOrANumber() {
+          return set(this, lhs, rhs, lhs.value.u64 == rhs.value.u64, pos)
+        }
+      }
+      case Tok.NotEqual {
+        if type.isaPointerOrANumber() {
+          return set(this, lhs, rhs, lhs.value.u64 != rhs.value.u64, pos)
+        }
+      }
+      case Tok.Less {
+        if type.isSigned() {
+          return set(this, lhs, rhs, lhs.value.i64 < rhs.value.i64, pos)
+        }
+        if type.isUnsigned() {
+          return set(this, lhs, rhs, lhs.value.u64 < rhs.value.u64, pos)
+        }
+        if type.isaFloat() {
+          return set(this, lhs, rhs, lhs.value.f32 < rhs.value.f32, pos)
+        }
+        if type.isaDouble() {
+          return set(this, lhs, rhs, lhs.value.f64 < rhs.value.f64, pos)
+        }
+      }
+      case Tok.LessOrEqual {
+        if type.isSigned() {
+          return set(this, lhs, rhs, lhs.value.i64 <= rhs.value.i64, pos)
+        }
+        if type.isUnsigned() {
+          return set(this, lhs, rhs, lhs.value.u64 <= rhs.value.u64, pos)
+        }
+        if type.isaFloat() {
+          return set(this, lhs, rhs, lhs.value.f32 <= rhs.value.f32, pos)
+        }
+        if type.isaDouble() {
+          return set(this, lhs, rhs, lhs.value.f64 <= rhs.value.f64, pos)
+        }
+      }
+      case Tok.Greater {
+        if type.isSigned() {
+          return set(this, lhs, rhs, lhs.value.i64 > rhs.value.i64, pos)
+        }
+        if type.isUnsigned() {
+          return set(this, lhs, rhs, lhs.value.u64 > rhs.value.u64, pos)
+        }
+        if type.isaFloat() {
+          return set(this, lhs, rhs, lhs.value.f32 > rhs.value.f32, pos)
+        }
+        if type.isaDouble() {
+          return set(this, lhs, rhs, lhs.value.f64 > rhs.value.f64, pos)
+        }
+      }
+      case Tok.GreaterOrEqual {
+        if type.isSigned() {
+          return set(this, lhs, rhs, lhs.value.i64 >= rhs.value.i64, pos)
+        }
+        if type.isUnsigned() {
+          return set(this, lhs, rhs, lhs.value.u64 >= rhs.value.u64, pos)
+        }
+        if type.isaFloat() {
+          return set(this, lhs, rhs, lhs.value.f32 >= rhs.value.f32, pos)
+        }
+        if type.isaDouble() {
+          return set(this, lhs, rhs, lhs.value.f64 >= rhs.value.f64, pos)
+        }
+      }
+    }
+    return new ast.BinaryCondition{ pos = pos, lhs = lhs, op = op, rhs = rhs, type = ast.tyBool }
+  }
+
+  //-------------------------------------------------------------------------------------------------------
+  fn throwAway(this, node)           = this.ctx.throwAway(node)
+  fn throwAway2(this, node1, node2)  = this.ctx.throwAway2(node1, node2)
+  fn err(this, pos, it, cb)          = this.ctx.cberr(pos, it, cb)
+}

@@ -1,0 +1,25 @@
+import aio
+import sys from std
+
+fn run(context, callback) {
+  if context.singleThread {
+    callback(context)
+    return
+  }
+  const state = {
+     context = context,
+    callback = callback,
+     counter = 0
+  }
+  const numberOfProcessors = sys.numberOfProcessors()
+  const    numberOfThreads = math.max(4, numberOfProcessors)
+  for var i = 0; i < numberOfThreads; ++i {
+    aio.run(runner(state))
+  }
+  atomic.waitOnAddressUntil(&state.counter, numberOfThreads, 128)
+
+  auto async fn runner(state) {
+    state.callback(state.context)
+    atomic.incrementAndAwake(&state.counter)
+  }
+}

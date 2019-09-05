@@ -1,0 +1,12 @@
+
+struct FlowChecker {
+ const stack = List(ast.Scope*){}
+
+ fn dispose(this) {
+  delete this.stack
+ }
+
+  fn flow(this, scope) {
+
+  } 
+}

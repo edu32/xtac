@@ -1,0 +1,2002 @@
+import ssa
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――----
+abstract struct Node {
+  var  pos = Pos{}
+  var type = Type{}
+
+
+  fn dispose(this) {}
+
+
+  fn isaTypeNode(this) {
+    switch this {
+      case Struct   return this as TypeNode*
+      case Union    return this as TypeNode*
+      case Enum     return this as TypeNode*
+      case Function return this as TypeNode*
+    }
+    return null
+  }
+
+
+  fn isNotATypeNode(this) = !this.isaTypeNode()
+
+
+  fn isaFileOrFolder(this) {
+    switch this {
+      case Folder return true
+      case File   return true
+    }
+    return false
+  }
+
+
+  fn isNotAFileOrFolder(this) = !this.isaFileOrFolder()
+
+
+  fn isaTypeName(this, expectType = true): Bool {
+    switch this {
+      case Define return this.value.isaTypeName(expectType)
+      case Array {
+        for child in this.children {
+          return false if child.isNotATypeName(expectType)
+        }
+      }
+      case Object {
+        for item in this.scope.symbols {
+          const symbol = item.value
+          if const field = symbol.instance is Field {
+            return false if field.value.isNotATypeName(expectType)
+          }
+        }
+      }
+      case FixedArray return expectType
+      case TypeOf     return true
+      case Name       return this.symbol.isaType(expectType)
+      case MemberName return this.symbol.isaType(expectType)
+    }
+    return false
+  }
+
+
+  fn isNotATypeName(this, expectType = true): Bool = !this.isaTypeName(expectType)
+
+
+  fn isaCallBack(this) {
+    if const ref = this.isaName() {
+      return ref.symbol.isaCallBack()
+    }
+    return false
+  }
+
+
+  fn isaName(this) {
+    switch this {
+      case Name       return this as Name*
+      case MemberName return this as Name*
+    }
+    return null
+  }
+
+
+  fn isAssignable(this, scope, ignoreConst): Bool {
+    switch this {
+      case Destructure {
+        for child in this.children {
+          return false if child.isNotAssignable(scope, ignoreConst)
+        }
+        return true
+      }
+      case Assignment      return this.lhs.isAssignable(scope, ignoreConst)
+      case Cast            return this.value.isAssignable(scope, ignoreConst)
+      case UnaryAssignment return this.value.isAssignable(scope, ignoreConst)
+      case Address         return this.type.isaReference() && this.value.isAssignable(scope, ignoreConst)
+      case Dereference {
+        if const name = this.value.isaName() {
+          return name.isAssignable(scope, ignoreConst)
+        }
+        return true
+      }
+
+      case Call         return this.type.isaReference()
+      case Intrinsic    return this.type.isaReference()
+      case ArrayIndex   return true
+
+      case Name         return this.symbol.isAssignable(scope, ignoreConst)
+      case MemberName   return this.symbol.isAssignable(scope, ignoreConst)
+    }
+    return false
+  }
+
+
+  fn isNotAssignable(this, scope, ignoreConst): Bool = !this.isAssignable(scope, ignoreConst)
+
+
+  fn isAddressable(this, scope): Bool {
+    switch this {
+      case Assignment      return true
+      case Cast            return this.value.isAddressable(scope)
+      case UnaryAssignment return true
+      case Address         return true
+      case Dereference     return true
+
+      case Call         return this.type.isaReference()
+      case Intrinsic    return this.type.isaReference()
+      case ArrayIndex   return true
+
+      case Name         return this.symbol.isAddressable(scope)
+      case MemberName   return this.symbol.isAddressable(scope)
+    }
+    return false
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――----
+struct Symbol {
+  const      scope = Scope*{}
+  const   template = src.Node*{}
+  var     instance = ast.Node*{}
+  const       name = Identifier*{}
+  var   replacedBy = Symbol*{} // If not null then references to this symbol are replaced by {replacedBy}.
+  var         size = 0
+  var       offset = 0
+  var    alignment = 0
+  var layoutStatus = Status{}
+  const   isImport = false
+  const   isExport = false
+  const   isaTypeExpression = false
+  const isCompilerGenerated = false
+
+  fn dispose(this) {
+    this.instance = ndispose(this.instance)
+  }
+
+  fn isaType(this, expectType = true) {
+    if const instance = this.instance {
+      switch instance {        
+        case Folder     return true
+        case File       return true
+        case Builtin    return true
+        case Struct     return true
+        case Union      return true
+        case Enum       return true
+        case Function   return expectType
+        case Define     return instance.value.isaTypeName(expectType)
+
+        case Local      return false
+        case Parameter  return this.scope.owner !is Function
+        case Field      return false
+        case Global     return false
+
+        case Array      return instance.isaTypeName(expectType)
+        case Object     return instance.isaTypeName(expectType)
+        case FixedArray return instance.isaTypeName(expectType)
+      }
+      assert with nameof(instance)
+    } else if this.template {
+      switch this.template {
+        case src.Struct   return true
+        case src.Union    return true
+        case src.Enum     return true
+        case src.Function return expectType
+      }
+      assert with nameof(this.template)
+    } else {
+      assert 0
+    }
+    return false
+  }
+
+  fn isaCallBack(this): Bool {
+    if const instance = this.instance {
+      switch instance {
+        case Local      return instance.type.isaFunctionSymbol()
+        case Parameter  return this.scope.owner is Function && instance.type.isaFunctionSymbol()
+        case Field      return instance.type.isaFunctionSymbol()
+        case Global     return instance.type.isaFunctionSymbol()
+      }
+    }
+    return false
+  }
+
+  fn isaFunction(this) {
+    if const instance = this.instance {
+      switch instance {
+        case ast.Function return true
+      }
+    } else if const template = this.template {
+      switch template {
+        case src.Function return true
+      }
+    }
+    return false
+  }
+
+  fn isNotAFunction(this) = !this.isaFunction()
+
+  fn isAssignable(this, scope, ignoreConst): Bool {
+    return false if !this.instance
+    const instance = this.instance
+    switch instance {
+      case Local
+        return (ignoreConst || !instance.modifiers.isConst) && 
+               (!instance.modifiers.isReadOnly || isWriteableInScope(this.scope, scope))
+
+      case Parameter
+        return this.scope.owner is Function &&
+               (ignoreConst || !instance.modifiers.isConst) &&
+               (!instance.modifiers.isReadOnly || isWriteableInScope(this.scope, scope))
+
+      case Field
+        return (ignoreConst || !instance.modifiers.isConst) &&
+               (!instance.modifiers.isReadOnly || isWriteableInScope(this.scope, scope))
+
+      case Global
+        return (ignoreConst || !instance.modifiers.isConst) &&
+               (!instance.modifiers.isReadOnly || isWriteableInScope(this.scope, scope))
+    }
+    return false
+
+    fn isWriteableInScope(targetScope, startingScope) {
+      for var scope = startingScope as Scope*; scope; scope = scope.parent {
+        return true if scope == targetScope
+      }
+      return false
+    }
+  }
+
+  fn isAddressable(this, scope): Bool {
+    return false if !this.instance
+    switch this.instance {
+      case Local     return true
+      case Parameter return true
+      case Field     return true
+      case Global    return true
+    }
+    return false
+  }
+
+  fn canBeAccessedStatically(this) {
+    return true if !this.instance // Because Struct...Function can be accessed statically.
+    switch this.instance {
+      case Folder   return true
+      case File     return true
+      case Builtin  return true
+      case Struct   return true
+      case Union    return true
+      case Enum     return true
+      case Function return true
+      case Import   return true
+      case Define   return true
+      case Local    return false
+      case Parameter {
+        switch this.scope.owner {
+          case Struct   return true
+          case Union    return true
+          case Enum     return true
+          case Function return false // Function parameters cannot be accessed statically.
+          default       assert with nameof(this.scope.owner) // wtf?
+        }
+        assert with nameof(this.instance) // wtf?
+        return false
+      }
+      case Field  return false // Fields of structs cannot be accessed statically.
+      case Global return true
+      default     assert with nameof(this.instance)
+    }
+    return false
+  }
+
+  fn cannotBeAccessedStatically(this) = !this.canBeAccessedStatically()
+
+  fn type(this): Type {
+    return this.instance.type if this.instance
+    return Type.fromSymbol(this)
+  }
+
+  fn modifiers(this): src.Modifiers {
+    if const instance = this.instance {
+      switch instance {
+        case Local      return instance.modifiers
+        case Parameter  return instance.modifiers
+        case Field      return instance.modifiers
+        case Global     return instance.modifiers
+      }
+    } else if const template = this.template {
+      if const type = template.isaTypeNode() {
+        return type.modifiers
+      }
+    }
+    return src.Modifiers{}
+  }
+
+  fn getTemplate(this) {
+    return this if !this.instance
+    if const symbol = this.scope.findLocal(this.name) {
+      return symbol if symbol.template == this.template && !symbol.instance
+    }
+    return null
+  }
+
+  fn beginLayout(this) {
+    assert this.layoutStatus == Status.None && !this.size && !this.offset && !this.alignment
+    this.layoutStatus = Status.Doing
+  }
+
+  fn finishLayout(this) {
+    assert this.layoutStatus == Status.Doing
+    this.layoutStatus = Status.Done 
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――----
+// Represents a collection of types related by being instances from the same type template.
+struct OverloadSet {
+  const     symbols = List(Symbol*){}
+  readonly template = Symbol*{} // Set everytime it is instantiated.
+  var    upperBound = Symbol*{}
+
+  fn dispose(this) {
+    delete this.symbols with fn(x) = delete x
+    delete this.template
+  }
+
+  fn appendInstance(this, instance): (Symbol*, Symbol*) {
+    const current = this.template
+    assert current && current.template && !current.instance
+    current.instance = instance
+    this.symbols.append(current)
+    this.template = new Symbol{ scope = current.scope, template = current.template,
+                                name  = current.name, isaTypeExpression = current.isaTypeExpression }
+    if current.isaTypeExpression && this.symbols.length > 1 {
+      return (null, current)
+    }
+    return (current, null)
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――----
+enum ExitReason {
+          Flow = 0b0u8,
+          Else = 0b1u8,
+
+      Continue = 0b01_0u8,
+         Break = 0b10_0u8,
+      ExitLoop = 0b11_0u8,
+
+        Return = 0b01_00_0u8,
+        Assert = 0b10_00_0u8,
+  ExitFunction = 0b11_00_0u8,
+
+  ExitFunctionOrLoop = 0b111_11_0u8
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――----
+  struct Scope : Node {
+  const            parent = Scope*{}
+  var               owner = Node*{}
+  const        duplicates = List(Symbol*){}
+  const compilerGenerated = List(Symbol*){}
+  const           symbols = Dict(Symbol*){}
+  const             types = Dict(OverloadSet){}
+  const           imports = Dict(Symbol*){}
+  var          statements = List(Node*){}
+  const         deferreds = List(Node*){}
+  var                exit = Label*{}
+  var        exitInParent = Label*{}
+  readonly  bindingStatus = Status{}
+
+  fn dispose(this) {
+    delete this.duplicates with fn(x): Symbol* = delete x
+    delete this.compilerGenerated with fn(x) = delete x
+    delete this.symbols with fn(x) = delete x
+    delete this.types with fn(x) = delete x
+    delete this.imports with fn(x) = delete x
+    ldispose(this.statements)
+    ldispose(this.deferreds)
+  }
+
+  fn appendBuiltin(this, type, name) {
+    assert type.isaBuiltin() && !type.value.symbol && !this.parent
+    const builtin = new Builtin{ pos = this.owner.pos, type = type }
+    const  symbol = new Symbol{ scope = this, name = name, instance = builtin }
+    assert !this.findLocal(name)
+    this.symbols.append(name.hash, symbol)
+  }
+
+  fn appendCompilerGenerated(this, template, instance) {
+    assert this.owner !is Object
+    const symbol = new Symbol{ scope = this, name = instance.name, template = template, instance = instance,
+      isCompilerGenerated = true }
+    this.compilerGenerated.append(symbol)
+    return symbol
+  }
+
+  fn appendTypeTemplate(this, name, template, isaTypeExpression): (Symbol*, Symbol*) {
+    assert this.owner !is Object
+    assert name.isNotEmpty()
+    const symbol = new Symbol{ scope = this, template = template, name = name,
+                               isaTypeExpression = isaTypeExpression }
+    if const duplicate = this.findLocal(name) {
+      this.duplicates.append(symbol)
+      return (null, duplicate)
+    }
+    this.types.append(name.hash, OverloadSet{ template = symbol })
+    return (symbol, null)
+  }
+
+  fn appendImport(this, name, template, instance): (Symbol*, Symbol*) {
+    assert this.owner !is Object
+    const symbol = new Symbol{ scope = this, template = template, instance = instance, name = name,
+                               isImport = template.keyword == Tok.Import,
+                               isExport = template.keyword == Tok.Export }
+    if const duplicate = this.findLocal(name) {
+      this.duplicates.append(symbol)
+      return (null, symbol)
+    }
+    this.imports.append(name.hash, symbol)
+    return (symbol, null)
+  }
+
+  fn appendSymbol(this, name, template, instance): (Symbol*, Symbol*) {
+    assert instance && name.isNotEmpty()
+    if this.owner is Object {
+      assert instance is Field
+    }
+    const isaTypeNode = instance.isaTypeNode()
+    if const duplicate = this.findLocal(name, asDotOperator = false, checkInitFile = false) {
+      if duplicate.template == template as src.Node* {
+        if !isaTypeNode {
+          this.duplicates.append(new Symbol{ scope = this, template = template, instance = instance, name = name })
+          return (null, duplicate)
+        }
+      }
+    }
+
+    const idx = this.types.indexOf(name.hash)
+    if idx >= 0 {
+      assert isaTypeNode
+      const ov = this.types.items[idx].value
+      return ov.appendInstance(instance)
+    }
+    assert !isaTypeNode
+    const symbol = new Symbol{ scope = this, template = template, instance = instance, name = name }
+    this.symbols.append(name.hash, symbol)
+    return (symbol, null)
+  }
+
+  fn checkShadowing(this, name) {
+    var depth = 0
+    for var scope = this as Scope*; scope; scope = scope.parent {
+      if depth {
+        if const found = scope.findLocal(name) {
+          return found
+        }
+      }
+      ++depth
+      break if scope.owner.isaTypeNode() || scope.owner.isaFileOrFolder()
+    }
+    return null
+  }
+
+  fn find(this, name): Symbol* {
+    var firstTypeScopeCrossed = Scope*{}
+    for var scope = this as Scope*; scope; scope = scope.parent {
+      if var found = scope.findLocal(name) {
+        if firstTypeScopeCrossed {
+          if found.cannotBeAccessedStatically() {
+            found = null
+          }
+        }
+        return found if found
+      }
+      if !firstTypeScopeCrossed {
+        firstTypeScopeCrossed = (scope if scope.owner.isaTypeNode())
+      }
+    }
+    return null
+  }
+
+  fn findMember(this, name): Symbol* {
+    return null if name.isEmpty()
+    if const found = this.findLocal(name, asDotOperator = true) {
+      return found
+    }
+    if const folder = this.owner is Folder {
+      if folder.initFile {
+        if const found = folder.initFile.scope.findLocal(name, asDotOperator = true) {
+          if found.isImport {
+            // Do nothing
+          } else {
+            return found
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  fn findImportName(this, name) {
+    const ownerType = this.owner.type
+    if const symbol = ownerType.isaSymbol() {
+      return symbol if symbol.name == name
+    }
+    var idx = this.symbols.indexOf(name.hash)
+    return local(this.symbols.items[idx].value) if idx >= 0
+    idx = this.types.indexOf(name.hash)
+    return this.types.items[idx].value.template if idx >= 0
+    idx = this.imports.indexOf(name.hash)
+    return importOrExport(this.imports.items[idx].value) if idx >= 0
+    switch this.owner {
+      case folder: ast.Folder {
+        if const initFile = folder.initFile {
+          return initFile.scope.findImportName(name)
+        }
+      }
+    }
+    return null
+    fn local(symbol)          = symbol if symbol.canBeAccessedStatically()
+    fn importOrExport(symbol) = symbol if symbol.isExport
+  }
+
+  fn findLocal(this, name, asDotOperator = false, checkInitFile = true) {
+    var idx = this.symbols.indexOf(name.hash)
+    return this.symbols.items[idx].value if idx >= 0
+    idx = this.types.indexOf(name.hash)
+    return this.types.items[idx].value.template if idx >= 0
+    idx = this.imports.indexOf(name.hash)
+    if idx >= 0 {
+      const imp = this.imports.items[idx].value
+      if imp.isImport {
+        return imp if !asDotOperator
+      } else {
+        return imp
+      }
+      return null
+    }
+    if checkInitFile {
+      if const folder = this.owner is Folder {
+        if const initFile = folder.initFile {
+          return initFile.scope.findLocal(name, asDotOperator)
+        }
+      }
+    }
+    if asDotOperator {
+      if const st = this.owner is Struct {
+        for base in st.supers {
+          if const found =  base.scope.findLocal(name, asDotOperator) {
+            return found
+          }
+        }
+      }
+    } else if const function = this.owner is Function {
+      if const generator = function.generator {
+        if const found = generator.scope.findLocal(name) {
+          return found
+        }
+      }
+    }
+    return null
+  }
+
+  fn findOverloadSet(this, name) {
+    const idx = this.types.indexOf(name.hash)
+    return &this.types.items[idx].value if idx >= 0
+    return null
+  }
+
+  fn appendStatement(this, statement) {
+    this.statements.append(statement) if statement
+    return statement
+  }
+
+  fn beginBinding(this) {
+    assert this.bindingStatus == Status.None
+    this.bindingStatus = Status.Doing
+  }
+
+  fn finishBinding(this) {
+    assert this.bindingStatus == Status.Doing
+    this.bindingStatus = Status.Done 
+  }
+
+  fn parentLoop(this) {
+    for var p = this as Scope*; p; p = p.parent as Scope* {
+      switch p {
+        case Loop return p
+      }
+      break if p.owner.isaTypeNode()
+    }
+    return null
+  }
+
+  fn parentFile(this) {
+    for var p = this as Scope*; p; p = p.parent {
+      switch p.owner {
+        case file: File return file
+      }
+    }
+    return null
+  }
+
+  fn parentFunction(this) {
+    for var p = this as Scope*; p; p = p.parent {
+      switch p.owner {
+        case function: Function return function
+      }
+      break if p.owner.isaTypeNode()
+    }
+    return null
+  }
+
+  fn parentFileName(this) {
+    if const file = this.parentFile() {
+      return file.dotName
+    }
+    return null
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct If : Scope {
+  var condition = Node*{}
+
+  fn dispose(this) {
+    this.condition = ndispose(this.condition)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Loop : Scope {
+  var     entry = Label*{}
+  var condition = Node*{}
+
+  fn dispose(this) {
+    this.condition = ndispose(this.condition)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――----
+struct Folder : Node {
+  const    path = Identifier*{}
+  const    name = Identifier*{}
+  const dotName = Identifier*{}
+  var     scope = Scope*{}
+  var  initFile = File*{}
+
+  fn dispose(this) {
+    this.scope = ndispose(this.scope)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――-----
+struct File : Node {
+  const      path = Identifier*{}
+  const      name = Identifier*{}
+  const slashName = Identifier*{}
+  const   dotName = Identifier*{}
+  var       scope = Scope*{}
+  const    source = String&{}
+  const        id = 0
+
+  fn dispose(this) {
+    this.scope = ndispose(this.scope)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Builtin : Node {
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Base for all ast type nodes.
+struct TypeNode : Node {
+  var    dotName = Identifier*{}
+  var       name = Identifier*{}
+  var      scope = Scope*{}
+  var parameters = List(Symbol*){}
+
+  fn dispose(this) {
+    this.scope = ndispose(this.scope)
+    delete this.parameters
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Structure : TypeNode {
+  const alignment = 0
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Struct : Structure {
+  var  supers = List(Struct*){}
+  var derived = List(Struct*){}
+  var  typeid = 0
+
+  fn dispose(this) {
+    delete this.supers
+    delete this.derived
+    super.dispose()
+  }
+
+  fn isSuperTypeOf(this, other) {
+    return false if !this.typeid || !other.typeid
+    return true  if this.typeid == other.typeid
+    for s in other.supers {
+      return true if this.isSuperTypeOf(s)
+    }
+    return false
+  }
+
+  fn isSubTypeOf(this, other) = other.isSuperTypeOf(this)
+
+  fn forEachField(this, path, it, cb): void {
+    for nv in this.scope.symbols {
+      const symbol = nv.value
+      if const field = symbol.instance is Field {
+        if field.isSuper {
+          path.append(symbol)
+          const st = field.type.isaStruct()
+          st.forEachField(path, it, cb)
+          path.removeLast()
+        } else {
+          cb(path, it, symbol)
+        }
+      }
+    }
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Union : Structure {
+
+  fn dispose(this) {
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Enum : TypeNode {
+  var valueType = Type{}
+
+  fn dispose(this) {
+    super.dispose()
+  }
+
+  fn firstEntry(this) {
+    for nv in this.scope.symbols {
+      const symbol = nv.value
+      return symbol if symbol.instance is Define
+    }
+    return null
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Function : TypeNode {
+  const keyword = Tok{}
+  var  fnreturn = Type{}
+  var generator = Object*{}
+  var generatorLabels = { entry = Label*{}, exit = Label*{} }
+  var  labelIds = 0
+  var     cfunc = null
+  var  cdllName = Identifier*{}
+
+  fn dispose(this) {
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Import : Node {
+  const        name = Identifier*{}
+  var      resolved = Symbol*{}
+  var bindingStatus = Status{}
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Define : Node {
+  const name = Identifier*{}
+  var  value = Node*{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Assert : Node {
+
+  fn dispose(this) {
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Goto : Node {
+  var target = Label*{}
+
+  fn dispose(this) {
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Label : Node {
+  var id = 0
+
+  fn dispose(this) {
+    super.dispose()
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Yield : Node {
+  const isFollowedByALabel = false
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Variable : Node {
+  const    modifiers = src.Modifiers{}
+  const         name = Identifier*{}
+  var          value = Node*{}
+  var             ir = ssa.Node*{}
+  var addressIsTaken = false
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Local : Variable {
+  var isUsedInReturn = false
+  
+  fn requiresStackFrameSlot(this) = (this.type.isNotVoid() && this.type.isNotLoadable()) || this.addressIsTaken
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Parameter : Variable {
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Field : Variable {
+  var     isSuper = false
+  var sharedIndex = 0
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Global : Variable {
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Array : Node {
+  var children = List(Node*){}
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+
+  fn element(this) {
+    return this.children.items[0].type if this.children.length
+      else tyUnknown
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Object : Node {
+  enum Kind { Object, Tuple, Generator, Lambda }
+
+  var scope = Scope*{}
+  var  kind = Kind.Object
+
+  fn dispose(this) {
+    this.scope = ndispose(this.scope)
+    super.dispose()
+  }
+
+  fn isaTuple(this) = this if this.kind == Kind.Tuple
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct FixedArray : Node {
+  const  length = 0
+  const element = Type{}
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct IfExpr : Node {
+  var condition = Node*{}
+  var    iftrue = Node*{}
+  var    ifalse = Node*{}
+
+  fn dispose(this) {
+    this.condition = ndispose(this.condition)
+    this.iftrue = ndispose(this.iftrue)
+    this.ifalse = ndispose(this.ifalse)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Destructure : Node {
+  const children = List(Node*){}
+
+  fn dispose(this) {
+    ldispose(this.children)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Assignment : Node {
+  var lhs = Node*{}
+  var rhs = Node*{}
+  var  op = Tok{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    this.rhs = ndispose(this.rhs)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Arithmetic : Node {
+  var lhs = Node*{}
+  var rhs = Node*{}
+  var  op = Tok{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    this.rhs = ndispose(this.rhs)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct BinaryCondition : Node {
+  var lhs = Node*{}
+  var rhs = Node*{}
+  var  op = Tok{}
+
+  fn dispose(this) {
+    this.lhs = ndispose(this.lhs)
+    this.rhs = ndispose(this.rhs)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct UnaryCondition : Node {
+  var rhs = Node*{}
+  var  op = Tok{}
+
+  fn dispose(this) {
+    this.rhs = ndispose(this.rhs)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+enum CastKind {
+  None,
+  NoCast,
+
+  Numeric,
+  Object,
+  BitCast,
+
+  Ref2Ptr, Ref2Ref, Ref2Obj, Ref2Int,
+  Ptr2Ref, Ptr2Ptr,          Ptr2Int,
+  Int2Ref, Int2Ptr,
+  Obj2Ref
+}
+struct Cast : Node {
+  var  value = Node*{}
+  const kind = CastKind{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct TypeOf : Node {
+
+  fn dispose(this) {
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct SizeOf : Node {
+  var value = Node*{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct UnaryOp : Node {
+  var value = Node*{}
+  const  op = Tok{} // '-' | '~'
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct UnaryAssignment : Node {
+  var       value = Node*{}
+  const        op = Tok{} // '--' | '++'
+  const isPostFix = false
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Address : Node {
+  var value = Node*{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Dereference : Node {
+  var value = Node*{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct InitializerArgument : Node {
+  const name = Identifier*{}
+  var  value = Node*{}
+  var  field = Symbol*{}
+  var   path = List(Symbol*){}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    delete this.path
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Initializer : Node {
+  const arguments = List(InitializerArgument*){}
+
+  fn dispose(this) {
+    ldispose(this.arguments)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Call : Node {
+  var        name = Node*{}
+  const arguments = List(Argument*){}
+
+  fn dispose(this) {
+    this.name = ndispose(this.name)
+    ldispose(this.arguments)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Intrinsic : Node {
+  const   keyword = Identifier*{}
+  const arguments = List(Argument*){}
+
+  fn dispose(this) {
+    ldispose(this.arguments)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct ArrayIndex : Node {
+  var  base = Node*{}
+  var index = Node*{}
+
+  fn dispose(this) {
+    this.base = ndispose(this.base)
+    this.index = ndispose(this.index)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Argument : Node {
+  var  name = Identifier*{}
+  var value = Node*{}
+
+  fn dispose(this) {
+    this.value = ndispose(this.value)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Name : Node {
+  readonly symbol = Symbol*{}
+
+  fn retarget(this, symbol) {
+    this.symbol = symbol
+      this.type = symbol.type()
+  }
+
+  fn isaTuple(this): Object* {    
+    if const instance = this.symbol.instance {
+      switch instance {
+        case Object {
+          return instance if instance.isaTuple()
+        }
+      }
+    }
+    return null
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct MemberName : Name {
+  var base = Node*{}
+
+  fn dispose(this) {
+    this.base = ndispose(this.base)
+    super.dispose()
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Quoted : Node {
+  const value = Identifier*{}
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct QuotedUtf16 : Node {
+  const value = Utf16*{}
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Constant : Node {
+  const value = Immediate{}
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Auto : Node {
+  var value = Node*{}
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Specifies the kind of a type.
+enum Kind {
+  Unknown,
+  
+  /* Indirect ↓ */
+  Pointer, Reference,
+
+  /* Direct ↓ */
+  Symbol,
+
+  /* Nothing ↓ */
+  Void,
+
+  /* Integers ↓ */
+    /* Unsigned Integers ↓ */
+    Bool, WChar, UInt8, UInt16, UInt32, UInt64,
+
+    /* Signed Integers ↓ */
+    Char, Int8, Int16, Int32, Int64, 
+
+  /* Floating Point ↓ */
+  Float, Double,
+
+  /* Packed (128 bits; 16 B) ↓ */
+    /* Packed Floating Point (128 bits; 16 B)↓ */
+    Floatx4, Doublex2,
+
+    /* Packed Unsigned Integers (128 bits; 16 B) ↓ */
+    UInt8x16, UInt16x8, UInt32x4, UInt64x2,
+
+    /* Packed Signed Integers (128 bits; 16 B) ↓ */
+    Int8x16, Int16x8, Int32x4, Int64x2,
+
+  /* Packed (256 bits; 32 B) ↓ */
+    /* Packed Floating Point (256 bits; 16 B)↓ */
+    Floatx8, Doublex4,
+
+    /* Packed Unsigned Integers (256 bits; 16 B) ↓ */
+    UInt8x32, UInt16x16, UInt32x8, UInt64x4,
+
+    /* Packed Signed Integers (256 bits; 16 B) ↓ */
+    Int8x32, Int16x16, Int32x8, Int64x4,
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Type {
+  readonly value = union {
+    var   symbol = Symbol*{}
+    var      ptr = IndirectType*{}
+  }
+  readonly kind = Kind{}
+
+  fn ==(this, other) = this.kind == other.kind && this.value.symbol == other.value.symbol
+  fn !=(this, other) = this.kind != other.kind || this.value.symbol != other.value.symbol
+
+  fn setSymbol(this, symbol): this {
+    assert symbol && !this.kind && !this.value.symbol && (symbol.template || symbol.instance)
+    this.kind = Kind.Symbol
+    this.value.symbol = symbol
+  }  
+
+  fn fromSymbol(symbol): Type {
+    assert symbol
+    return symbol.instance.type if symbol.instance
+    assert symbol.template
+    const type = Type{ kind = Kind.Symbol }
+    type.value.symbol = symbol
+    return type
+  }
+
+  fn fromptr(ptr) {
+    assert ptr
+    const type = Type{ kind = Kind.Pointer }
+    type.value.ptr = ptr
+    return type
+  }
+
+  fn fromref(ref) {
+    assert ref
+    const type = Type{ kind = Kind.Reference }
+    type.value.ptr = ref
+    return type
+  }
+
+  fn pointee(this) {
+    assert this.kind == Kind.Pointer || this.kind == Kind.Reference
+    return this.value.ptr.pointee
+  }
+
+  fn isUnknown(this) = this.kind == Kind.Unknown
+  fn isKnown(this)   = this.kind != Kind.Unknown
+
+  fn isaSymbol(this) = this.value.symbol if this.kind == Kind.Symbol
+  fn isNotASymbol(this)  = this.kind != Kind.Symbol
+
+  fn isaTemplate(this)   = this.value.symbol if this.kind == Kind.Symbol && !this.value.symbol.instance
+  fn isanInstance(this)  = this.value.symbol if this.kind == Kind.Symbol && this.value.symbol.instance
+
+  fn isaFunctionSymbol(this) {
+    if this.kind == Kind.Symbol {
+      if const instance = this.value.symbol.instance {
+        switch instance {
+          case ast.Function return this.value.symbol
+        }
+      } else if const template = this.value.symbol.template {
+        switch template {
+          case src.Function return this.value.symbol
+        }
+      }
+    }
+    return null
+
+  }
+
+  fn isaStruct(this)     = this.value.symbol.instance is Struct     if this.kind == Kind.Symbol
+  fn isaUnion(this)      = this.value.symbol.instance is Union      if this.kind == Kind.Symbol
+  fn isanEnum(this)      = this.value.symbol.instance is Enum       if this.kind == Kind.Symbol
+  fn isaFunction(this)   = this.value.symbol.instance is Function   if this.kind == Kind.Symbol
+  
+  fn isanArray(this)     = this.value.symbol.instance is Array      if this.kind == Kind.Symbol
+  fn isanObject(this)    = this.value.symbol.instance is Object     if this.kind == Kind.Symbol
+  fn isaTuple(this)      { if const o = this.isanObject() { return o.isaTuple() } return null }
+  fn isaFixedArray(this) = this.value.symbol.instance is FixedArray if this.kind == Kind.Symbol
+
+  fn isaNumericEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind >= Kind.Bool
+      }
+    }
+    return false
+  }
+  fn isaNumberEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind >= Kind.Bool && en.valueType.kind <= Kind.Double
+      }
+    }
+    return false
+  }
+  fn isanIntegralEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind >= Kind.Bool && en.valueType.kind <= Kind.Int64
+      }
+    }
+    return false
+  }
+  fn isanUnsignedEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind >= Kind.Bool && en.valueType.kind <= Kind.UInt64
+      }
+    }
+    return false
+  }
+  fn isaSignedEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind >= Kind.Char && en.valueType.kind <= Kind.Int64
+      }
+    }
+    return false
+  }
+  fn isaRealEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind == Kind.Float || en.valueType.kind == Kind.Double
+      }
+    }
+    return false
+  }
+  fn isaFloatEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind == Kind.Float
+      }
+    }
+    return false
+  }
+  fn isaDoubleEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind == Kind.Double
+      }
+    }
+    return false
+  }
+  fn isa32BitIntegerEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind == Kind.Int32 || en.valueType.kind == Kind.UInt32
+      }
+    }
+    return false
+  }
+  fn isa64BitIntegerEnum(this): Bool {
+    if this.kind == Kind.Symbol {
+      if const en = this.value.symbol.instance is Enum {
+        return en.valueType.kind == Kind.Int64 || en.valueType.kind == Kind.UInt64
+      }
+    }
+    return false
+  }
+
+  fn isNull(this)        = this.kind == Kind.Pointer && this.value.ptr.pointee.isVoid()
+  fn isaBuiltin(this)    = this.kind if this.kind >= Kind.Void
+  fn isNotABuiltin(this) = this.kind < Kind.Void
+  fn isVoid(this)        = this.kind == Kind.Void
+  fn isNotVoid(this)     = this.kind != Kind.Void
+  fn isNumeric(this)     = this.kind >= Kind.Bool   || this.isaNumericEnum()
+  fn isNotNumeric(this)  = this.kind < Kind.Bool    && !this.isaNumericEnum()
+  fn isaNumber(this)     = (this.kind >= Kind.Bool  && this.kind <= Kind.Double) || this.isaNumberEnum()
+  fn isNotANumber(this)  = (this.kind  < Kind.Bool  || this.kind  > Kind.Double) && !this.isaNumberEnum()
+  fn isIntegral(this)    = (this.kind >= Kind.Bool  && this.kind <= Kind.Int64 ) || this.isanIntegralEnum()
+  fn isNotIntegral(this) = (this.kind  < Kind.Bool  || this.kind  > Kind.Int64 ) && !this.isanIntegralEnum()
+  fn isUnsigned(this)    = (this.kind >= Kind.Bool  && this.kind <= Kind.UInt64) || this.isanUnsignedEnum()
+  fn isSigned(this)      = (this.kind >= Kind.Char  && this.kind <= Kind.Int64 ) || this.isaSignedEnum()
+  fn isaReal(this)       = (this.kind >= Kind.Float && this.kind <= Kind.Double) || this.isaRealEnum()
+  fn isNotAReal(this)    = (this.kind < Kind.Float  || this.kind > Kind.Double) && !this.isaRealEnum()
+  fn isaFloat(this)      = this.kind == Kind.Float  || this.isaFloatEnum()
+  fn isaDouble(this)     = this.kind == Kind.Double || this.isaDoubleEnum()
+  fn isBool(this)        = this.kind == Kind.Bool
+  fn isNotBool(this)     = this.kind != Kind.Bool
+  fn isChar(this)        = this.kind == Kind.Char
+  fn isPacked(this)      = this.kind if this.kind >= Floatx4
+
+  fn isa32BitInteger(this) = this.kind == Kind.UInt32 || this.kind == Kind.Int32 || this.isa32BitIntegerEnum()
+  fn isa64BitInteger(this) = this.kind == Kind.UInt64 || this.kind == Kind.Int64 || this.isa64BitIntegerEnum()
+
+  fn isDirect(this)     = this.kind != Kind.Pointer && this.kind != Kind.Reference
+  fn isIndirect(this)   = this.value.ptr if this.kind == Kind.Pointer || this.kind == Kind.Reference
+  fn isaPointer(this)   = this.value.ptr if this.kind == Kind.Pointer
+  fn isaReference(this) = this.value.ptr if                              this.kind == Kind.Reference
+  fn isNotAPointer(this)   = this.kind != Kind.Pointer
+  fn isNotAReference(this) = this.kind != Kind.Reference
+  fn isaPointerOrNumeric(this)    = this.kind == Kind.Pointer || this.isNumeric()
+  fn isNotAPointerOrNumeric(this) = this.kind != Kind.Pointer && this.isNotNumeric()
+  fn isaPointerOrANumber(this)    = this.kind == Kind.Pointer || this.isaNumber()
+  fn isNotAPointerOrANumber(this) = this.kind != Kind.Pointer && this.isNotANumber()
+  fn isaPointerOrIntegral(this)   = this.kind == Kind.Pointer || this.isIntegral()
+  fn isNotAPointerOrIntegral(this)= this.kind != Kind.Pointer && this.isNotIntegral()
+  fn getLookupScope(this) {
+    if this.kind == Kind.Symbol {
+      if const instance = this.value.symbol.instance {
+        switch instance {
+          case f: Folder return f.scope
+          case f: File   return f.scope
+          case s: Struct return s.scope
+          case u: Union  return u.scope
+          case e: Enum   return e.scope
+          case o: Object return o.scope
+        }
+      }
+    }
+    return null
+  }
+
+  fn isLoadable(this) {
+    return true if this.isIndirect()
+    if const k = this.isaBuiltin() {
+      return k > Kind.Void
+    }
+    if this.kind == Kind.Symbol {
+      if const instance = this.value.symbol.instance {
+        switch instance {
+          case e: Enum  return e.valueType.isLoadable()
+          case Function return true
+        }
+      } else if const template = this.value.symbol.template {
+        switch template {
+          case src.Function return true
+        }
+      }
+      return false
+    }
+    return false
+  }
+
+  fn isNotLoadable(this) = !this.isLoadable()
+
+  fn size(this) {
+    switch this.kind {
+      case Kind.Void return 0
+      case Kind.Bool,  Kind.UInt8,  Kind.Char,   Kind.Int8  return 1
+      case Kind.WChar, Kind.UInt16,              Kind.Int16 return 2
+      case             Kind.UInt32, Kind.Float,  Kind.Int32 return 4
+      case             Kind.UInt64, Kind.Double, Kind.Int64 return 8
+      case Kind.Int8x16, Kind.UInt8x16,
+           Kind.Int16x8, Kind.UInt16x8,
+           Kind.Int32x4, Kind.UInt32x4, Kind.Floatx4,
+           Kind.Int64x2, Kind.UInt64x2, Kind.Doublex2
+           return 32
+      case Kind.Int8x32,  Kind.UInt8x32,
+           Kind.Int16x16, Kind.UInt16x16,
+           Kind.Int32x8,  Kind.UInt32x8, Kind.Floatx8,
+           Kind.Int64x4,  Kind.UInt64x4, Kind.Doublex4
+           return 64
+      case Kind.Pointer, Kind.Reference return SIZE_OF_POINTER
+      case Kind.Symbol {
+        const symbol = this.value.symbol
+        return symbol.size if symbol.layoutStatus.isDone()
+      }
+    }
+    return 0
+  }
+
+
+  fn alignment(this) {
+    switch this.kind {
+      case Kind.Void return 0
+      case Kind.Bool,  Kind.UInt8,  Kind.Char,   Kind.Int8  return 1
+      case Kind.WChar, Kind.UInt16,              Kind.Int16 return 2
+      case             Kind.UInt32, Kind.Float,  Kind.Int32 return 4
+      case             Kind.UInt64, Kind.Double, Kind.Int64 return 8
+      case Kind.Int8x16, Kind.UInt8x16,
+           Kind.Int16x8, Kind.UInt16x8,
+           Kind.Int32x4, Kind.UInt32x4, Kind.Floatx4,
+           Kind.Int64x2, Kind.UInt64x2, Kind.Doublex2
+           return 32
+      case Kind.Int8x32,  Kind.UInt8x32,
+           Kind.Int16x16, Kind.UInt16x16,
+           Kind.Int32x8,  Kind.UInt32x8, Kind.Floatx8,
+           Kind.Int64x4,  Kind.UInt64x4, Kind.Doublex4
+           return 64
+      case Kind.Pointer, Kind.Reference return SIZE_OF_POINTER
+      case Kind.Symbol {
+        const symbol = this.value.symbol
+        return symbol.alignment if symbol.layoutStatus.isDone()
+      }
+    }
+    return 0
+  }
+
+  fn typeid(this): Int32 {
+    if this.kind == Kind.Pointer || this.kind == Kind.Reference {
+      return this.value.ptr.pointee.typeid() if this.value.ptr.pointee.isDirect()
+    } else if const st = this.isaStruct() {
+      return st.typeid
+    }
+    return 0
+  }
+
+  struct FormatCycle {
+    const symbol = Symbol*{}
+    const  outer = FormatCycle*{}
+
+    fn willCycleWith(this, symbol) {
+      assert this.symbol == symbol
+      for var p = this.outer; p; p = p.outer {
+        return true if p.symbol == symbol
+      }
+      return false
+    }
+  }
+  fn format(this, stream, _ = "", cycle = FormatCycle*{}): void {
+    const fmt = {
+         error = "%<red>",
+      template = "%<yellow>",
+          kind = "%<cyan>",
+          name = "%<magenta>",
+         param = "%<green>",
+   punctuation = "%<darkcyan>",
+        suffix = "%<gray>"
+    }
+    switch this.kind {
+      case Kind.Unknown   "<error>".format(stream, fmt.error)
+      case Kind.Pointer   formatPointer(stream, fmt, this.value.ptr.pointee, cycle)
+      case Kind.Reference formatReference(stream, fmt, this.value.ptr.pointee, cycle)
+      case Kind.Symbol    formatSymbol(stream, fmt, this.value.symbol, cycle)
+      default {    
+        if this.kind >= Kind.Void && this.kind <= Kind.Int64x4 {
+          nameof(this.kind).format(stream, fmt.name)
+        } else {
+          nameof(this.kind).format(stream, fmt.error)
+        }
+      }
+    }
+  }
+
+  fn formatSymbol(stream, fmt, symbol, cycle): void {
+    assert symbol
+    if cycle && cycle.willCycleWith(symbol) {
+      /*for var p = cycle; p; p = p.outer {
+        println("#{p.symbol.name}")
+      }*/
+      "<".format(stream, fmt.punctuation)
+      "cycle".format(stream, fmt.template)
+      " @ ".format(stream, fmt.punctuation)
+      symbol.name.format(stream, fmt.name)
+      ">".format(stream, fmt.punctuation)
+      return
+    }
+    if const instance = symbol.instance {
+      formatInstance(stream, fmt, instance, cycle)
+    } else if const template = symbol.template {
+      formatTemplate(stream, fmt, template)
+    } else {
+      "builtin".format(stream, fmt.error)
+    }
+  }
+
+  fn formatTemplate(stream, fmt, template): void {
+    "template".format(stream, fmt.template)
+    stream.append(" ")
+    var   name = Identifier*{}
+    var params = src.Tuple*{}
+    switch template {
+      case f: src.Folder  { "folder".format(stream, fmt.kind)  name = f.name }
+      case f: src.File    {   "file".format(stream, fmt.kind)  name = f.name }
+      case s: src.Struct  { "struct".format(stream, fmt.kind)  name = s.name params = s.parameters }
+      case u: src.Union   {  "union".format(stream, fmt.kind)  name = u.name params = u.parameters }
+      case e: src.Enum    {   "enum".format(stream, fmt.kind)  name = e.name params = e.parameters }
+      case f: src.Function { // 'template'
+          name = f.name
+        params = f.parameters
+        switch f.keyword {
+          case Tok.Fn                 "fn".format(stream, fmt.kind)
+          case Tok.UrlHandler "urlhandler".format(stream, fmt.kind)
+          case Tok.Extern         "extern".format(stream, fmt.kind)
+          case Tok.Html             "html".format(stream, fmt.kind)
+          case Tok.Css               "css".format(stream, fmt.kind)
+          case Tok.Json             "json".format(stream, fmt.kind)
+          case Tok.Sql               "sql".format(stream, fmt.kind)
+          case Tok.Blob             "blob".format(stream, fmt.kind)
+          default {
+            nameof(f.keyword).format(stream, fmt.error)
+            return
+          }
+        }
+      }
+      default
+        nameof(template).format(stream, fmt.error)
+    }
+    stream.append(" ")
+    if name {
+      name.format(stream, fmt.name)
+    } else {
+      "<anon>".format(stream, fmt.error)
+    }
+    if params {
+      "(".format(stream, fmt.punctuation)
+      if params {
+        for i, param in params.children {
+          if i {
+            ", ".format(stream, fmt.punctuation)
+          }
+          if const p = param is src.Variable {
+            if const n = p.name is src.Name {
+              n.value.format(stream, fmt.param)
+            } else {
+              nameof(p.name).format(stream, fmt.error)
+            }
+          } else {
+            nameof(param).format(stream, fmt.error)
+          }
+        }
+      } else {
+        nameof(params).format(stream, fmt.error)
+      }
+      ")".format(stream, fmt.punctuation)
+    }
+  }
+
+  fn formatInstance(stream, fmt, instance, cycle): void {
+    var      name = Identifier*{}
+    var    params = List(Symbol*)*{}
+    var putparens = false, putfnreturn = false
+    var  fnreturn = Type*{}
+    var instanceCycle = FormatCycle{ symbol = instance.type.isaSymbol(), outer = cycle }
+    var valueType = Type*{}
+    switch instance {
+      case Folder {
+        "folder".format(stream, fmt.kind)
+        stream.append(" ")
+        instance.dotName.format(stream, fmt.name)
+        return
+      }
+      case File {
+        "file".format(stream, fmt.kind)
+        stream.append(" ")
+        instance.dotName.format(stream, fmt.name)
+        return
+      }
+      case Array {
+        "[".format(stream, fmt.punctuation)
+        instance.children.length.format(stream, fmt.name)
+        " × ".format(stream, fmt.punctuation)
+        const element = instance.element()
+        const nextCycle = FormatCycle{ symbol = element.isaSymbol(), outer = &instanceCycle }
+        element.format(stream, "", &nextCycle)
+        "]".format(stream, fmt.punctuation)
+      }
+      case Object {
+        const isaTuple = instance.kind == instance.Kind.Tuple
+        if isaTuple {
+          "(".format(stream, fmt.punctuation)
+        } else {
+          "{ ".format(stream, fmt.punctuation)
+        }
+        for i, child in instance.scope.symbols {
+          continue if child.value.instance !is Field
+          const field = child.value.instance as Field*
+          ", ".format(stream, fmt.punctuation) if i
+          if !isaTuple {
+            field.name.format(stream)
+            ": ".format(stream, fmt.punctuation)
+          }
+          var done = false
+          if const cb = field.value is Name {
+            if const cbfn = cb.symbol.instance is Function {
+              "callback ".format(stream, fmt.template)
+              cbfn.name.format(stream, fmt.name)
+              done = true
+            }
+          }
+          if !done {
+            if isaTuple {
+              const nextCycle = FormatCycle{ symbol = field.type.isaSymbol(), outer = &instanceCycle }
+              field.type.format(stream, "", &nextCycle)
+            } else {
+              "t".format(stream)
+            }
+          }
+        }
+        if instance.kind == instance.Kind.Tuple {
+          ")".format(stream, fmt.punctuation)
+        } else {
+          " }".format(stream, fmt.punctuation)
+        }
+      }
+      case FixedArray {
+        const element = instance.element
+        const nextCycle = FormatCycle{ symbol = element.isaSymbol(), outer = &instanceCycle }
+        element.format(stream, "", &nextCycle)
+        "[".format(stream, fmt.punctuation)
+        instance.length.format(stream, fmt.template)
+        "]".format(stream, fmt.punctuation)
+      }
+      case Struct { "struct".format(stream, fmt.kind) name = instance.dotName params = instance.parameters }
+      case Union  { "union".format(stream, fmt.kind)  name = instance.dotName params = instance.parameters }
+      case Enum   { "enum".format(stream, fmt.kind)   name = instance.dotName valueType = instance.valueType }
+      case Function {
+               name = instance.dotName
+             params = instance.parameters
+           fnreturn = instance.fnreturn
+          putparens = true
+        putfnreturn = true
+        switch instance.keyword {
+          case Tok.Fn                 "fn".format(stream, fmt.kind)
+          case Tok.UrlHandler "urlhandler".format(stream, fmt.kind)
+          case Tok.Extern         "extern".format(stream, fmt.kind)
+          case Tok.Html             "html".format(stream, fmt.kind)
+          case Tok.Css               "css".format(stream, fmt.kind)
+          case Tok.Json             "json".format(stream, fmt.kind)
+          case Tok.Sql               "sql".format(stream, fmt.kind)
+          case Tok.Blob             "blob".format(stream, fmt.kind)
+          default {
+            nameof(instance.keyword).format(stream, fmt.error)
+            return
+          }
+        }
+      }
+      case Import {
+        "import".format(stream, fmt.kind)
+        name = instance.name
+      }
+      default {
+        nameof(instance).format(stream, fmt.error)
+        return
+      }
+    }
+    stream.append(" ")
+    if name && name.isNotRandom() {
+      name.format(stream, fmt.name)
+    }
+    if valueType {
+      ": ".format(stream, fmt.punctuation)
+      const nextCycle = FormatCycle{ symbol = valueType.isaSymbol(), outer = &instanceCycle }
+      valueType.format(stream, "", &nextCycle)
+    }
+    if params && params.length {
+      "(".format(stream, fmt.punctuation)
+      for i, param in params {
+        if i {
+          ", ".format(stream, fmt.punctuation) if i
+        }
+        param.name.format(stream, fmt.param)
+        ": ".format(stream, fmt.punctuation)
+        if param.name.textIs("self") {
+          stream.append("self")
+        } else {
+          const nextCycle = FormatCycle{ symbol = param.instance.type.isaSymbol(), outer = &instanceCycle }
+          param.instance.type.format(stream, "", &nextCycle)
+        }
+      }
+      ")".format(stream, fmt.punctuation)
+    } else if putparens {
+      "()".format(stream, fmt.punctuation)
+    }
+
+    if fnreturn {
+      " → ".format(stream, fmt.kind)
+      const nextCycle = FormatCycle{ symbol = fnreturn.isaSymbol(), outer = &instanceCycle }
+      fnreturn.format(stream, "", &nextCycle)
+    } else if putfnreturn {
+      " → ".format(stream, fmt.kind)
+      "<error>".format(stream, fmt.error)
+    }
+  }
+
+  fn formatPointer(stream, fmt, pointee, cycle): void {
+    pointee.format(stream, cycle)
+    "*".format(stream, fmt.suffix)
+  }
+
+  fn formatReference(stream, fmt, pointee, cycle): void {
+    pointee.format(stream, cycle)
+    "&".format(stream, fmt.suffix)
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct IndirectType {
+  readonly pointee = Type{}
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+const tyUnknown   = Type{}
+const tyVoid      = Type{ kind = Kind.Void      }
+const tyBool      = Type{ kind = Kind.Bool      }
+const tyWChar     = Type{ kind = Kind.WChar     }
+const tyByte      = Type{ kind = Kind.UInt8     }
+const tyUInt8     = Type{ kind = Kind.UInt8     }
+const tyUInt16    = Type{ kind = Kind.UInt16    }
+const tyUInt32    = Type{ kind = Kind.UInt32    }
+const tyUInt64    = Type{ kind = Kind.UInt64    }
+const tyChar      = Type{ kind = Kind.Char      }
+const tyInt8      = Type{ kind = Kind.Int8      }
+const tyInt16     = Type{ kind = Kind.Int16     }
+const tyInt32     = Type{ kind = Kind.Int32     }
+const tyInt64     = Type{ kind = Kind.Int64     }
+const tyFloat     = Type{ kind = Kind.Float     }
+const tyDouble    = Type{ kind = Kind.Double    }
+const tyFloatx4   = Type{ kind = Kind.Floatx4   }
+const tyDoublex2  = Type{ kind = Kind.Doublex2  }
+const tyUInt8x16  = Type{ kind = Kind.UInt8x16  }
+const tyUInt16x8  = Type{ kind = Kind.UInt16x8  }
+const tyUInt32x4  = Type{ kind = Kind.UInt32x4  }
+const tyUInt64x2  = Type{ kind = Kind.UInt64x2  }
+const tyInt8x16   = Type{ kind = Kind.Int8x16   }
+const tyInt16x8   = Type{ kind = Kind.Int16x8   }
+const tyInt32x4   = Type{ kind = Kind.Int32x4   }
+const tyInt64x2   = Type{ kind = Kind.Int64x2   }
+const tyFloatx8   = Type{ kind = Kind.Floatx8   }
+const tyDoublex4  = Type{ kind = Kind.Doublex4  }
+const tyUInt8x32  = Type{ kind = Kind.UInt8x32  }
+const tyUInt16x16 = Type{ kind = Kind.UInt16x16 }
+const tyUInt32x8  = Type{ kind = Kind.UInt32x8  }
+const tyUInt64x4  = Type{ kind = Kind.UInt64x4  }
+const tyInt8x32   = Type{ kind = Kind.Int8x32   }
+const tyInt16x16  = Type{ kind = Kind.Int16x16  }
+const tyInt32x8   = Type{ kind = Kind.Int32x8   }
+const tyInt64x4   = Type{ kind = Kind.Int64x4   }
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Types {
+  const     udts = Dict(IndirectType*){}
+  const builtins = List(IndirectType*){}
+
+  fn dispose(this) {
+    delete this.udts with fn(x) = delete x
+    delete this.builtins with fn(x) = delete x
+  }
+
+  fn initialize(this) {
+    const length = Int32(Kind.Int64x4) - Int32(Kind.Void)
+    for var i = 0; i < length; ++i {
+      const ptr = new IndirectType{ pointee = Type{ kind = (i + Int32(Kind.Void)) as Kind }}
+      this.builtins.append(ptr)
+    }
+  }
+
+  fn pointerOf(this, type) {
+    if const kind = type.isaBuiltin() {
+      const i = Int32(kind) - Int32(Kind.Void)
+      return Type.fromptr(this.builtins.items[i])
+    }
+    if const symbol = type.value.symbol {
+      const    hash = symbol as UInt64
+      const     idx = this.udts.indexOf(hash)
+      if idx >= 0 {
+        return Type.fromptr(this.udts.items[idx].value)
+      }
+      return Type.fromptr(this.udts.append(hash, new IndirectType{ pointee = type }))
+    }
+    return tyUnknown
+  }
+
+  fn referenceOf(this, type): Type {    
+    if const kind = type.isaBuiltin() {
+      const i = Int32(kind) - Int32(Kind.Void)
+      return Type.fromref(this.builtins.items[i])
+    }
+    if const symbol = type.value.symbol {
+      const    hash = symbol as UInt64
+      const     idx = this.udts.indexOf(hash)
+      if idx >= 0 {
+        return Type.fromref(this.udts.items[idx].value)
+      }
+      return Type.fromref(this.udts.append(hash, new IndirectType{ pointee = type }))
+    }
+    return tyUnknown
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn ldispose(list): void {
+  delete list with fn(x): typeof(x) {
+    return ndispose(x)
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn ndispose(node): typeof(node) {
+  return node if !node
+  switch node {
+    case Node         node.dispose()
+    case Scope        node.dispose()
+    case If           node.dispose()
+    case Loop         node.dispose()
+
+    case Folder       node.dispose()
+    case File         node.dispose()
+    case Builtin      node.dispose()
+    case TypeNode     node.dispose()
+    case Struct       node.dispose()
+    case Union        node.dispose()
+    case Enum         node.dispose()
+    case Function     node.dispose()
+    case Import       node.dispose()
+    case Define       node.dispose()
+
+    case Assert       node.dispose()
+    case Goto         node.dispose()
+    case Label        node.dispose()
+    case Yield        node.dispose()
+
+    case Variable     node.dispose()
+    case Local        node.dispose()
+    case Parameter    node.dispose()
+    case Field        node.dispose()
+    case Global       node.dispose()
+
+    case Array        node.dispose()
+    case Object       node.dispose()
+    case FixedArray   node.dispose()
+
+    case IfExpr       node.dispose()
+
+    case Destructure      node.dispose()
+    case Assignment       node.dispose()
+    case Arithmetic       node.dispose()
+
+    case BinaryCondition  node.dispose()
+    case UnaryCondition   node.dispose()
+
+    case Cast             node.dispose()
+    case TypeOf           node.dispose()
+    case SizeOf           node.dispose()
+    case UnaryOp          node.dispose()
+    case UnaryAssignment  node.dispose()
+    case Address          node.dispose()
+    case Dereference      node.dispose()
+
+    case InitializerArgument node.dispose()
+    case Initializer  node.dispose()
+    case Call         node.dispose()
+    case Intrinsic    node.dispose()
+    case ArrayIndex   node.dispose()
+
+    case Argument        node.dispose()
+    case Name            node.dispose()
+    case MemberName      node.dispose()
+
+    case Quoted       node.dispose()
+    case QuotedUtf16  node.dispose()
+    case Constant     node.dispose()
+    case Auto         node.dispose()
+    default assert with "#{nameof(node)}"
+  }
+  import mfree from memory
+  mfree(node)
+  return null
+}

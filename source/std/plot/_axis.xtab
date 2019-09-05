@@ -1,0 +1,731 @@
+
+define STROKE_WIDTH   0.25f
+define SPACE_TO_LABEL 5f
+define VERTICAL_LABEL_MID_DIVIDER 3.5f
+define PIXEL_ALLOWANCE_ON_AXIS_FOR_TICKS 2f
+define SPACE_AFTER_AXIS 5f
+
+struct Axis {
+  const    title       = String{}
+  const    series      = List(Series*){}
+  const    crossAxes   = List(Axis*){}
+  const    step        = Data{}
+  const    range       = Range{}
+  readonly location    = Location{}
+  readonly orientation = Orientation{}
+  var      direction   = Direction{}
+  var      crossSize   = 0f
+  var      color       = Color.Black
+  const    show        = {
+    title          = true,
+    labels         = true,
+    majorTicks     = true,
+    minorTicks     = true,
+    grid           = true,
+    verticalTitle  = true,  // Applies to the vertical axis.
+    verticalLabels = false,
+    axisLine       = true,
+    fixedDirection = false,
+    fixedLocation  = false,
+    zero           = false
+  }
+  const computed = { min = Value{}, max = Value{}, step = { major = 0.0, minor = 0.0 } }
+  const ticks    = { major = 0,   minor = 0 }
+
+
+  fn dispose(this) {
+    delete this.title
+    delete this.series
+    delete this.crossAxes
+  }  
+
+
+  fn type(this)         = this.range.type
+  fn isHorizontal(this) = this.orientation == Orientation.Horizontal
+  fn isVertical(this)   = this.orientation == Orientation.Vertical
+  fn isatTop(this)      = this.location    == Location.Top
+  fn isonRight(this)    = this.location    == Location.Right
+  fn isatBottom(this)   = this.location    == Location.Bottom
+  fn isonLeft(this)     = this.location    == Location.Left
+  fn isatCenter(this)   = this.location    == Location.Center
+
+
+  fn updateCrossSize(this, size) {
+    if size > this.crossSize {
+      this.crossSize = size
+    }
+  }
+
+
+  fn computeTicks(this) {
+    if this.range.type == Type.Text {
+      assert this.series.length == 1 && !this.ticks.major && !this.ticks.minor
+      this.ticks.major = this.series.first().length
+      return
+    }
+
+    assert this.range.type == Type.Int64 || this.range.type == Type.Double
+    if this.ticks.major == 0 {
+      this.ticks.major = 10
+    } else if this.ticks.major < 2 {
+      this.ticks.major = 2
+    }
+    if this.ticks.minor == 0 {
+      this.ticks.minor = 5
+    } else if this.ticks.minor < 2 {
+      this.ticks.minor = 2
+    }
+    var min = 0.0, max = 0.0
+    if this.range.type == Type.Int64 {
+      min = this.range.min.i64 as Double
+      max = this.range.max.i64 as Double
+    } else {
+      min = this.range.min.f64
+      max = this.range.max.f64
+    }
+    if min == max {
+      this.computed.min.f64 = min
+      this.computed.max.f64 = max
+      return
+    }
+    const maxTicks = this.ticks.major
+    const steps = maxTicks - 1
+    const (minRound, maxRound) = roundMinAndMax(min, max)
+    const rangePerStep = niceRangePerSegment(minRound, maxRound, steps)
+    const lo = rangePerStep * math.rounddown(minRound / rangePerStep)
+    const hi = rangePerStep * math.roundup(maxRound / rangePerStep)
+    this.computed.min.f64 = lo
+    this.computed.max.f64 = hi
+    this.computed.step.major = rangePerStep
+    this.computed.step.minor = rangePerStep / (this.ticks.minor - 1)
+    /*println("=========================\r\n\
+             \tmin=#{min}; max=#{max}; range=#{max - min};\r\n\
+             \tmin=#{minRound}; max=#{maxRound}; rangeRound=#{maxRound - minRound};\r\n\
+             \tsteps=#{steps};\r\n\
+             \tlo=#{lo}; hi=#{hi}; range=#{hi - lo}")*/
+
+    fn roundMinAndMax(min, max) {
+      const range = max - min
+      const order = math.rounddown(math.log10(range)) - 1
+      const power10 = math.pow(10, order)
+      var maxRound =     math.roundup(max / power10) if max > 0
+                    else math.rounddown(max / power10)
+      var minRound =     math.roundup(min / power10) if min < 0
+                    else math.rounddown(min / power10)
+      //println("#{range} = #{max} - #{min}; order=#{order}; power10=#{power10}; max/power10=#{max/power10}; roundup=#{math.roundup(max/power10)}")
+      return (minRound * power10, maxRound * power10)
+    }
+
+    fn niceRangePerSegment(min, max, steps) {
+      static niceArray = [ 1.0, 2, 2.5, 3, 4, 5, 10 ]
+      const range = max - min
+      var rangePerStep = range / steps
+      const order = math.rounddown(math.log10(rangePerStep))
+      const power10 = math.pow(10, order)
+      rangePerStep = rangePerStep / power10
+      var found = 0.0
+      var minDistance = 10.0
+      for x in niceArray {
+        const distance = math.abs(x - rangePerStep)
+        if distance < minDistance {
+          minDistance = distance
+          found = x
+        }
+      }
+      return found * power10
+    }
+  }
+
+  fn flipLocation(this) {
+    if this.isHorizontal() {
+      if this.location == Location.Top {
+        this.location = Location.Bottom
+      } else if this.location == Location.Bottom {
+        this.location = Location.Top
+      }
+    } else if this.location == Location.Left {
+      this.location = Location.Right
+    } else if this.location == Location.Right {
+      this.location = Location.Left
+    }
+  }
+
+
+  fn computeSize(this, crossAxis, seriesList, size) {
+    for series in seriesList {
+      if series {
+        assert series.range.type
+        var i = 0
+        for ; i < this.series.length; ++i {
+          break if this.series.items[i] == series
+        }
+        if i == this.series.length {
+          this.series.append(series)
+        }
+        if this.series.length == 1 {
+          this.range.setMinMax(series.range.min, series.range.max)
+        } else {
+          this.range.updateMinMax(series.range.min)
+          this.range.updateMinMax(series.range.max)
+        }
+        if this.show.zero {
+          this.range.updateToShowZero()
+        }
+        if this.title.isEmpty() {
+          this.title.append(series.name)
+        }
+      }
+    }
+    if crossAxis {
+      var i = 0
+      for ; i < this.crossAxes.length; ++i {
+        break if this.crossAxes.items[i] == crossAxis
+      }
+      if i == this.crossAxes.length {
+        this.crossAxes.append(crossAxis)
+      }
+    }
+    if this.isHorizontal() {
+      assert !crossAxis || crossAxis.isVertical()
+      this.computeHorizontalSize(size)
+    } else {
+      assert !crossAxis || crossAxis.isHorizontal()
+      this.computeVerticalSize(size)
+    }
+  }
+
+  fn computeDirectionPass1(this) {
+    if this.isHorizontal() {
+      if this.direction {
+        assert this.direction == Direction.LeftToRight || this.direction == Direction.RightToLeft
+      } else {
+        this.direction = Direction.LeftToRight
+      }
+    } else if this.direction {
+      assert this.direction == Direction.BottomToTop || this.direction == Direction.TopToBottom
+    } else {
+      this.direction = Direction.BottomToTop
+    }
+  }
+
+  fn computeDirectionPass2(this) {
+    assert this.direction
+    return if this.show.fixedDirection
+    if this.isHorizontal() {
+      var lefts = 0
+      var rights = 0
+      var centers = 0
+      for axis in this.crossAxes {
+        if axis.location == Location.Right {
+          ++rights
+        } else if axis.location == Location.Left {
+          ++lefts  
+        } else {
+          ++centers
+        }
+      }
+      if lefts > rights {
+        this.direction = Direction.LeftToRight
+      } else if rights > lefts {
+        this.direction = Direction.RightToLeft
+      } else {
+
+      }
+    } else {
+      var tops = 0
+      var bottoms = 0
+      var centers = 0
+      for axis in this.crossAxes {
+        if axis.location == Location.Top {
+          ++tops
+        } else if axis.location == Location.Bottom {
+          ++bottoms  
+        } else {
+          ++centers
+        }
+      }
+      if bottoms > tops {
+        this.direction = Direction.BottomToTop
+      } else if tops > bottoms {
+        this.direction = Direction.TopToBottom
+      } else {
+
+      }
+    }
+  }
+
+
+  fn computeVerticalSize(this, size) {
+    return if this.crossSize > 0f 
+    var  width = SPACE_AFTER_AXIS
+    var height = SPACE_AFTER_AXIS
+    auto s     = String{}
+    this.computeTicks()
+    if this.show.title && this.title.length {
+      const sz = computeTextSize(this.title)
+      if this.show.verticalTitle {
+        width  += CHAR_BOX_HEIGHT
+        height += sz.width
+      } else {
+        width  += sz.width
+        height += CHAR_BOX_HEIGHT
+      }
+    } else {
+      this.show.title = false
+    }
+    if this.show.labels {
+      var maxLabelWidth = 0f
+      each _, px, i in auto this.labels(s, 0f, 100f) {
+        const sz = computeTextSize(s)
+        maxLabelWidth = math.max(maxLabelWidth, sz.width)
+      } 
+      if this.show.verticalLabels {
+        width  += CHAR_BOX_HEIGHT
+        height += maxLabelWidth
+      } else {
+        width  += maxLabelWidth
+        height += CHAR_BOX_HEIGHT
+      }
+    }
+    if this.show.majorTicks {
+      width += MAJOR_TICKS_SIZE
+      ++height
+    } else if this.show.minorTicks {
+      width += MINOR_TICKS_SIZE
+      ++height
+    }
+    this.updateCrossSize(width)
+    size.center.height = math.max(size.center.height, height)
+    if this.location == Location.Left {
+      size.left.width += width
+    } else if this.location == Location.Right {
+      size.right.width += width
+    } else {
+      assert this.location == Location.Center
+      size.center.width = math.max(size.center.width, width)
+    }
+  }
+
+  fn computeHorizontalSize(this, size) { 
+    return if this.crossSize > 0f 
+    var  width = SPACE_AFTER_AXIS
+    var height = SPACE_AFTER_AXIS
+    auto s     = String{}
+    this.computeTicks()
+    if this.show.title && this.title.length {
+      this.show.verticalTitle = false
+      const sz = computeTextSize(this.title)
+      width  += sz.width
+      height += CHAR_BOX_HEIGHT
+    } else {
+      this.show.title = false
+      this.show.verticalTitle = false
+    }
+    if this.show.labels {
+      var maxLabelWidth  = 0f
+      var numberOfLabels = 0
+      each value, px, i in auto this.labels(s, 0f, 100f) {
+        const sz = computeTextSize(s)
+        maxLabelWidth = math.max(maxLabelWidth, sz.width)
+        ++numberOfLabels
+      } 
+      if this.show.verticalLabels {
+        width  += CHAR_BOX_HEIGHT
+        height += maxLabelWidth * numberOfLabels
+      } else {
+        width  += maxLabelWidth * numberOfLabels
+        height += CHAR_BOX_HEIGHT
+      }
+    }
+    if this.show.majorTicks {
+      height += MAJOR_TICKS_SIZE
+      ++width
+    } else if this.show.minorTicks {
+      height += MINOR_TICKS_SIZE
+      ++width
+    }
+    this.updateCrossSize(height)
+    size.center.width = math.max(size.center.width, width)
+    if this.location == Location.Top {
+      size.top.height += height
+    } else if this.location == Location.Bottom {
+      size.bottom.height += height
+    } else {
+      assert this.location == Location.Center
+      size.center.height = math.max(size.center.height, height)
+    }
+  }
+
+  fn map(this, s, value, rect, copyLabel = false) {    
+    assert this.ticks.major
+    assert (this.range.type == Type.Int64 || this.range.type == Type.Double) && rect.size().isValid()
+    const minData     = this.computed.min.f64
+    const maxData     = this.computed.max.f64
+    const dataPerStep = this.computed.step.major
+    var   val         = 0.0
+    var   minPixel    = 0f
+    var   maxPixel    = 0f
+    var   pixelsRunFromMinToMax = false
+    if this.isHorizontal() {
+      pixelsRunFromMinToMax = this.direction == Direction.LeftToRight
+      minPixel = rect.left
+      maxPixel = rect.right()
+    } else {
+      pixelsRunFromMinToMax = this.direction == Direction.TopToBottom
+      minPixel = rect.top
+      maxPixel = rect.bottom()
+    }
+    if this.range.type == Type.Int64 {
+      val = value.i64 as Double
+      if copyLabel {
+        value.i64.format(s.clear())
+      }
+    } else {
+      val = value.f64
+      if copyLabel {
+        value.f64.format(s.clear())
+      }
+    }
+    //                                 dataRange = maxData - minData
+    //                               dataPerStep = {computed}
+    // zerothData + ( stepsToMax × dataPerStep ) = maxData
+    //                                stepsToMax = ( maxData - zerothData ) ÷ dataPerStep
+    // zerothData - ( stepsToMin × dataPerStep ) = minData
+    //                                stepsToMin = ( minData + zerothData ) ÷ dataPerStep
+    //
+    //                  pixelRange = maxPixel - minPixel
+    //   zerothPixel + pixelsToMax = maxPixel
+    //                 zerothPixel = maxPixel - pixelsToMax
+    // pixelsToMax ÷ pixelsPerStep = ( maxData - zerothData ) ÷ dataPerStep
+    // pixelsToMax ÷ pixelsPerStep = stepsToMax
+    //                 pixelsToMax = pixelsPerStep × stepsToMax
+    //               ∴ zerothPixel = maxPixel - ( pixelsPerStep × stepsToMax )
+    return minPixel if dataPerStep == 0.0
+    if this.range.containsZeroExclusive() {
+      const stepsToMax    = maxData / dataPerStep
+      const pixelsPerStep = (maxPixel - minPixel) / stepsToMax
+      const zeroPixel     = maxPixel - (pixelsPerStep * stepsToMax)
+      const dataDiff      = val
+      const pixelDiff     = pixelsPerStep * (dataDiff / dataPerStep)
+      if dataDiff >= 0.0 {
+        if pixelsRunFromMinToMax {
+          return zeroPixel + pixelDiff
+        }
+        return maxPixel - pixelDiff    
+      }
+      if pixelsRunFromMinToMax {
+        return minPixel - pixelDiff
+      }
+      return zeroPixel + pixelDiff  
+    }
+    const stepsToMax    = (maxData - minData) / dataPerStep
+    const pixelsPerStep = (maxPixel - minPixel) / stepsToMax
+    const dataDiff      = val - minData
+    const pixelDiff     = pixelsPerStep * (dataDiff / dataPerStep)
+    if pixelsRunFromMinToMax {
+      return minPixel + pixelDiff
+    }
+    return maxPixel - pixelDiff    
+  }
+
+
+  fn labels(this, s, minPixel, maxPixel) {
+    if this.range.type == Type.Text {
+      each value, pixel, i in auto this.textLabels(s, minPixel, maxPixel) {
+        yield (value, pixel, i)
+      }
+      return
+    }
+    assert this.ticks.major && (this.range.type == Type.Int64 || this.range.type == Type.Double) && 
+          minPixel < maxPixel
+    var   minData     = this.computed.min.f64
+    var   maxData     = this.computed.max.f64
+    const dataPerStep = this.computed.step.major
+    var pixelsRunFromMinToMax = false
+    if this.isHorizontal() {
+      pixelsRunFromMinToMax = this.direction == Direction.LeftToRight
+    } else {
+      pixelsRunFromMinToMax = this.direction == Direction.TopToBottom
+    }
+    if dataPerStep == 0.0 {
+      minData.format(s.clear())
+      yield (minData, minPixel if pixelsRunFromMinToMax else maxPixel, 0)
+      maxData.format(s.clear())
+      yield (maxData, maxPixel if pixelsRunFromMinToMax else minPixel, 1)
+    } else  if this.range.startsAtZero() {
+      const stepsToMax = maxData / dataPerStep
+      const pixelsPerStep = (maxPixel - minPixel) / stepsToMax
+      var value = 0.0
+      var pixel = minPixel
+      const endPixel = maxPixel + PIXEL_ALLOWANCE_ON_AXIS_FOR_TICKS
+      for var i = 0; pixel <= endPixel; ++i {
+        value.format(s.clear())
+        yield (value, pixel if pixelsRunFromMinToMax else maxPixel - (pixel - minPixel), i)
+        value += dataPerStep
+        pixel += pixelsPerStep
+      }
+    } else if this.range.endsAtZero() {
+      const stepsToMin = -minData / dataPerStep
+      const pixelsPerStep = (maxPixel - minPixel) / stepsToMin
+      var value = 0.0
+      var pixel = maxPixel
+      const endPixel = minPixel - PIXEL_ALLOWANCE_ON_AXIS_FOR_TICKS
+      for var i = 0; pixel >= endPixel; --i {
+        value.format(s.clear())
+        yield (value, pixel if pixelsRunFromMinToMax else maxPixel - (pixel - minPixel), i)
+        value -= dataPerStep
+        pixel -= pixelsPerStep
+      }
+    } else if this.range.containsZeroExclusive() {
+      const dataRange = maxData - minData
+      const steps = dataRange / dataPerStep
+      const pixelsPerStep = (maxPixel - minPixel) / steps
+      const stepsToMax = maxData / dataPerStep
+      const zeroPixel = maxPixel - (pixelsPerStep * stepsToMax)
+      var value = 0.0
+      var pixel = zeroPixel
+      var endPixel = maxPixel + PIXEL_ALLOWANCE_ON_AXIS_FOR_TICKS
+      for var i = 0; pixel <= endPixel; ++i {
+        value.format(s.clear())
+        yield (value, pixel if pixelsRunFromMinToMax else maxPixel - (pixel - minPixel), i)
+        value += dataPerStep
+        pixel += pixelsPerStep
+      }
+      const stepsToMin = -minData / dataPerStep
+      value = -dataPerStep
+      pixel = zeroPixel - pixelsPerStep
+      endPixel = minPixel - PIXEL_ALLOWANCE_ON_AXIS_FOR_TICKS
+      for var i = -1; pixel >= endPixel; --i {
+        value.format(s.clear())
+        yield (value, pixel if pixelsRunFromMinToMax else maxPixel - (pixel - minPixel), i)
+        value -= dataPerStep
+        pixel -= pixelsPerStep
+      }
+    } else {
+      const steps = (maxData - minData) / dataPerStep
+      const pixelsPerStep = (maxPixel - minPixel) / steps
+      var value = minData
+      var pixel = minPixel
+      const endPixel = maxPixel + PIXEL_ALLOWANCE_ON_AXIS_FOR_TICKS
+      for var i = 0; pixel <= endPixel; ++i {
+        value.format(s.clear())
+        yield (value, pixel if pixelsRunFromMinToMax else maxPixel - (pixel - minPixel), i)
+        value += dataPerStep
+        pixel += pixelsPerStep
+      }
+    }
+  }
+
+
+  fn textLabels(this, s, minPixel, maxPixel) {    
+    assert this.ticks.major && this.range.type == Type.Text && minPixel < maxPixel
+    var pixelsRunFromMinToMax = false
+    if this.isHorizontal() {
+      pixelsRunFromMinToMax = this.direction == Direction.LeftToRight
+    } else {
+      pixelsRunFromMinToMax = this.direction == Direction.TopToBottom
+    }
+    const steps = this.ticks.major
+    const pixelsPerStep = (maxPixel - minPixel) / steps
+    var pixel = minPixel
+    const series = this.series.first()
+    for var i = 0; i < series.length; ++i {
+      const value = series.items[i].str
+      s.clear().append(value)
+      yield (i as Double, pixel if pixelsRunFromMinToMax else maxPixel - (pixel - minPixel), i)
+      pixel += pixelsPerStep
+    }
+  }
+
+  html renderVertical(this, s, rect, center) {
+    #{ 
+      const rc = Rect{ left = rect.left, top = center.top, width = this.crossSize, height = center.height }
+      if this.location == Location.Left {
+        rect.left  -= rc.width
+        rect.width += rc.width
+        rc.left     = rect.left
+      } else if this.location == Location.Right {
+        rc.left     = rect.right()
+        rect.width += rc.width
+      } else {
+        assert 0
+      }
+    }
+    <!--<path stroke="green" d="M #{rc.left} #{rc.top} h #{rc.width} v #{rc.height} h -#{rc.width} z" />-->
+    <g stroke-width="#{STROKE_WIDTH}">#{
+      const majorTickSize = MAJOR_TICKS_SIZE if this.show.majorTicks else 0f
+      const minorTickSize = MINOR_TICKS_SIZE if this.show.majorTicks else 0f
+      if this.show.axisLine {
+        s.clear().append("<path stroke='#{this.color.rgb()}'")
+        if this.location == Location.Right {
+          s.append("d='M #{rc.left} #{rc.top} l 0 #{rc.height}'/>")
+        } else {
+          s.append("d='M #{rc.right()} #{rc.top} l 0 #{rc.height}'/>")
+        }
+        yield string.fromBuffer(s)
+      }
+      if this.show.title {
+        s.clear()
+        const sz = computeTextSize(this.title)
+        var x = 0f, y = 0f
+        var rotate = { angle = 0f, at = Point{} }
+        if this.location == Location.Right {
+          if this.show.verticalTitle {
+            rotate.angle = 90f
+            rotate.at.x = rc.right() - sz.height / 2f
+            rotate.at.y = rc.top + rc.height / 2f
+            x = rotate.at.x - sz.width / 2f
+            y = rotate.at.y + SPACE_TO_LABEL
+          } else {
+            x = rc.right() - sz.width
+            y = rc.top + rc.height / 2f + sz.height / VERTICAL_LABEL_MID_DIVIDER            
+          }
+        } else if this.show.verticalTitle {
+            rotate.angle = -90f
+            rotate.at.x = rc.left + sz.height / 2f
+            rotate.at.y = rc.top + rc.height / 2f
+            x = rotate.at.x - sz.width / 2f
+            y = rotate.at.y + SPACE_TO_LABEL
+        } else {
+            x = rc.left + SPACE_TO_LABEL
+            y = rc.top + rc.height / 2f + sz.height / VERTICAL_LABEL_MID_DIVIDER
+        }
+        if rotate.angle {
+          s.append("<g transform='rotate(#{rotate.angle} #{rotate.at.x} #{rotate.at.y})'>\
+                      <text fill='#{this.color.rgb()}' x='#{x}' y='#{y}'>#{this.title}</text></g>")
+        } else {
+          s.append("<text fill='#{this.color.rgb()}' x='#{x}' y='#{y}'>#{this.title}</text>")
+        }
+        yield string.fromBuffer(s)
+      }
+      if this.show.labels || this.show.majorTicks || this.show.minorTicks || this.show.grid {
+        auto ticks  = String{}
+        auto labels = String{}
+        auto grid = String{}
+        ticks.append("<g stroke='#{this.color.rgb()}'><path d='")
+        grid.append("<g stroke='grey' stroke-width='0.1'><path d='")
+        labels.append("<g fill='#{this.color.rgb()}'>")
+        each _, px, i in auto this.labels(s, rc.top, rc.bottom()) {
+          //println("=====i=#{i}")
+          if this.show.majorTicks {
+            if this.location == Location.Right {
+              ticks.append("M #{rc.left} #{px} l #{majorTickSize} 0")
+            } else {
+              ticks.append("M #{rc.right()} #{px} l -#{majorTickSize} 0")
+            }
+          }
+          if this.show.grid {
+            grid.append("M #{center.left} #{px} l #{center.width} 0")
+          }
+          if this.show.labels {
+            const sz = computeTextSize(s)
+            if this.show.verticalLabels {
+              assert 0
+            } else {
+              const mid = px + sz.height / VERTICAL_LABEL_MID_DIVIDER
+              if this.location == Location.Right {
+                labels.append("<text x='#{rc.left + majorTickSize + SPACE_TO_LABEL}' \
+                                     y='#{mid}'>#{s}</text>")
+              } else {
+                labels.append("<text x='#{rc.right() - majorTickSize - sz.width}' \
+                                     y='#{mid}'>#{s}</text>")
+              }
+            }
+          }
+        }
+        ticks.append("'/></g>")
+        grid.append("'/></g>")
+        labels.append("</g>")
+        yield string.fromBuffer(ticks) if this.show.majorTicks || this.show.minorTicks
+        yield string.fromBuffer(labels) if this.show.labels
+        yield string.fromBuffer(grid) if this.show.grid
+      }
+    }</g>
+  }
+
+  html renderHorizontal(this, s, rect, center) {
+    #{ 
+      const rc = Rect{ left = center.left, top = rect.top, width = center.width, height = this.crossSize }
+      if this.location == Location.Top {
+        rect.top    -= rc.height
+        rect.height += rc.height
+        rc.top       = rect.top
+        rect.top    -= SPACE_AFTER_AXIS
+        rect.height += SPACE_AFTER_AXIS
+      } else if this.location == Location.Bottom {
+        rc.top       = rect.bottom()
+        rect.height += rc.height
+        rect.height += SPACE_AFTER_AXIS
+      } else {
+        assert 0
+      }
+    }
+    <!--<path stroke="green" d="M #{rc.left} #{rc.top} h #{rc.width} v #{rc.height} h -#{rc.width} z" />-->
+    <g stroke-width="#{STROKE_WIDTH}">#{
+      const majorTickSize = MAJOR_TICKS_SIZE if this.show.majorTicks else 0f
+      const minorTickSize = MINOR_TICKS_SIZE if this.show.majorTicks else 0f
+      if this.show.axisLine {
+        s.clear().append("<path stroke='#{this.color.rgb()}'")
+        if this.location == Location.Top {
+          s.append("d='M #{rc.left} #{rc.bottom()} l #{rc.width} 0'/>")
+        } else {
+          s.append("d='M #{rc.left} #{rc.top} l #{rc.width} 0'/>")
+        }
+        yield string.fromBuffer(s)
+      }
+      if this.show.title {
+        s.clear()
+        const sz = computeTextSize(this.title)
+        var x = 0f, y = 0f
+        if this.location == Location.Top {
+          x = rc.left + rc.width / 2f - sz.width / 2f
+          y = rc.top + sz.height
+        } else {
+          x = rc.left + rc.width / 2f - sz.width / 2f
+          y = rc.bottom()
+        }
+        s.append("<text fill='#{this.color.rgb()}' x='#{x}' y='#{y}'>#{this.title}</text>")
+        yield string.fromBuffer(s)
+      }
+      if this.show.labels || this.show.majorTicks || this.show.minorTicks || this.show.grid {
+        auto ticks  = String{}
+        auto labels = String{}
+        auto grid   = String{}
+        ticks.append("<g stroke='#{this.color.rgb()}'><path d='")
+        grid.append("<g stroke='grey' stroke-width='0.1'><path d='")
+        labels.append("<g fill='#{this.color.rgb()}'>")
+        each label, px, i in auto this.labels(s, rc.left, rc.right()) {        
+          if this.show.majorTicks {
+            if this.location == Location.Top {
+              ticks.append("M #{px} #{rc.bottom()} l 0 -#{majorTickSize}")
+            } else {
+              ticks.append("M #{px} #{rc.top} l 0 #{majorTickSize}")
+            }
+          }
+          if this.show.grid {
+            grid.append("M #{px} #{center.top} l 0 #{center.height}")
+          }
+          if this.show.labels {
+            const sz = computeTextSize(s)
+            const mid = px - sz.width / 2f
+            if this.show.verticalLabels {
+              assert 0
+            } else {
+              if this.location == Location.Top {
+                labels.append("<text x='#{mid}' y='#{rc.bottom() - majorTickSize - SPACE_TO_LABEL}'>#{s}</text>")
+              } else {
+                labels.append("<text x='#{mid}' y='#{rc.top + majorTickSize + sz.height}'>#{s}</text>")
+              }
+            }
+          }
+        }
+        ticks.append("'/></g>")
+        grid.append("'/></g>")
+        labels.append("</g>")
+        yield string.fromBuffer(ticks) if this.show.majorTicks || this.show.minorTicks
+        yield string.fromBuffer(labels) if this.show.labels
+        yield string.fromBuffer(grid) if this.show.grid
+      }
+    }</g>
+  }
+}

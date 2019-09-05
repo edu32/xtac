@@ -1,0 +1,147 @@
+fn open(hKey, subKeyName) {
+  const key = null
+  if const hResult = os.RegOpenKeyExA(hKey, subKeyName.text, 0, os.KEY_ENUMERATE_SUB_KEYS | os.KEY_QUERY_VALUE | os.KEY_READ, &key) {
+    println("os.RegOpenKeyEx failed with #{hResult} for #{subKeyName}")
+    return null
+  }
+  return key
+}
+
+
+fn close(hKey) {
+  if const hResult = os.RegCloseKey(hKey) {
+    println("os.RegCloseKey failed with #{hResult}")
+  }
+}
+
+
+fn valueOf(hKey, subKeyName, valueName) {
+  var value = String{}
+  const type = 0u32
+  const length = 0
+  if const hResult = os.RegGetValueA(hKey, subKeyName.text, valueName.text, 0x0000ffff, &type, null, &length) {
+    println("os.RegGetValueA failed with #{hResult} for subKeyName = #{subKeyName}, valueName = #{valueName}")
+    return (value, type, hResult)
+  }
+  if length {
+    value.reserve(length)
+    if const hResult = os.RegGetValueA(hKey, subKeyName.text, valueName.text, 0x0000ffff, &type, value.text, &length) {
+      println("os.RegGetValueA failed with #{hResult} for subKeyName = #{subKeyName}, valueName = #{valueName}")
+      return (value, type, hResult) if hResult
+    }
+    if type == os.REG_SZ || type == os.REG_EXPAND_SZ || type == os.REG_MULTI_SZ { // 1 terminating nul
+      value.terminate(length - 1)
+    } else {
+      value.terminate(length)
+    }
+  }
+  return (value, type, os.S_OK)
+}
+
+
+fn enumerate(hKey) {
+  var cSubKeys = 0,
+      cMaxSubKeyLen = 0,
+      cValues = 0,
+      cMaxValueNameLen = 0,
+      cMaxValueLen = 0
+  var hResult = os.RegQueryInfoKeyA(hKey,
+    /* lpClass                = */ null,
+    /* lpcClass               = */ null, 
+    /* lpReserved             = */ null,
+    /* lpcSubKeys             = */ &cSubKeys,
+    /* lpcMaxSubKeyLen        = */ &cMaxSubKeyLen,
+    /* lpcMaxClassLen         = */ null,
+    /* lpcValues              = */ &cValues,
+    /* lpcMaxValueNameLen     = */ &cMaxValueNameLen,
+    /* lpcMaxValueLen         = */ &cMaxValueLen,
+    /* lpcbSecurityDescriptor = */ null,
+    /* lpftLastWriteTime      = */ null)
+  if hResult {
+    println("os.RegQueryInfoKeyA failed with #{hResult}")
+  } else if cSubKeys {
+    auto subKeys = enumSubKeys(hKey, cSubKeys, cMaxSubKeyLen)
+    if cValues {
+      auto values = enumValues(hKey, cValues, cMaxValueNameLen, cMaxValueLen)
+      yield (subKeys, values)
+    } else {
+      yield (subKeys, null)
+    }
+  } else if cValues {
+    auto values = enumValues(hKey, cValues, cMaxValueNameLen, cMaxValueLen)
+    yield (null, values)
+  }
+
+
+  fn enumSubKeys(hKey, cSubKeys, cMaxSubKeyLen) {
+    assert cMaxSubKeyLen > 0
+    auto subKeyName = String{}
+    subKeyName.reserve(cMaxSubKeyLen + 1)
+    for var i = 0; i < cSubKeys; ++i {
+      const cName = subKeyName.capacity
+      const hResult = os.RegEnumKeyExA(hKey, 
+                    /* dwIndex    = */ i, 
+                    /* lpName     = */ subKeyName.text,
+                    /* lpcName    = */ &cName,
+                    /* lpReserved = */ null,
+                    /* lpClass    = */ null,
+                    /* lpcClass   = */ null,
+                    /* lpftLastWriteTime = */ null)
+      if hResult {
+        println("os.RegQueryInfoKeyA failed with #{hResult}")
+      } else {
+        subKeyName.terminate(cName)
+        const subKey = open(hKey, subKeyName)
+        yield (subKey, &subKeyName)
+        if subKey {
+          close(subKey)
+        }
+      }
+    }
+  }
+
+
+  fn enumValues(hKey, cValues, cMaxValueNameLen, cMaxValueLen) {
+    const empty = String{}
+    auto name = String{}, raw = String{}, value = String{}
+    name.reserve(cMaxValueNameLen + 1)
+    raw.reserve(cMaxValueLen + 1)
+    for var i = 0; i < cValues; ++i {
+      const cValueName = name.capacity
+      const cValue = raw.capacity
+      const type = 0
+      const hResult = os.RegEnumValueA(hKey,
+                                       i,
+                                       name.text,
+                                       &cValueName,
+                                       null,
+                                       &type,
+                                       raw.text,
+                                       &cValue)
+      if hResult {
+        println("os.RegEnumValueA failed with #{hResult}")
+      } else {
+        name.terminate(cValueName)
+        raw.terminate(cValue)
+        if type == os.REG_SZ || type == os.REG_EXPAND_SZ {
+          yield (&name, &raw)
+        } else if type == os.REG_DWORD {
+          const n = *(UInt32*{ raw.text })
+          n.format(value.clear())
+          yield (&name, &value)
+        } else {
+          yield (&name, &empty)
+        }
+      }
+    }
+  }
+}
+
+
+fn getContentTypeFromFileNameExtension(fileNameExtension) {
+  var (v, vtype, vok) = valueOf(os.HKEY_CLASSES_ROOT, fileNameExtension, "Content Type")
+  if vok {
+    v.clear().append("text/plain")
+  }
+  return v
+}

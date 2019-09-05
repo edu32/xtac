@@ -1,0 +1,1040 @@
+import Binder as Ctx from binder
+import sema
+import CastKind from ast
+
+static xxxx = 100
+
+struct Make {
+  var ctx = Ctx*{}
+
+  fn entryPos(pos) {
+    return Pos {
+      file = pos.file,
+      range = Range{ start = pos.range.start, end = pos.range.start }
+    }
+  }
+
+  fn exitPos(pos) {
+    return Pos {
+      file = pos.file,
+      range = Range{ start = pos.range.end, end = pos.range.end }
+    }
+  }
+
+
+  fn typeid(this) = this.ctx.ids.nextRandom()
+
+
+  fn block(this, outer, pos): ast.Scope* {
+    return this.scope(ast.Node*{}, outer, pos, true, true)
+  }
+
+
+  fn scope(this, owner, outer, pos, withExit, withExitInParent): ast.Scope* {
+    const scope = new ast.Scope{ pos = pos, parent = outer, owner = owner, type = ast.tyVoid }
+    if !owner {
+      scope.owner = scope 
+    }
+    this.exits(scope, withExit, withExitInParent)
+    return scope
+  }
+
+
+  fn ifStmt(this, outer, pos, withExit, withExitInParent) {
+    const scope = new ast.If{ pos = pos, parent = outer, type = ast.tyVoid }
+    scope.owner = scope
+    this.exits(scope, withExit, withExitInParent)
+    return scope
+  }
+
+
+  fn loop(this, outer, pos) {
+    const scope = new ast.Loop{ pos = pos, parent = outer, type = ast.tyVoid }
+    scope.owner = scope
+    scope.entry = this.label(entryPos(pos))
+    this.exits(scope, true, true)
+    return scope
+  }
+
+  fn exits(this, scope, withExit, withExitInParent) {
+    const pos = exitPos(scope.pos)
+    if withExit {
+      scope.exit = this.label(exitPos(pos))
+    }
+    if withExitInParent {
+      const   outer = scope.parent
+      if const exit = outer.exit {
+        if outer.deferreds.length {
+          if const found = outer.deferreds.last() is ast.Label {
+            scope.exitInParent = found
+            return
+          }
+        }
+        scope.exitInParent = this.label(exit.pos)
+        outer.deferreds.append(scope.exitInParent)
+      } else {
+        this.ctx.err(pos, "outer scope does not have an exit")
+      }
+    }
+  }
+
+
+  fn function(this, template, name, scope, withExit) { 
+    const instance = new ast.Function{ pos = this.ctx.mkPos(template), name = name, keyword = Tok.Fn }
+    instance.scope = this.scope(instance, scope, instance.pos, withExit, withExitInParent = false)
+    auto str = String{}
+    this.dotName(instance.scope, str)
+    instance.dotName = this.ctx.ids.get(str)
+    const symbol = scope.appendCompilerGenerated(template, instance)
+    instance.type.setSymbol(symbol)
+    return symbol
+  }
+
+
+  fn exitReason(this, scope, pos): ast.Node* {
+    if const function = this.ctx.currentFunction(scope) {
+      if function.generator {
+        return this.io(function, this.ctx.ids.kw_exitReason, pos)
+      }
+    }
+    if const found = this.ctx.find(scope, this.ctx.ids.kw_exitReason, pos) {
+      return this.name(found, pos)
+    }
+    return null
+  }
+
+
+  fn retval(this, function, type, scope, pos) {    
+    if const found = function.scope.findLocal(this.ctx.ids.kw_retval) {
+      return this.name(found, pos)
+    }
+    import binder
+    if const local = this.local(binder.noModifiers, this.ctx.ids.kw_retval, type, function.scope, pos, pos, checkShadowing = false) {
+      return this.name(local, pos)
+    }
+    assert 0
+    return null
+  }
+
+
+  fn compatibleReturn(this, function, ret) {
+    if ret.value = this.cast(ret.value, function.fnreturn, ret.value.pos, isImplicit = false) {
+      ret.type = ret.value.type
+      return ret
+    }
+    this.err(ret.pos, { expected = function.fnreturn, found = ret.type }) with {
+      println("incompatible return type\r\n\t\
+        → expected: #{it.expected}\r\n\t\
+        →    found: #{it.found}")
+    }
+    return this.throwAway(ret) as ast.Return*
+  }
+
+
+  fn assert_(this, pos) {
+    return new ast.Assert{ pos = pos, type = ast.tyVoid }
+  }
+
+
+  fn goto(this, target, pos) {
+    /*import mblock from std.memory
+    const xx = new ast.Goto{ pos = pos, target = target, type = ast.tyVoid, xxxx = xxxx++ }
+    if mblock(xx).id == 373961 {
+      println("xxxx = #{xxxx}")
+      assert 0
+    }
+    return xx*/
+    return new ast.Goto{ pos = pos, target = target, type = ast.tyVoid }
+  }
+
+
+  fn label(this, pos) {
+    return new ast.Label{ pos = pos, type = ast.tyVoid }
+  }
+
+
+  fn local(this, modifiers, name, type, scope, namePos, pos, checkShadowing = true): ast.Symbol* {
+    if name.isEmpty() {
+      name = this.ctx.typer.random("local")
+    }
+    const               local = new ast.Local{ pos = pos, modifiers = modifiers, name = name, type = type }
+    const (symbol, duplicate) = scope.appendSymbol(name, this.ctx.typer.nullTemplate, local)
+    if duplicate {
+      this.err(namePos, name) with {
+        println("cannot create local #{it}#[%<darkred|white>] becase the name is already used in scope")
+      }
+      return null
+    }
+    if !checkShadowing {
+      // Do nothing.
+    } else if const found = scope.checkShadowing(name) {
+      this.err(namePos, found) with {
+        println("local #{it.name}#[%<darkred|white>] shadows a symbol by the same name in an outer local scope")
+      }
+      return null
+    }
+    if modifiers.isAuto {
+      scope.deferreds.append(new ast.Auto{ pos = pos, value = this.name(symbol, pos) })
+    }
+    if type.isVoid() {
+      this.e_void(local)
+    }
+    return symbol
+  }
+
+
+  fn parameter(this, modifiers, name, type, pos) {
+    const parameter = new ast.Parameter{ pos = pos, modifiers = modifiers, name = name, type = type}
+    if type.isVoid() {
+      this.e_void(parameter)
+    }
+    return parameter
+  }
+
+
+  fn field(this, modifiers, name, value, scope, pos): ast.Symbol* {
+    if name.isEmpty() {
+      const suffix = scope.symbols.length
+      name = this.ctx.ids.get("~field~#{suffix}")
+    }
+    const field = new ast.Field{ pos = pos, modifiers = modifiers, name = name, value = value,
+                                 type = value.type }
+    const (symbol, duplicate) = scope.appendSymbol(name, this.ctx.typer.nullTemplate, field)
+    if duplicate {
+      this.err(pos, name) with {
+        println("cannot create field #{it}#[%<darkred|white>] becase the name is already used in scope")
+      }
+      return null
+    }
+    if value.type.isVoid() {
+      this.e_void(field)
+    }
+    return symbol
+  }
+
+
+  fn superField(this, name, type, scope, pos): ast.Symbol* {
+    if name.isEmpty() {
+      name = this.ctx.typer.random("super")
+    }
+    import binder
+    const field = new ast.Field{ pos = pos, modifiers = binder.constModifiers, name = name, type = type }
+    const (symbol, duplicate) = scope.appendSymbol(name, this.ctx.typer.nullTemplate, field)
+    if duplicate {
+      this.err(pos, name) with {
+        println("cannot create super field #{it}#[%<darkred|white>] becase the name is already used in scope")
+      }
+      return null
+    }
+    field.isSuper = true
+    return symbol
+  }
+
+
+  fn global(this, modifiers, name, value, scope, pos): ast.Symbol* {
+    if name.isEmpty() {
+      name = this.ctx.typer.random("global")
+    }
+    const global = new ast.Global{ pos = pos, modifiers = modifiers, name = name, value = value,
+                                   type = value.type }
+    const (symbol, duplicate) = scope.appendSymbol(name, this.ctx.typer.nullTemplate, global)
+    if duplicate {
+      this.err(pos, name) with {
+        println("cannot global #{it}#[%<darkred|white>] becase the name is already used in scope")
+      }
+      return null
+    }
+    if value.type.isVoid() {
+      this.e_void(global)
+    }
+    return symbol
+  }
+
+
+  fn tuple(this, scope, pos) {
+    const       tuple = new ast.Object{ pos = pos, kind = ast.Object.Kind.Tuple }
+    const (symbol, _) = scope.appendSymbol(this.ctx.typer.random("tuple"), this.ctx.typer.nullTemplate, tuple)
+    assert symbol
+    tuple.type.setSymbol(symbol)
+    tuple.scope = this.scope(tuple, scope, pos, withExit = false, withExitInParent = false)
+    return symbol
+  }
+
+
+  fn tupleFromList(this, list, scope, pos) {
+    const symbol = this.tuple(scope, pos)
+    const  tuple = symbol.instance as ast.Object*
+    auto     str = String{}
+    for i, item in list {
+      import binder
+      i.format(str.clear().append("t"))
+      this.field(binder.noModifiers, this.ctx.ids.get(str), item, tuple.scope, item.pos)
+    }
+    delete list
+    return symbol
+  }
+
+
+  fn array(this, scope, pos) {
+    const       array = new ast.Array{ pos = pos }
+    const (symbol, _) = scope.appendSymbol(this.ctx.typer.random("array"), this.ctx.typer.nullTemplate, array)
+    assert symbol
+    array.type.setSymbol(symbol)
+    return symbol
+  }
+
+
+  fn arrayFromList(this, list, scope, pos) {
+    const symbol = this.array(scope, pos)
+    const  array = symbol.instance as ast.Array*
+    array.children = list
+    return symbol
+  }
+
+
+  fn generator(this, scope, pos) {
+    const      object = new ast.Object{ pos = pos }
+    const (symbol, _) = scope.appendSymbol(this.ctx.typer.random("generator"), this.ctx.typer.nullTemplate, object)
+    assert symbol
+    object.type.setSymbol(symbol)
+    object.scope = this.scope(object, scope, pos, withExit = false, withExitInParent = false)
+    return symbol
+  }
+
+
+  fn object(this, scope, pos) {
+    const      object = new ast.Object{ pos = pos }
+    const (symbol, _) = scope.appendSymbol(this.ctx.typer.random("object"), this.ctx.typer.nullTemplate, object)
+    assert symbol
+    object.type.setSymbol(symbol)
+    object.scope = this.scope(object, scope, pos, withExit = false, withExitInParent = false)
+    return symbol
+  }
+
+
+  fn fixedArray(this, element, length, scope, pos) {
+    const  fixedArray = new ast.FixedArray{ pos = pos, length = length, element = element, }
+    const (symbol, _) = scope.appendSymbol(this.ctx.typer.random("fixedArray"), this.ctx.typer.nullTemplate, fixedArray)
+    assert symbol
+    fixedArray.type.setSymbol(symbol)
+    if length > 0xffff {
+      this.info(pos, fixedArray) with {
+        println("very large fixe-array: #{it.type}")
+      }
+    }
+    return symbol
+  }
+
+
+  fn ifExpr(this, condition, iftrue, pos) {
+    return new ast.IfExpr{ pos = pos, condition = condition, iftrue = iftrue, type = iftrue.type }
+  }
+
+
+  fn fullIfExpr(this, condition, iftrue, ifalse, pos) {
+    return new ast.IfExpr{ pos = pos, condition = condition, iftrue = iftrue, ifalse = ifalse, type = iftrue.type }
+  }
+
+
+  fn assignment(this, lhs, op, rhs, pos) {
+    return new ast.Assignment{ pos = pos, lhs = lhs, op = op, rhs = rhs, type = lhs.type }
+  }
+
+
+  fn assign(this, lhs, rhs, pos) {
+    return this.assignment(lhs, Tok.Assign, rhs, pos)
+  }
+
+
+  fn destructure(this, type, assignments, pos) {
+    return new ast.Destructure{ pos = pos, children = assignments, type = type }
+  }
+
+
+  fn arithmetic(this, lhs, op, rhs, type, pos) {
+    const lconst = lhs is ast.Constant
+    const rconst = rhs is ast.Constant
+    if lconst && rconst && lconst.type == rconst.type && lconst.type == type {
+      return this.ctx.eval.arithmetic(lconst, op, rconst, pos)
+    }
+    return new ast.Arithmetic{ pos = pos, lhs = lhs, op = op, rhs = rhs, type = type }
+  }
+
+
+  fn binaryCondition(this, lhs, op, rhs, pos) {
+    const lconst = lhs is ast.Constant
+    const rconst = rhs is ast.Constant
+    if lconst && rconst && lconst.type == rconst.type {
+      return this.ctx.eval.binaryCondition(lconst, op, rconst, pos)
+    }
+    return new ast.BinaryCondition{ pos = pos, lhs = lhs, op = op, rhs = rhs, type = ast.tyBool }
+  }
+
+
+  fn unaryCondition(this, op, rhs, pos) {
+    if const rconst = rhs is ast.Constant {
+      return this.ctx.eval.unaryCondition(op, rconst, pos)
+    }
+    return new ast.UnaryCondition{ pos = pos, op = op, rhs = rhs, type = ast.tyBool }
+  }
+
+
+  fn logicalNot(this, value, pos) {
+    return this.unaryCondition(Tok.LogicalNot, value, pos)
+  }
+
+
+  fn logicalIs(this, value, pos) {
+    return this.unaryCondition(Tok.LogicalIs, value, pos)
+  }
+
+
+  fn cast(this, value, type, pos, isImplicit): ast.Node* {
+    return this.castWith(value, type, sema.cast(type, value.type, isImplicit), pos, isImplicit)
+  }
+
+  fn castWith(this, value, type, castKind, pos, isImplicit): ast.Node* {
+    if castKind {
+      return value if castKind == castKind.NoCast
+      if const constval = value is ast.Constant {
+        if castKind == CastKind.Numeric {          
+          return this.ctx.eval.trySolveNumericCast(constval, type, pos)
+        }
+      }
+      switch castKind {
+        case CastKind.Ref2Obj // T ⟵ T&
+          return new ast.Dereference{ pos = pos, value = value, type = type }
+        case CastKind.Obj2Ref // T& ⟵ T
+          return new ast.Address{ pos = pos, value = value, type = type }
+      }
+      return new ast.Cast{ pos = pos, value = value, kind = castKind, type = type }
+    }
+    if isImplicit {
+      this.err(pos, { destinationType = type, sourceType = value.type }) with {
+        println("no implicit conversion exists for cast operation\r\n\t\
+          → from: #{it.sourceType}\r\n\t\
+          →   to: #{it.destinationType}")
+      }
+    } else this.err(pos, { destinationType = type, sourceType = value.type }) with {
+      println("no implicit or explicit conversion exists for cast operation\r\n\t\
+        → from: #{it.sourceType}\r\n\t\
+        →   to: #{it.destinationType}")
+    }
+    return this.throwAway(value)
+  }
+
+
+  fn bitcast(this, value, type, pos): ast.Node* {
+    if type.isaDouble() {
+      if value.type == ast.tyInt64 || value.type == ast.tyUInt64 {
+        // U/Int64 ⟶ Double
+        return new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = type }
+      }
+      if value.type == ast.tyInt32 {
+        // Int32 ⟶ Int64 ⟶ Double
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.Numeric, type = ast.tyInt64 }, 
+          kind = CastKind.BitCast, type = type }
+      }
+      if value.type == ast.tyUInt32 {
+        // UInt32 ⟶ UInt64 ⟶ Double
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.Numeric, type = ast.tyUInt64 }, 
+          kind = CastKind.BitCast, type = type }
+      }
+    } else if type.isaFloat() {
+      if value.type == ast.tyInt32 || value.type == ast.tyUInt32 {
+        // U/Int32 ⟶ Float
+        return new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = type }
+      }
+      if value.type == ast.tyInt64 {
+        // Int64 ⟶ Int32 ⟶ Float
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.Numeric, type = ast.tyInt32 }, 
+          kind = CastKind.BitCast, type = type }
+      }
+      if value.type == ast.tyUInt64 {
+        // UInt64 ⟶ UInt32 ⟶ Float
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.Numeric, type = ast.tyUInt32 }, 
+          kind = CastKind.BitCast, type = type }
+      }
+    } else if type == ast.tyInt64 {
+      if value.type.isaDouble() {
+        // Double ⟶ Int64
+        return new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = type }
+      }
+      if value.type.isaFloat() {
+        // Float ⟶ Int32 ⟶ Int64
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = ast.tyInt32 }, 
+          kind = CastKind.Numeric, type = type }
+      }
+    } else if type == ast.tyUInt64 {
+      if value.type.isaDouble() {
+        // Double ⟶ UInt64
+        return new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = type }
+      }
+      if value.type.isaFloat() {
+        // Float ⟶ UInt32 ⟶ UInt64
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = ast.tyUInt32 }, 
+          kind = CastKind.Numeric, type = type }
+      }
+    } else if type == ast.tyInt32 {
+      if value.type.isaFloat() {
+        // Float ⟶ Int32
+        return new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = ast.tyInt32 }
+      }
+      if value.type.isaDouble() {
+        // Double ⟶ Int64 ⟶ Int32
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = ast.tyInt64 }, 
+          kind = CastKind.Numeric, type = type }
+      }
+    } else if type == ast.tyUInt32 {
+      if value.type.isaFloat() {
+        // Float ⟶ UInt32
+        return new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = ast.tyUInt32 }
+      }
+      if value.type.isaDouble() {
+        // Double ⟶ UInt64 ⟶ UInt32
+        return new ast.Cast{ pos = pos,
+          value = new ast.Cast{ pos = pos, value = value, kind = CastKind.BitCast, type = ast.tyUInt64 }, 
+          kind = CastKind.Numeric, type = type }
+      }
+    }
+
+    this.err(pos, { destinationType = type, sourceType = value.type }) with {
+      println("illegal bitcast\r\n\t\
+        → from: #{it.sourceType}\r\n\t\
+        →   to: #{it.destinationType}")
+    }
+    return this.throwAway(value)
+  }
+
+
+  fn directIfIntegral(this, value): ast.Node* {
+    if const c = sema.isIntegral(value.type) {
+      return value if c == CastKind.NoCast
+      return this.castWith(value, value.type.isaReference().pointee, c, value.pos, isImplicit = true)
+    }
+    return value
+  }
+
+
+  fn directIfNumber(this, value): ast.Node* {
+    if const c = sema.isaNumber(value.type) {
+      return value if c == CastKind.NoCast
+      return this.castWith(value, value.type.isaReference().pointee, c, value.pos, isImplicit = true)
+    }
+    return value
+  }
+
+
+  fn directIfNumeric(this, value): ast.Node* {
+    if const c = sema.isNumeric(value.type) {
+      return value if c == CastKind.NoCast
+      return this.castWith(value, value.type.isaReference().pointee, c, value.pos, isImplicit = true)
+    }
+    return value
+  }
+
+
+  fn typeOf(this, type, pos) {
+    return new ast.TypeOf{ pos = pos, type = type }
+  }
+
+  fn typeOfOrModify(this, value, type, pos): ast.TypeOf* {
+    if const result = value is ast.TypeOf {
+      result.type = type
+      return result
+    }
+    const result = this.typeOf(type, pos)
+    this.throwAway(value)
+    return result
+  }
+
+
+  fn sizeOf(this, value, pos): ast.Node* {
+    if const size = value.type.size() {
+      this.throwAway(value)
+      return this.int(size, pos)
+    }
+    return new ast.SizeOf{ pos = pos, value = value, type = ast.tyInt32 }
+  }
+
+
+  fn sizeOfType(this, type, pos): ast.Node* {
+    if const size = type.size() {
+      return this.int(size, pos)
+    }
+    return new ast.SizeOf{ pos = pos, value = this.typeOf(type, pos), type = ast.tyInt32 }
+  }
+
+
+  fn negate(this, value, pos) {
+    if const constant = value is ast.Constant {
+      return this.ctx.eval.negate(constant, pos)
+    }
+    return new ast.UnaryOp{ pos = pos, value = value, op = Tok.Minus, type = value.type }
+  }
+
+
+  fn bitwiseNot(this, value, pos) {
+    if const constant = value is ast.Constant {
+      return this.ctx.eval.bitwiseNot(constant, pos)
+    }
+    return new ast.UnaryOp{ pos = pos, value = value, op = Tok.Tilde, type = value.type }
+  }
+
+
+  fn preDecrement(this, value, pos) {
+    return new ast.UnaryAssignment{ pos = pos, value = value, op = Tok.MinusMinus, type = value.type }
+  }
+
+
+  fn preIncrement(this, value, pos) {
+    return new ast.UnaryAssignment{ pos = pos, value = value, op = Tok.PlusPlus, type = value.type }
+  }
+
+
+  fn addressOf(this, value, pos): ast.Node* {
+    if value.type.isNotVoid() {
+      if const ref = value.type.isaReference() {
+        const type = this.ctx.typer.types.pointerOf(ref.pointee)
+        if type.isKnown() {
+          return this.cast(value, type, pos, isImplicit = true) // T* ⟵ T&
+        }
+      } else {
+        const type = this.ctx.typer.types.pointerOf(value.type)
+        if type.isKnown() {
+          return new ast.Address{ pos = pos, value = value, type = type }
+        }
+      }
+    }
+    this.err(pos, value) with {
+      println("cannot take the address of #{it.type}")
+    }
+    return this.throwAway(value)
+  }
+
+
+  fn referenceOf(this, value, pos): ast.Node* {
+    if value.type.isNotVoid() {
+      return value if value.type.isaReference()
+      if value.type.isDirect() {
+        const type = this.ctx.typer.types.referenceOf(value.type)
+        if type.isKnown() {
+          return new ast.Address{ pos = pos, value = value, type = type }
+        }
+      }
+    }
+    this.err(pos, value) with {
+      println("cannot make a reference of #{it.type}")
+    }
+    return this.throwAway(value)
+  }
+
+
+  fn dereferenceOf(this, value, pos): ast.Node* {
+    if const ptr = value.type.isIndirect() {
+      if ptr.pointee.isNotVoid() {
+        return new ast.Dereference{ pos = pos, value = value, type = ptr.pointee }
+      }
+      this.err(value.pos, value) with {
+        println("cannot dereference #{it.type}")
+      }
+      return this.throwAway(value)
+    }
+    return value
+  }
+
+
+  fn directIfReference(this, value): ast.Node* {
+    if const ref = value.type.isaReference() {
+      return this.dereferenceOf(value, value.pos)
+    }
+    return value
+  }
+
+
+  fn referenceIfNotLoadable(this, value): ast.Node* {
+    if value.type.isNotLoadable() {
+      return this.referenceOf(value, value.pos)
+    }
+    return value
+  }
+
+
+  fn suitableForFunctionArgument(this, value): ast.Node* {
+    return value if value.type.isLoadable()
+    // If {value} is unloadable because we dereferenced a pointer, just return the original pointer.
+    if const deref = value is ast.Dereference {
+      const pointer = deref.value
+      deref.value = null
+      delete deref
+      return pointer
+    }
+    return this.referenceIfNotLoadable(value)
+  }
+
+
+  fn starAmpersandOf(this, value, pos): ast.Node* {
+    if value.type.isNotVoid() {
+      return value if value.type.isaReference() // T&
+      if value.type.isDirect()  {
+        const type = this.ctx.typer.types.referenceOf(value.type)
+        if type.isKnown() {
+          return new ast.Address{ pos = pos, value = value, type = type }
+        }
+      } else if const ptr = value.type.isaPointer() {
+        if ptr.pointee.isDirect() {
+          const type = this.ctx.typer.types.referenceOf(ptr.pointee)
+          if type.isKnown() {
+            return this.cast(value, type, pos, isImplicit = true) // T& ⟵ T*
+          }
+        } else if const ptr2 = ptr.pointee.isaPointer() {
+          if ptr2.pointee.isDirect() {
+            if value = this.dereferenceOf(value, pos) { // T* ⟵ *T**
+              const type = this.ctx.typer.types.referenceOf(value.type)
+              if type.isKnown() {
+                return this.cast(value, type, pos, isImplicit = true) // T& ⟵ T*
+              }
+            } else {
+              return null
+            }
+          }
+        }
+      }
+    }
+    this.err(pos, value) with {
+      println("cannot apply the '*&' to #{it.type}")
+    }
+    return this.throwAway(value)
+  }
+
+
+  fn ampersandStarOf(this, value, pos): ast.Node* {
+    if value.type.isNotVoid() {
+      return value if value.type.isaReference()
+      if value.type.isDirect()  {
+        const type = this.ctx.typer.types.referenceOf(value.type)
+        if type.isKnown() {
+          return new ast.Address{ pos = pos, value = value, type = type }
+        }
+      } else if const ptr = value.type.isaPointer() {
+        if ptr.pointee.isDirect() {
+          const type = this.ctx.typer.types.referenceOf(ptr.pointee)
+          if type.isKnown() {
+            return this.cast(value, type, pos, isImplicit = true) // T& ⟵ T*
+          }
+        } else if const ptr2 = ptr.pointee.isaPointer() {
+          if ptr2.pointee.isDirect() { // *& value: T**
+            return this.dereferenceOf(value, pos) // T* ⟵ *T**
+          }
+        }
+      }
+    }
+    this.err(pos, value) with {
+      println("cannot apply the '&*' to #{it.type}")
+    }
+    return this.throwAway(value)
+  }
+
+
+  fn postDecrement(this, value, pos) {
+    return new ast.UnaryAssignment{ pos = pos, value = value, op = Tok.MinusMinus, isPostFix = true,
+      type = value.type }
+  }
+
+
+  fn postIncrement(this, value, pos) {
+    return new ast.UnaryAssignment{ pos = pos, value = value, op = Tok.PlusPlus, isPostFix = true,
+      type = value.type }
+  }
+
+
+  fn initializerArgument(this, name, value, type, pos) {
+    return new ast.InitializerArgument{ pos = pos, name = name, value = value, type = type }
+  }
+
+
+  fn initializerArgumentWithField(this, field, pos) {
+    return new ast.InitializerArgument{ pos = pos, name = field.name, field = field, type = field.instance.type }
+  }
+
+
+  fn initializer(this, arguments, type, pos) {
+    return new ast.Initializer{ pos = pos, arguments = arguments, type = type }
+  }
+
+
+  fn call(this, name, arguments, type, pos): ast.Node* {
+    return new ast.Call{ pos = pos, name = name, arguments = arguments, type = type }
+  }
+
+
+  fn intrinsic(this, keyword, arguments, type, pos): ast.Node* {
+    return new ast.Intrinsic{ pos = pos, keyword = keyword, arguments = arguments, type = type }
+  }
+
+
+  fn arrayIndex(this, base, index, type, pos): ast.Node* {
+    return new ast.ArrayIndex{ pos = pos, base = base, index = index, type = type }
+  }
+
+
+  fn define_(name, value, pos) {
+    return new ast.Define{ pos = pos, name = name, value = value, type = value.type }
+  }
+
+
+  fn argument(this, name, value, pos) {
+    return new ast.Argument{ pos = pos, name = name, value = value, type = value.type }
+  }
+
+
+  fn extract(this, symbol, pos) {
+    if const def = symbol.instance is ast.Define {
+      return this.copy(def.value, pos)
+    }
+    return this.name(symbol, pos)
+  } 
+
+
+  fn name(this, symbol, pos): ast.Node* {
+    /*import mblock from std.memory
+    const name = new ast.Name{ pos = pos, symbol = symbol, type = symbol.type() }
+    assert mblock(name).id != 0
+    return name*/
+    if const    field = symbol.instance is ast.Field {
+      if const object = symbol.scope.owner is ast.Object {
+        define INDEX_OF_GENERATOR_FN 6  // Index of 'next' function of generator.
+        define    INDEX_OF_LAMBDA_FN 0  // Index of '()' function of lambda.
+        switch object.kind {
+          case object.Kind.Generator {
+            if const functionField = (object.scope.symbols.items[INDEX_OF_GENERATOR_FN].value.instance is ast.Field if object.scope.symbols.length > INDEX_OF_GENERATOR_FN) {
+              if const function = functionField.type.isaFunction() {
+                assert function.generator == object
+                if const selfParameter = (function.parameters.items[0] if function.parameters.length) {
+                  return this.member(this.name(selfParameter, pos), symbol, pos)
+                }
+              }
+            }
+          }
+          case object.Kind.Lambda {
+            assert 0
+          }
+        }
+      }
+      assert with symbol.name
+    }
+    return new ast.Name{ pos = pos, symbol = symbol, type = symbol.type() }
+  }
+
+
+  fn member(this, base, symbol, pos) {
+    var  baseval = base as ast.Node*
+    if const ptr = baseval.type.isIndirect() {
+      assert ptr.pointee.isDirect() && ptr.pointee.isNotVoid()
+      baseval = new ast.Dereference{ pos = pos, value = baseval, type = ptr.pointee }
+    }
+    return new ast.MemberName{ pos = pos, base = baseval, symbol = symbol, type = symbol.type() }
+  }
+
+
+  fn io(this, function, name, pos) {
+    if const symbol = (function.scope.symbols.items[0].value if function.scope.symbols.length) {
+      if const parameter = symbol.instance is ast.Parameter {
+        if const ptr = parameter.type.isaPointer() {
+          if const object = ptr.pointee.isanObject() {
+            if const found = object.scope.findLocal(name) {
+              return this.member(this.name(symbol, pos), found, pos)
+            }
+          }
+        }
+      }
+    }
+    assert 0
+    return null
+  }
+
+
+  fn quoted(this, value, pos) {
+    return new ast.Quoted{ pos = pos, value = value, type = this.ctx.sym_string.instance.type }
+  }
+
+
+  fn quotedUtf16(value, type, pos) {
+    return new ast.QuotedUtf16{ pos = pos, value = value, type = type }
+  }
+
+
+  fn constant(this, immediate, type, pos) {
+    /*import mblock from std.memory
+    const constant = new ast.Constant{ pos = pos, value = immediate, type = type }
+    assert mblock(constant).id != 236233
+    return constant*/
+    return new ast.Constant{ pos = pos, value = immediate, type = type }
+  }
+
+
+  fn bool(this, value, pos) {
+    const immediate = Immediate{ i64 = Int64(value) }
+    return this.constant(immediate, ast.tyBool, pos)
+  }
+
+
+  fn trueBool(this, pos) {
+    return this.bool(true, pos)
+  }
+
+
+  fn falseBool(this, pos) {
+    return this.bool(false, pos)
+  }
+
+
+  fn int(this, value, pos) {
+    const immediate = Immediate{ i64 = Int64(value) }
+    return this.constant(immediate, ast.tyInt32, pos)
+  }
+
+  fn byte(this, value, pos) {
+    const immediate = Immediate{ u64 = UInt64(value) }
+    return this.constant(immediate, ast.tyByte, pos)
+  }
+
+  fn zero(this, type, pos) {
+    const immediate = Immediate{}
+    return this.constant(immediate, type, pos)
+  }
+
+
+  //--------------------------------------------------------------------------------------------------------
+  fn caseType(this, switchType, caseType) {
+    if const ptr = switchType.isaPointer() {
+      return this.ctx.typer.types.pointerOf(caseType)
+    }
+    if const ptr = switchType.isaReference() {
+      return this.ctx.typer.types.referenceOf(caseType)
+    }
+    return caseType
+  }
+
+
+  //--------------------------------------------------------------------------------------------------------
+  fn copyable(this, value, scope): ast.Node* {
+    const errors = this.ctx.typer.errors
+    switch value {
+      case ast.Cast         value.value = this.copyable(value.value, scope)
+      case ast.SizeOf       value.value = this.copyable(value.value, scope)
+      case ast.TypeOf       {}
+      case ast.Address      value.value = this.copyable(value.value, scope)
+      case ast.Dereference  value.value = this.copyable(value.value, scope)
+      case ast.ArrayIndex {  value.base = this.copyable(value.base, scope) value.index = this.copyable(value.index, scope) }
+      case ast.Name         {}
+      case ast.MemberName   value.base = this.copyable(value.base, scope)
+      case ast.Quoted       {}
+      case ast.QuotedUtf16  {}
+      case ast.Constant     {}
+      default {
+        import binder
+        if const local = this.local(binder.constModifiers, this.ctx.typer.emptyid, value.type, scope, value.pos, value.pos) {
+          const   name = this.name(local, value.pos)
+          scope.appendStatement(this.assign(name, value, value.pos))
+          return this.name(local, value.pos)
+        }
+        return this.throwAway(value)
+      }
+    }
+    return value if errors == this.ctx.typer.errors
+      else this.throwAway(value)
+  }
+
+
+  fn copy(this, value, pos): ast.Node* {
+    switch value {
+      case ast.Cast
+        return new ast.Cast{ pos = pos, value = this.copy(value.value, pos), kind = value.kind, type = value.type }
+      
+      case ast.SizeOf
+        return new ast.SizeOf{ pos = pos, value = this.copy(value.value, pos), type = value.type }
+
+      case ast.TypeOf
+        return this.typeOf(value.type, pos)
+
+      case ast.Address
+        return new ast.Address{ pos = pos, value = this.copy(value.value, pos), type = value.type }
+
+      case ast.Dereference 
+        return new ast.Dereference{ pos = pos, value = this.copy(value.value, pos), type = value.type }
+
+      case ast.ArrayIndex
+        return this.arrayIndex(this.copy(value.base, pos), this.copy(value.index, pos), value.type, pos)
+
+      case ast.Name
+        return this.name(value.symbol, pos)
+
+      case ast.MemberName
+        return this.member(this.copy(value.base, pos), value.symbol, pos)
+
+      case ast.Quoted
+        return this.quoted(value.value, pos)
+
+      case ast.QuotedUtf16
+        return this.quotedUtf16(value.value, value.type, pos)
+
+      case ast.Constant
+        return this.constant(value.value, value.type, pos)
+    }
+    assert 0
+    return null
+  }
+
+  //--------------------------------------------------------------------------------------------------------
+  fn dotName(this, scope, str): void {
+    if const parent = scope.parent {
+      this.dotName(parent, str)
+      switch scope.owner {
+        case folder: ast.Folder { str.append(".") if str.length str.append(folder.name) }
+        case   file: ast.File   { str.append(".") if str.length str.append(file.name) }
+        default {
+          if const type = scope.owner.isaTypeNode() {
+            str.append(".") if str.length
+            str.append(type.name)
+          }
+        }
+      }
+    }
+  }
+
+  //--------------------------------------------------------------------------------------------------------
+  fn throwAway(this, value) {
+    return this.ctx.throwAway(value)
+  }
+
+
+  fn throwAwayList(this, list) {
+    return this.ctx.throwAwayList(list)
+  }
+
+
+  fn err(this, pos, ctx, cb) {
+    this.ctx.typer.cberr(pos, ctx, cb)
+  }
+
+
+  fn e_void(this, node) {
+    this.err(node.pos, node) with {
+      println("invalid type for #{nameof(it)}\r\n\t\
+        → found: #{it.name}: #{it.type}")
+    }
+  }
+
+
+  fn info(this, pos, ctx, cb) {
+    this.ctx.typer.cbinfo(pos, ctx, cb)
+  }
+}

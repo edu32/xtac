@@ -1,0 +1,957 @@
+fn run(allocator) {
+  auto legalizer = Legalizer{ function = allocator.function }
+  each block in allocator.function.blocks() {
+    legalizer.legalizeBlock(block)
+  }
+}
+
+define opsrc 0
+define oplhs 0
+define oprhs 1
+
+struct Legalizer {
+  const function = ssa.Function*{}
+  readonly block = ssa.Block*{}
+
+
+  fn legalizeBlock(this, block) {
+    this.block = block
+
+    each expr in block.values() {
+      this.legalize(expr)
+    }
+  }
+
+
+  fn legalize(this, expr) {
+    switch expr {    
+      case ssa.Value                {} // Nothing to do.
+      case ssa.ElementAt            this.legalizeElementAt(expr)
+      case ssa.Store                this.legalizeStore(expr)
+      case ssa.Assign               this.legalizeAssignment(expr)
+      case ssa.Exchange             this.legalizeExchange(expr)
+      case ssa.XAdd                 this.legalizeXAdd(expr)
+
+      case ssa.RetVal               {} // Nothing to do.
+      case ssa.Local                {} // Nothing to do.
+      case ssa.Parameter            {} // Nothing to do.
+
+      case ssa.Compare              this.legalizeCompare(expr)
+      case ssa.CompareExchange      this.legalizeCompareExchange(expr)
+
+      case ssa.Assert               {} // Nothing to do.
+      case ssa.Pause                {} // Nothing to do.
+
+      case ssa.Yield                {} // Nothing to do.
+      case ssa.Jump                 {} // Nothing to do.
+      case ssa.JumpIf               {} // Nothing to do.
+      case ssa.Return               this.legalizeReturn(expr)
+
+      case ssa.Load                 this.legalizeLoad(expr)
+      case ssa.Argument             this.legalizeArgument(expr)
+      case ssa.Address              this.legalizeAddress(expr)
+      case ssa.Decrement            this.legalizeDecrement(expr)
+      case ssa.Increment            this.legalizeIncrement(expr)
+      case ssa.Negate               this.legalizeNegate(expr)
+      case ssa.BitwiseNot           this.legalizeBitwiseNot(expr)
+      case ssa.SignExtend           this.legalizeSignExtend(expr)
+      case ssa.ZeroExtend           this.legalizeZeroExtend(expr)
+      case ssa.NarrowingCast        this.legalizeNarrowingCast(expr)
+      case ssa.NumericCast          this.legalizeNumericCast(expr)
+      case ssa.BitCast              this.legalizeBitCast(expr)
+      case ssa.Round                this.legalizeRound(expr)
+      case ssa.SquareRoot           this.legalizeSquareRoot(expr)
+      case ssa.Abs                  this.legalizeAbs(expr)
+
+      case ssa.Arithmetic           {} // Nothing to do.
+      case ssa.Or                   this.legalizeBitwise(expr)
+      case ssa.XOr                  this.legalizeBitwise(expr)
+      case ssa.And                  this.legalizeBitwise(expr)
+      case ssa.LeftShift            this.legalizeShift(expr)
+      case ssa.RightShift           this.legalizeShift(expr)
+      case ssa.UnsignedRightShift   this.legalizeShift(expr)
+      case ssa.Subtract             this.legalizeSubtract(expr)
+      case ssa.Add                  this.legalizeAdd(expr)
+      case ssa.Remainder            this.legalizeRemainder(expr)
+      case ssa.DivRem               this.legalizeDivRem(expr)
+      case ssa.Divide               this.legalizeDivide(expr)
+      case ssa.Multiply             this.legalizeMultiply(expr)
+      case ssa.Min                  this.legalizeMinMax(expr)
+      case ssa.Max                  this.legalizeMinMax(expr)
+      case ssa.RotateLeft           this.legalizeRotate(expr)
+      case ssa.RotateRight          this.legalizeRotate(expr)
+
+      case ssa.Call                 this.legalizeCall(expr)
+      case ssa.Phi                  this.legalizePhi(expr)
+
+      default assert with nameof(expr)
+    }
+  }
+
+
+  fn legalizeElementAt(this, expr) {
+    for i, operand in expr.operands {
+      if const elem = operand.isMemory() {
+        const index = this.load(expr, i)
+        expr.operands.set(i, index)
+      }
+    }
+
+
+    /*  Convert from: base[ ... ][ index × sizeof(T) ][ ... ]
+                  to: tmp ⟵ index × sizeof(T)
+                      base[ ... ][ tmp × 1 ][ ... ]
+                 iif: sizeof(T) is not 1, 2, 4 or 8 
+    */
+    const address = Address{ elem = expr }
+    const    base = expr.operands.items[ssa.op1]
+
+    address.setBase(base.type())
+
+    for var i = 1; i < expr.operands.length; ++i {
+      const operand = expr.operands.items[i]
+      address.dereference(this, i, operand)
+    }
+
+    assert address.type == expr.type
+
+    struct Address {
+      readonly     type = ssa.Type{}
+      readonly     base = ssa.TypeSymbol*{}
+      const        elem = ssa.ElementAt*{}
+      readonly register = 0
+
+      fn setBase(this, type) {
+        this.type = type
+        if const symbol = type.isaSymbol() {
+          this.base = symbol.isaTypeSymbol()
+          assert this.base
+        }
+      }
+
+
+      fn dereference(this, legalizer, operandIndex, operand) {
+        const isFirstIndex = operandIndex == 1
+        if isFirstIndex && this.base {
+          //————————————————————+——————————————————————————————+
+          //  When base type is | 1st operandIndex must be     |
+          //————————————————————+——————————————————————————————+
+          //  Program           | DataSection | CodeSection    |
+          //————————————————————+——————————————————————————————+
+          //    DataSection     | Struct | Global | Extern     |
+          //————————————————————+——————————————————————————————+
+          //    CodeSection     | Function | Block             |
+          //————————————————————+——————————————————————————————+
+          //  StackFrame        | Local | Parameter | Argument |
+          //————————————————————+——————————————————————————————+
+          //  Pointer | Array   | Immediate | Value            |
+          //————————————————————+——————————————————————————————+
+          //  Struct            | Field                        |
+          //————————————————————+——————————————————————————————+
+          if const node = operand.isaNode() {
+            switch node {
+              case ssa.DataSection  assert this.base is ssa.Program
+              case ssa.CodeSection  assert this.base is ssa.Program
+
+              case ssa.Struct       assert this.base is ssa.DataSection
+              case ssa.Extern       assert this.base is ssa.DataSection
+              case ssa.Global       assert this.base is ssa.DataSection
+
+              case ssa.Function     assert this.base is ssa.CodeSection
+              case ssa.Block        assert this.base is ssa.CodeSection
+
+              case ssa.Local        assert this.base is ssa.StackFrame
+              case ssa.Parameter    assert this.base is ssa.StackFrame
+              case ssa.Argument     assert this.base is ssa.StackFrame
+
+              default               assert with nameof(node)
+            }
+            this.type = node.type
+          } else if const immediate = operand.isanImmediate() {
+            if const array = this.type.isanArray() {
+              this.type = array.element
+            } else if this.type.isaPointer() {
+              this.type = this.type.pointee()
+            } else {
+              assert 0
+            }
+          } else {
+            assert 0
+          }
+          return
+        }
+        //————————————————————+———————————————————+
+        //  When base type is | Index must be     |
+        //————————————————————+———————————————————+
+        //  Pointer | Array   | Immediate | Value |
+        //————————————————————+———————————————————+
+        //  Struct            | Field             |
+        //————————————————————+———————————————————+
+
+        if this.type.isaPointer() {
+          const element = this.type.pointee()
+          if const node = operand.isaNode() { // address is base[ register ]
+            assert !node.isaSymbol() && node !is ssa.Block && !this.register
+            this.setScale(legalizer, node, element, operandIndex)
+            this.register = operandIndex
+          }
+          this.type = element
+        } else if const array = this.type.isanArray() {
+          const element = array.element
+          if const node = operand.isaNode() { // address is base[ register ]
+            assert !node.isaSymbol() && node !is ssa.Block && !this.register
+            this.setScale(legalizer, node, element, operandIndex)
+            this.register = operandIndex
+          }
+          this.type = element
+        } else if this.type.isaStruct() {       // base is base:T
+          if const field = operand.isaField() { //    address is base[ field ]
+            this.type = field.type
+          } else {
+            assert 0
+          }
+        } else {
+          assert 0
+        }
+      }
+
+      fn setScale(this, legalizer, index, element, operandIndex) {
+        assert index.type.isIntegral()
+        const block = this.elem.parent
+        const  size = element.size()
+        switch size {
+          case 0          assert 0 // wtf?
+          case 1, 2, 4, 8 {} // Ok
+          default {
+            const imm = ssa.Constant{ type = index.type, value = Immediate{ i32 = size } }
+            if index.type.isUnsigned() || index.type.size() == SIZE_OF_BYTE || imm.isHuge() {
+              //  lhs:T ⟵ index       ; load
+              //  rhs:T ⟵ sizeof( T ) ; load 
+              //  mul:T ⟵ lhs × rhs
+              //  base[ ... ][ mul × 1 ][ ... ]
+              const lhs = legalizer.load(this.elem, operandIndex)
+              const rhs = legalizer.loadNumber(this.elem, imm)
+              const mul = new ssa.Multiply{ pos = lhs.pos, parent = block, type = index.type }
+              mul.initialize(operands = ssa.2ops)
+              mul.operands.set(ssa.op1, lhs)
+              mul.operands.set(ssa.op2, rhs)              
+              block.body.insertBefore(mul, this.elem)
+              this.elem.operands.set(operandIndex, mul)
+            } else {
+              //  lhs:T ⟵ index  ; load
+              //  mul:T ⟵ lhs × sizeof( T )
+              //  base[ ... ][ mul × 1 ][ ... ]
+              const lhs = legalizer.load(this.elem, operandIndex)
+              const mul = new ssa.Multiply{ pos = lhs.pos, parent = block, type = index.type }
+              mul.initialize(operands = ssa.2ops)
+              mul.operands.set(ssa.op1, lhs)
+              mul.operands.imm(ssa.op2, imm)
+              block.body.insertAfter(mul, lhs)
+              this.elem.operands.set(operandIndex, mul)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  fn legalizeStore(this, expr) {
+    /*  Legal 🡓
+          [mem] ⟵ gpr 
+          [mem] ⟵ xmm
+          [mem] ⟵ zero of any
+          [mem] ⟵ imm
+          [mem] ⟵ [mem]
+    */
+    const lhs = expr.operands.items[oplhs]
+    const rhs = expr.operands.items[oprhs]
+    assert lhs.isMemory()
+  }
+
+
+  fn legalizeAssignment(this, expr) {
+    assert expr.reason.isaPhiAssignment()
+  }
+
+
+  fn legalizeExchange(this, expr) {
+    /*  Legal 🡓
+          xchg   gpr, gpr
+          xchg [mem], gpr
+    */
+    const lhs = expr.operands.items[oplhs]
+    const rhs = expr.operands.items[oprhs]
+    assert lhs.isNotAnImmediate() && rhs.isNotMemoryOrImmediate()
+  }
+
+
+  fn legalizeXAdd(this, expr) {
+    /*  Legal 🡓
+          xadd   gpr, gpr
+          xadd [mem], gpr
+    */
+    const lhs = expr.operands.items[oplhs]
+    const rhs = expr.operands.items[oprhs]
+    assert lhs.isNotAnImmediate() && rhs.isNotMemoryOrImmediate()
+  }
+
+
+  fn legalizeCompare(this, expr) {
+    /*  Legal 🡓
+          FLAGS ⟵ cmp   gpr, gpr
+          FLAGS ⟵ cmp   gpr, [mem]
+          FLAGS ⟵ cmp   gpr, imm
+          FLAGS ⟵ cmp [mem], gpr
+          FLAGS ⟵ cmp [mem], imm
+
+          FLAGS ⟵ cmp xmm, xmm
+          FLAGS ⟵ cmp xmm, [mem]
+    */
+    const     lhs = expr.operands.items[oplhs]
+    const     rhs = expr.operands.items[oprhs]
+    const canSwap = expr.op == ssa.Condition.Equal || expr.op == ssa.Condition.NotEqual
+    if lhs.type().isaRealOrPacked() {
+      this.loadIfMemoryOrImmediate(expr, oplhs)
+      this.loadIfImmediate(expr, oprhs)
+    }
+
+    else if lhs.isMemory() {
+      this.loadIfMemoryOrHugeImmediate(expr, oprhs) // FLAGS ⟵ cmp [mem], gpr/imm
+    }
+
+    else if rhs.isMemory() {
+      if const lhsImmediate = lhs.isanImmediate() {
+        if lhsImmediate.isHuge() {
+          this.load(expr, oplhs) // FLAGS ⟵ cmp gpr, [mem]
+        } else if canSwap {
+          expr.operands.swap(oplhs, oprhs) // FLAGS ⟵ cmp [mem], imm
+        } else {
+          this.load(expr, oplhs) // FLAGS ⟵ cmp gpr, [mem]
+        }
+      }
+    } 
+
+    else if const lhsImmediate = lhs.isanImmediate() {
+      if lhsImmediate.isHuge() {
+        this.load(expr, oplhs)                 // FLAGS ⟵ cmp gpr, [mem]/imm?
+        this.loadIfHugeImmediate(expr, oprhs)  // FLAGS ⟵ cmp gpr, [mem]/imm
+      } else if const rhsImmediate = rhs.isanImmediate() {
+        if rhsImmediate.isHuge() {
+          this.load(expr, oprhs) // FLAGS ⟵ cmp imm, gpr
+          if canSwap {
+            expr.operands.swap(oplhs, oprhs) // FLAGS ⟵ cmp gpr, imm
+          } else {
+            this.load(expr, oplhs) // FLAGS ⟵ cmp gpr, gpr
+          }
+        } else {
+          this.load(expr, oplhs) // FLAGS ⟵ cmp gpr, imm
+        }
+      } else if canSwap {
+        expr.operands.swap(oplhs, oprhs) // FLAGS ⟵ cmp gpr, imm
+      } else {
+        this.load(expr, oplhs) // FLAGS ⟵ cmp gpr, gpr
+      }
+    } else if const rhsImmediate = rhs.isanImmediate() {
+      if rhsImmediate.isHuge() {
+        this.load(expr, oprhs)
+      }
+    } // else FLAGS ⟵ cmp gpr, gpr
+  }
+
+
+  fn legalizeCompareExchange(this, expr) {
+    /*  Legal 🡓
+          FLAGS ⟵ cmpxchg   gpr, rax, gpr
+          FLAGS ⟵ cmpxchg [mem], rax, gpr
+    */
+    const     value = expr.operands.items[ssa.op1]
+    const comparand = expr.operands.items[ssa.op2]
+    const  exchange = expr.operands.items[ssa.op3]
+    assert value.isNotAnImmediate() && comparand.isNotMemoryOrImmediate() && exchange.isNotMemoryOrImmediate()
+    this.load(expr, ssa.op2)
+    /*if comparand.value.node == exchange.value.node {
+      this.load(expr, ssa.op3)
+    }*/
+  }
+
+
+  fn legalizeReturn(this, expr) {
+    /*  Legal 🡓
+          ret rax
+          ret xmm
+          ret [rax]
+    */
+    if expr.type.isNotVoid() {
+      this.loadIfImmediate(expr, opsrc)
+    }
+  }
+
+
+  fn legalizeLoad(this, expr) {
+    /*  Legal 🡓
+          mov gpr, gpr
+          mov gpr, [mem]
+          mov gpr, imm
+    */
+  }
+
+
+  fn legalizeArgument(this, expr) {
+    /*  Legal 🡓
+          mov gpr, gpr
+          mov gpr, [mem]
+          mov gpr, imm
+    */
+  }
+
+
+  fn legalizeAddress(this, expr) {
+    /*  Legal 🡓
+          lea gpr, [mem]
+    */
+  }
+
+
+  fn legalizeDecrement(this, expr) {
+    /*  Legal 🡓
+          dec gpr
+          dec [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeIncrement(this, expr) {
+    /*  Legal 🡓
+          inc gpr
+          inc [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeNegate(this, expr) {
+    /*  Legal 🡓
+          neg gpr
+          neg [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeBitwiseNot(this, expr) {
+    /*  Legal 🡓
+          not gpr
+          not [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeSignExtend(this, expr) {
+    /*  Legal 🡓
+          movsx gpr, gpr
+          movsx gpr, [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeZeroExtend(this, expr) {
+    /*  Legal 🡓
+          movzx gpr, gpr
+          movzx gpr, [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeNarrowingCast(this, expr) {
+    /*  Legal 🡓
+          mov gpr, gpr
+          mov gpr, [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeNumericCast(this, expr) {
+    /*  Legal 🡓
+          cvt xmm, xmm
+          cvt xmm, gpr
+          cvt xmm, [mem]
+
+          cvt gpr, xmm
+          cvt gpr, [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeBitCast(this, expr) {
+    /*  Legal 🡓
+          mov  gpr, gpr
+          mov  gpr, [mem]
+          mov  gpr, imm
+          movq gpr, xmm
+          movq xmm, gpr
+    */
+    this.loadIfImmediateIsHugeOrFloatingPoint(expr, opsrc)
+  }
+
+
+  fn legalizeRound(this, expr) {
+    /*  Legal 🡓
+          round xmm, xmm
+          round xmm, [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeSquareRoot(this, expr) {
+    /*  Legal 🡓
+          sqrt xmm, xmm
+          sqrt xmm, [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeAbs(this, expr) {
+    /*  Legal 🡓
+          abs xmm, xmm
+          abs xmm, [mem]
+          abs gpr, gpr
+          abs gpr, [mem]
+    */
+    this.loadIfImmediate(expr, opsrc)
+  }
+
+
+  fn legalizeBitwise(this, expr) {
+    const  lhs = expr.operands.items[oplhs]
+    const  rhs = expr.operands.items[oprhs]
+    const type = expr.type
+
+    /*  Legal 🡓
+          OP dst:xmm, lhs:xmm, rhs:xmm
+          OP dst:xmm, lhs:xmm, rhs:[mem]
+
+          OP lhs:gpr, rhs:gpr
+          OP lhs:gpr, rhs:[mem]
+          OP lhs:gpr, rhs:imm
+
+          OP lhs:[mem], rhs:gpr
+          OP lhs:[mem], rhs:imm
+    */
+
+    if type.isaRealOrPacked() {
+      if lhs.isMemory() {
+        this.loadIfMemoryOrImmediate(expr, oprhs) // OP dst:xmm, lhs:[mem], rhs:xmm
+        expr.operands.swap(oplhs, oprhs)          // OP dst:xmm, lhs:xmm,   rhs:[mem]
+      } else if rhs.isMemory() {
+        this.loadIfImmediate(expr, oprhs) // OP dst:xmm, lhs:xmm, rhs:[mem]
+      } else {
+        this.loadIfImmediate(expr, oplhs) // OP dst:xmm, lhs:xmm, rhs:imm?
+        this.loadIfImmediate(expr, oprhs) // OP dst:xmm, lhs:xmm, rhs:xmm
+      }
+    }
+
+    else if lhs.isMemory() {
+      this.loadIfMemoryOrHugeImmediate(expr, oprhs) // OP lhs:mem, rhs:gpr/imm
+    }
+
+    else if rhs.isMemory() {
+      this.loadIfImmediate(expr, oplhs) // OP lhs:gpr, rhs:[mem]
+    }
+
+    else if const lhsImmediate = lhs.isanImmediate() {
+      if lhsImmediate.isHuge() {
+        this.load(expr, oplhs)                // OP lhs:gpr, rhs:gpr/imm?
+        this.loadIfHugeImmediate(expr, oprhs) // OP lhs:gpr, rhs:gpr/imm
+      } else if const rhsImmediate = rhs.isanImmediate() {
+        this.load(expr, oprhs)           // OP lhs:imm, rhs:gpr
+        expr.operands.swap(oplhs, oprhs) // OP lhs:gpr, rhs:imm
+      } else {
+        expr.operands.swap(oplhs, oprhs) // OP lhs:gpr, rhs:imm
+      }
+    } else {
+      this.loadIfHugeImmediate(expr, oprhs) // OP lhs:gpr, rhs:gpr/imm
+    }
+  }
+
+
+  fn legalizeShift(this, expr) {
+    const  lhs = expr.operands.items[oplhs]
+    const  rhs = expr.operands.items[oprhs]
+    const type = expr.type
+
+    /*  Legal 🡓
+          OP dst:xmm, lhs:xmm, rhs:xmm
+          OP dst:xmm, lhs:xmm, rhs:[mem]
+          OP dst:xmm, lhs:xmm, rhs:imm8
+
+          OP lhs:gpr, rhs:gpr
+          OP lhs:gpr, rhs:[mem]
+          OP lhs:gpr, rhs:imm8
+
+          OP lhs:[mem], rhs:gpr
+          OP lhs:[mem], rhs:imm8
+    */
+    if type.isaRealOrPacked() {
+      if lhs.isMemory() {
+        this.loadIfMemoryOrImmediate(expr, oprhs) // OP dst:xmm, lhs:[mem], rhs:xmm
+        expr.operands.swap(oplhs, oprhs)          // OP dst:xmm, lhs:xmm,   rhs:[mem]
+      } else if rhs.isMemory() {
+        this.loadIfImmediate(expr, oprhs) // OP dst:xmm, lhs:xmm, rhs:[mem]
+      } else {
+        this.loadIfImmediate(expr, oplhs) // OP dst:xmm, lhs:xmm, rhs:imm?
+        this.loadIfImmediate(expr, oprhs) // OP dst:xmm, lhs:xmm, rhs:xmm
+      }
+    }
+
+    else if lhs.isMemory() {
+      this.loadIfMemoryOrHugeImmediate(expr, oprhs) // OP lhs:[mem], rhs:rcx/imm8
+    }
+
+    else if rhs.isMemory() {
+      this.loadIfImmediate(expr, oplhs) // OP lhs:gpr, rhs:[mem]
+      this.load(expr, oprhs)            // OP lhs:gpr, rhs:rcx
+    }
+
+    else {
+      this.loadIfImmediate(expr, oplhs)     // OP lhs:gpr, rhs:gpr/imm?
+      this.loadIfHugeImmediate(expr, oprhs) // OP lhs:gpr, rhs:rcx/imm
+    }
+  }
+
+
+  fn legalizeSubtract(this, expr) {
+    const lhs = expr.operands.items[oplhs]
+    const rhs = expr.operands.items[oprhs]
+    /*  Legal 🡓
+          dst:xmm ⟵ lhs:xmm - rhs:xmm
+          dst:xmm ⟵ lhs:xmm - rhs:[mem]
+
+          dst:gpr ⟵ lhs:gpr - rhs:gpr
+          dst:gpr ⟵ lhs:gpr - rhs:[mem]
+          dst:gpr ⟵ lhs:gpr - rhs:imm
+
+          dst:gpr ⟵ lhs:[mem] - rhs:gpr
+          dst:gpr ⟵ lhs:[mem] - rhs:imm
+    */
+    if expr.type.isaRealOrPacked() {
+      this.loadIfMemoryOrImmediate(expr, oplhs)     // dst:xmm ⟵ lhs:xmm - rhs:xmm/[mem]/imm
+      this.loadIfImmediate(expr, oplhs)             // dst:xmm ⟵ lhs:xmm - rhs:xmm/[mem]
+    } else if lhs.isMemory() {
+      this.loadIfMemoryOrHugeImmediate(expr, oprhs) // dst:gpr ⟵ lhs:[mem] - rhs:gpr/imm
+    } else if rhs.isMemory() {
+      this.loadIfMemoryOrImmediate(expr, oplhs)     // dst:gpr ⟵ lhs:gpr - rhs:[mem]
+    } else {
+      this.loadIfImmediate(expr, oplhs)             // dst:gpr ⟵ lhs:gpr - rhs:gpr/imm?
+      this.loadIfHugeImmediate(expr, oprhs)         // dst:gpr ⟵ lhs:gpr - rhs:gpr/imm
+    }
+  }
+
+
+  fn legalizeAdd(this, expr) {
+    const lhs = expr.operands.items[oplhs]
+    const rhs = expr.operands.items[oprhs]
+    /*  Legal 🡓
+          dst:xmm ⟵ lhs:xmm + rhs:xmm
+          dst:xmm ⟵ lhs:xmm + rhs:[mem]
+
+          dst:gpr ⟵ lhs:gpr + rhs:gpr
+          dst:gpr ⟵ lhs:gpr + rhs:[mem]
+          dst:gpr ⟵ lhs:gpr + rhs:imm
+
+          dst:gpr ⟵ lhs:[mem] + rhs:gpr
+          dst:gpr ⟵ lhs:[mem] + rhs:imm
+    */
+    if expr.type.isaRealOrPacked() {
+      this.loadIfMemoryOrImmediate(expr, oplhs)     // dst:xmm ⟵ lhs:xmm + rhs:xmm/[mem]/imm
+      this.loadIfImmediate(expr, oplhs)             // dst:xmm ⟵ lhs:xmm + rhs:xmm/[mem]
+    } else if lhs.isMemory() {
+      this.loadIfMemoryOrHugeImmediate(expr, oprhs) // dst:gpr ⟵ lhs:[mem] + rhs:gpr/imm
+    } else if rhs.isMemory() {
+      this.loadIfMemoryOrImmediate(expr, oplhs)     // dst:gpr ⟵ lhs:gpr + rhs:[mem]
+    } else if const lhsImmediate = lhs.isanImmediate() {
+      if lhsImmediate.isHuge() {
+        this.load(expr, oplhs)                      // dst:gpr ⟵ lhs:gpr + rhs:gpr/[mem]/imm?
+        this.loadIfHugeImmediate(expr, oprhs)       // dst:gpr ⟵ lhs:gpr + rhs:gpr/[mem]/imm
+      } else if const rhsImmediate = rhs.isanImmediate() {
+        this.load(expr, oprhs)                      // dst:gpr ⟵ lhs:imm + rhs:gpr
+        expr.operands.swap(oplhs, oprhs)            // dst:gpr ⟵ lhs:gpr + rhs:imm
+      } else {
+        expr.operands.swap(oplhs, oprhs)            // dst:gpr ⟵ lhs:gpr + rhs:imm
+      }
+    } else {
+      this.loadIfHugeImmediate(expr, oprhs)         // dst:gpr ⟵ lhs:gpr + rhs:gpr/imm
+    }
+  }
+
+
+  fn legalizeRemainder(this, expr) {
+    /*  Legal 🡓
+          dst:xmm ⟵ lhs:xmm ÷ rhs:xmm
+          dst:xmm ⟵ lhs:xmm ÷ rhs:[mem]
+
+          dst:rax ⟵ lhs:rax ÷ rhs:rax
+          dst:rax ⟵ lhs:rax ÷ rhs:[mem]
+    */
+    this.loadIfMemoryOrImmediate(expr, oplhs)       // dst:xmm/rax ⟵ lhs:xmm/rax ÷ rhs:xmm/gpr/[mem]/imm
+    this.loadIfImmediate(expr, oprhs)               // dst:xmm/rax ⟵ lhs:xmm/rax ÷ rhs:xmm/gpr/[mem]
+  }
+
+
+  fn legalizeDivRem(this, expr) {
+    /*  Legal 🡓
+          dst:xmm ⟵ lhs:xmm ÷ rhs:xmm
+          dst:xmm ⟵ lhs:xmm ÷ rhs:[mem]
+
+          dst:rax ⟵ lhs:rax ÷ rhs:rax
+          dst:rax ⟵ lhs:rax ÷ rhs:[mem]
+    */
+    this.loadIfMemoryOrImmediate(expr, oplhs)       // dst:xmm/rax ⟵ lhs:xmm/rax ÷ rhs:xmm/gpr/[mem]/imm
+    this.loadIfImmediate(expr, oprhs)               // dst:xmm/rax ⟵ lhs:xmm/rax ÷ rhs:xmm/gpr/[mem]
+  }
+
+
+  fn legalizeDivide(this, expr) {
+    /*  Legal 🡓
+          dst:xmm ⟵ lhs:xmm ÷ rhs:xmm
+          dst:xmm ⟵ lhs:xmm ÷ rhs:[mem]
+
+          dst:rax ⟵ lhs:rax ÷ rhs:rax
+          dst:rax ⟵ lhs:rax ÷ rhs:[mem]
+    */
+    this.loadIfMemoryOrImmediate(expr, oplhs)       // dst:xmm/rax ⟵ lhs:xmm/rax ÷ rhs:xmm/gpr/[mem]/imm
+    this.loadIfImmediate(expr, oprhs)               // dst:xmm/rax ⟵ lhs:xmm/rax ÷ rhs:xmm/gpr/[mem]
+  }
+
+
+  fn legalizeMultiply(this, expr) {
+    const lhs = expr.operands.items[oplhs]
+    const rhs = expr.operands.items[oprhs]
+    /*  Legal 🡓
+          dst:xmm ⟵ lhs:xmm × rhs:xmm
+          dst:xmm ⟵ lhs:xmm × rhs:[mem]
+
+          dst:rax ⟵ lhs:rax × rhs:gpr     ; unsigned/signed 8-bit
+          dst:rax ⟵ lhs:rax × rhs:[mem]   ; unsigned/signed 8-bit
+
+          dst:gpr ⟵ lhs:gpr × rhs:gpr     ; signed
+          dst:gpr ⟵ lhs:gpr × rhs:[mem]   ; signed
+          dst:gpr ⟵ lhs:gpr × rhs:imm     ; signed 16/32/64 bit
+    */
+    if expr.type.isaRealOrPacked() || expr.type.isUnsigned() || expr.type.size() == SIZE_OF_BYTE {
+      this.loadIfMemoryOrImmediate(expr, oplhs)     // dst:xmm/rax ⟵ lhs:xmm/rax × rhs:xmm/gpr/[mem]/imm?
+      this.loadIfImmediate(expr, oplhs)             // dst:xmm/rax ⟵ lhs:xmm/rax × rhs:xmm/gpr/[mem]
+    } else if lhs.isMemory() {
+      this.load(expr, oplhs)                        // dst:gpr ⟵ lhs:gpr × rhs:gpr/[mem]/imm?
+      this.loadIfHugeImmediate(expr, oprhs)         // dst:gpr ⟵ lhs:gpr × rhs:gpr/[mem]/imm
+    } else if rhs.isMemory() {
+      this.loadIfMemoryOrImmediate(expr, oplhs)     // dst:gpr ⟵ lhs:gpr × rhs:[mem]
+    } else if const lhsImmediate = lhs.isanImmediate() {
+      if lhsImmediate.isHuge() {
+        this.load(expr, oplhs)                      // dst:gpr ⟵ lhs:gpr × rhs:gpr/[mem]/imm?
+        this.loadIfHugeImmediate(expr, oprhs)       // dst:gpr ⟵ lhs:gpr × rhs:gpr/[mem]/imm
+      } else if const rhsImmediate = rhs.isanImmediate() {
+        this.load(expr, oprhs)                      // dst:gpr ⟵ lhs:imm × rhs:gpr
+        expr.operands.swap(oplhs, oprhs)            // dst:gpr ⟵ lhs:gpr × rhs:imm
+      } else {
+        expr.operands.swap(oplhs, oprhs)            // dst:gpr ⟵ lhs:gpr × rhs:imm
+      }
+    } else {
+      this.loadIfHugeImmediate(expr, oprhs)         // dst:gpr ⟵ lhs:gpr × rhs:imm
+    }
+  }
+
+
+  fn legalizeMinMax(this, expr) {
+    /*  Legal 🡓
+          dst:xmm ⟵ minmax( lhs:xmm, rhs:xmm)
+          dst:xmm ⟵ minmax( lhs:xmm, rhs:[mem])
+
+          dst:gpr ⟵ minmax( lhs:gpr, rhs:gpr)
+          dst:gpr ⟵ minmax( lhs:gpr, rhs:[mem])
+    */
+    this.loadIfMemoryOrImmediate(expr, oplhs)   // dst:xmm/gpr ⟵ minmax( lhs:xmm/gpr, rhs:xmm/gpr/[mem]/imm)
+    this.loadIfImmediate(expr, oplhs)           // dst:xmm/gpr ⟵ minmax( lhs:xmm/gpr, rhs:xmm/gpr/[mem])
+  }
+
+
+  fn legalizeRotate(this, expr) {
+    /*  Legal 🡓
+          dst:gpr ⟵ rotate( lhs:gpr, rhs:rcx)
+          dst:gpr ⟵ rotate( lhs:gpr, rhs:imm8)
+
+          dst:gpr ⟵ rotate( lhs:[mem], rhs:rcx)
+          dst:gpr ⟵ rotate( lhs:[mem], rhs:imm8)
+    */
+    this.loadIfImmediate(expr, oplhs)             // dst:gpr ⟵ rotate( lhs:gpr/[mem], rhs:rcx/[mem]/imm? )
+    this.loadIfMemoryOrHugeImmediate(expr, oprhs) //  dst:gpr ⟵ rotate( lhs:gpr/[mem], rhs:rcx/[meme]/imm)
+  }
+
+
+  fn legalizeCall(this, expr) {
+
+  }
+
+
+  fn legalizePhi(this, expr) {
+    const block = expr.parent
+    assert block.uses.length == expr.operands.length
+    for i, operand in expr.operands {
+      const  opBlock = block.uses.items[i].user.parent
+      var       term = opBlock.body.last
+      if const  prev = term.qprev {
+        if prev is ssa.Assert {
+          term = prev
+        }
+      }
+      if const value = operand.isaNode() as ssa.Value* {
+        const assignment = new ssa.Assign{ pos = term.pos, parent = opBlock, type = value.type,
+          reason = ssa.MoveReason.Phi }
+        assignment.initialize(operands = ssa.2ops)
+        assignment.operands.set(ssa.op1, expr, ssa.Io.Write)
+        assignment.operands.set(ssa.op2, value)
+        opBlock.body.insertBefore(assignment, term)
+        value.removeUse(expr, i)
+      } else if const immediate = operand.isanImmediate() {
+        const assignment = new ssa.Assign{ pos = term.pos, parent = opBlock, type = immediate.type,
+          reason = ssa.MoveReason.Phi }
+        assignment.initialize(operands = ssa.2ops)
+        assignment.operands.set(ssa.op1, expr, ssa.Io.Write)
+        assignment.operands.imm(ssa.op2, immediate)
+        opBlock.body.insertBefore(assignment, term)
+      } else {
+        assert 0
+      }
+    }
+  }
+
+
+  fn loadIfImmediateIsHugeOrFloatingPoint(this, expr, operandIndex) {
+    assert operandIndex < expr.operands.length
+    const      operand = expr.operands.items[operandIndex]
+    if const immediate = operand.isanImmediate() {
+      if immediate.type.isaRealOrPacked() || immediate.isHuge() {
+        return this.loadImmediate(expr, operandIndex, immediate)
+      }
+    }
+    return null
+  }
+
+
+  fn loadIfHugeImmediate(this, expr, operandIndex) {
+    assert operandIndex < expr.operands.length
+    const      operand = expr.operands.items[operandIndex]
+    if const immediate = operand.isanImmediate() {
+      if immediate.isHuge() {
+        return this.loadImmediate(expr, operandIndex, immediate)
+      }
+    }
+    return null
+  }
+
+
+  fn loadIfMemoryOrHugeImmediate(this, expr, operandIndex) {
+    assert operandIndex < expr.operands.length
+    const      operand = expr.operands.items[operandIndex]
+    if const immediate = operand.isanImmediate() {
+      if immediate.isHuge() {
+        return this.loadImmediate(expr, operandIndex, immediate)
+      }
+    } else if const node = operand.isMemory() {
+      return this.loadNode(expr, operandIndex, node)
+    }
+    return null
+  }
+
+
+  fn loadIfMemoryOrImmediate(this, expr, operandIndex) {
+    assert operandIndex < expr.operands.length
+    const      operand = expr.operands.items[operandIndex]
+    if const immediate = operand.isanImmediate() {
+      return this.loadImmediate(expr, operandIndex, immediate)
+    }
+    if const node = operand.isMemory() {
+      return this.loadNode(expr, operandIndex, node)
+    }
+    return null
+  }
+
+
+  fn loadIfImmediate(this, expr, operandIndex) {
+    assert operandIndex < expr.operands.length
+    const      operand = expr.operands.items[operandIndex]
+    if const immediate = operand.isanImmediate() {
+      return this.loadImmediate(expr, operandIndex, immediate)
+    }
+    return null
+  }
+
+
+  fn loadIfMemory(this, expr, operandIndex) {
+    assert operandIndex < expr.operands.length
+    const operand = expr.operands.items[operandIndex]
+    if const node = operand.isMemory() {
+      return this.loadNode(expr, operandIndex, node)
+    }
+    return null
+  }
+
+
+  fn load(this, expr, operandIndex) {
+    assert operandIndex < expr.operands.length
+    const operand = expr.operands.items[operandIndex]
+    if const immediate = operand.isanImmediate() {
+      return this.loadImmediate(expr, operandIndex, immediate)
+    }
+    if const node = operand.isaNode() as ssa.Value* {
+      return this.loadNode(expr, operandIndex, node)
+    }
+    return null
+  }
+
+
+  fn loadImmediate(this, expr, operandIndex, immediate) {
+    /*const block = expr.parent
+    const  load = this.loadNumber(expr, immediate)
+    expr.operands.set(operandIndex, load)
+    return load*/
+    const block = expr.parent
+    const  load = new ssa.Load{ pos = expr.pos, parent = block, type = immediate.type,
+      reason = ssa.MoveReason.Legalizing }
+    load.initialize(operands = ssa.1ops)
+    load.operands.imm(ssa.op1, immediate)
+    block.body.insertBefore(load, expr)
+    expr.operands.set(operandIndex, load)
+    return load
+  }
+
+
+  fn loadNumber(this, expr, immediate) {
+    const block = expr.parent
+    const  load = new ssa.Load{ pos = expr.pos, parent = block, type = immediate.type,
+      reason = ssa.MoveReason.Legalizing }
+    load.initialize(operands = ssa.1ops)
+    load.operands.imm(ssa.op1, immediate)
+    block.body.insertBefore(load, expr)
+    return load
+  }
+
+
+  fn loadNode(this, expr, operandIndex, node) {
+    const block = expr.parent
+    const  load = new ssa.Load{ pos = expr.pos, parent = block, type = node.type,
+      reason = ssa.MoveReason.Legalizing }
+    load.initialize(operands = ssa.1ops)
+    load.operands.set(ssa.op1, node)
+    block.body.insertBefore(load, expr)
+    expr.operands.set(operandIndex, load)
+    return load
+  }
+}

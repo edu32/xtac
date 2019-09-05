@@ -1,0 +1,378 @@
+//-------------------------------------------------------------------------------
+//Callback + method + path triple
+struct Handler {
+  readonly callback = fn(dispatcher) { assert 0 return null }
+  readonly method = ""
+  readonly path = ""
+}
+
+struct Route {
+  readonly path = List(string){}
+  readonly handler = Handler{}
+
+  fn dispose(this) {
+    delete this.path
+  }
+}
+
+struct Router {
+  readonly anys = List(Route){}
+  readonly gets = List(Route){}
+  readonly posts = List(Route){}
+  readonly puts = List(Route){}
+  readonly deletes = List(Route){}
+  readonly others = List(Route){}
+  readonly srw = atomic.ExclusiveLock{}
+  readonly isInitialized = false
+
+  fn dispose(this) {
+    delete this.anys with fn(x) = delete x
+    delete this.gets with fn(x) = delete x
+    delete this.posts with fn(x) = delete x
+    delete this.puts with fn(x) = delete x
+    delete this.deletes with fn(x) = delete x
+    delete this.others with fn(x) = delete x
+  }
+
+  fn append(this, handler) {
+    const path = decomposePath(handler.path)
+    if handler.method.isEmpty() {
+      const index = findInsertionIndex(this.anys, path)
+      assert index >= 0
+      this.anys.insert(index, Route{ path = path, handler = Handler&{handler}})
+    } else if handler.method == "GET" {
+      const index = findInsertionIndex(this.gets, path)
+      assert index >= 0
+      this.gets.insert(index, Route{ path = path, handler = Handler&{handler}})
+    } else if handler.method == "POST" {
+      const index = findInsertionIndex(this.posts, path)
+      assert index >= 0
+      this.posts.insert(index, Route{ path = path, handler = Handler&{handler}})
+    } else if handler.method == "PUT" {
+      const index = findInsertionIndex(this.puts, path)
+      assert index >= 0
+      this.puts.insert(index, Route{ path = path, handler = Handler&{handler}})
+    } else if handler.method == "DELETE" {
+      const index = findInsertionIndex(this.deletes, path)
+      assert index >= 0
+      this.deletes.insert(index, Route{ path = path, handler = Handler&{handler}})
+    } else {
+      println(handler.method)
+      path.dispose()
+      assert 0
+    }
+  }
+
+  fn decomposePath(path) {
+    const list = List(string){}
+    const end = path.end()
+    var mark = path.text
+    var pos = path.text
+    for ; pos < end; ++pos {
+      if *pos == '/' {
+        take(list, mark, pos)
+        mark = pos + 1
+      } 
+    }
+    take(list, mark, pos)
+    fn take(list, mark, pos) {
+      if mark < pos {
+        list.append(string.fromRange(mark, pos))
+      } else {
+        assert mark == pos
+      }
+    } 
+    return list
+  }
+
+  fn resolve(this, session, method, path) {
+    if !this.isInitialized {
+      synchronize(this)
+      this.initializeRoutes(session) if !this.isInitialized
+    }
+    if method == "GET" {
+      if const found = resolveWithList(this, this.gets, path) {
+        return found
+      }
+    } else if method == "POST" {
+      if const found = resolveWithList(this, this.posts, path) {
+        return found
+      }
+    } else if method == "PUT" {
+      if const found = resolveWithList(this, this.puts, path) {
+        return found
+      }
+    } else if method == "DELETE" {
+      if const found = resolveWithList(this, this.deletes, path) {
+        return found
+      }
+    }
+    return resolveWithList(this, this.anys, path)
+  }
+
+  fn resolveWithList(this, list, path) {
+    if path.isEmpty() {
+      for item in list {
+        return &item.handler if item.path.isEmpty()
+      }
+    } else {
+      var visited = 0
+      auto splits = List(string){}
+      for item in list {
+        continue if item.path.isEmpty()
+        var j = 0
+        for ; j < item.path.length && j < path.length; ++j {
+          //assert
+          const part = path.items[j]
+          const currPart = item.path.items[j]
+          //println("part = #{part}; currPart = #{currPart}")
+          if isStar(currPart) {
+            // '*' matches any. Continue matching.
+          } else if isStarStar(currPart) {
+            // '**' matches the rest of the path
+            return &item.handler
+          } else if part == currPart {
+            // Continue matching.
+          } else if splitByStar(splits, currPart) {
+            assert 0
+          } else {
+            break // Stop matching
+          }
+        }
+        // We found a match
+        return &item.handler if j == item.path.length && j == path.length
+        if j {
+          // We may find a match after a few more runs.
+        } else {
+          break if visited // We'll not find a match.
+        }
+      }
+    }
+    return Handler*{}
+    fn splitByStar(list, part) {
+      fn take(list, mark, pos) {
+        if mark < pos {
+          list.append(string.fromRange(mark, pos))
+        }
+      }
+      list.clear()
+      var mark = part.text
+      var pos = mark
+      const end = part.end()
+      for pos < end {
+        if *pos == '*' {
+          const star = pos
+          for ++pos; pos < end && *pos == '*'; ++pos {}
+          continue if pos - star > 1
+          take(list, mark, star)
+          mark = pos
+        } else {
+          ++pos
+        }
+      }
+      return mark > part.text
+    }
+  }
+
+  fn errorHandler(this, session) {
+    const items = [ "/", "**" ]
+    const path = List(string){ items = &items[0], length = 2 }
+    return this.resolve(session, "", path)
+  }
+
+  fn allRoutes(this) {
+    define ANYS     0
+    define GETS     1
+    define POSTS    2
+    define PUTS     3
+    define DELETES  4
+    define OTHERS   5
+    return {
+      state = ANYS,
+      routes = this,
+      pos = 0,
+      next = fn(self) {
+        const routes = self.routes
+        if self.state == ANYS {
+          if self.pos < routes.anys.length {
+            const route = routes.anys[self.pos]
+            ++self.pos
+            return (route, /* done = */ false)
+          }
+          self.pos = 0
+          ++self.state
+        }
+        if self.state == GETS {
+          if self.pos < routes.gets.length {
+            const route = routes.gets[self.pos]
+            ++self.pos
+            return (route, /* done = */ false)
+          }
+          self.pos = 0
+          ++self.state
+        }
+        if self.state == POSTS {
+          if self.pos < routes.posts.length {
+            const route = routes.posts[self.pos]
+            ++self.pos
+            return (route, /* done = */ false)
+          }
+          self.pos = 0
+          ++self.state
+        }
+        if self.state == PUTS {
+          if self.pos < routes.puts.length {
+            const route = routes.puts[self.pos]
+            ++self.pos
+            return (route, /* done = */ false)
+          }
+          self.pos = 0
+          ++self.state
+        }
+        if self.state == DELETES {
+          if self.pos < routes.deletes.length {
+            const route = routes.deletes[self.pos]
+            ++self.pos
+            return (route, /* done = */ false)
+          }
+          self.pos = 0
+          ++self.state
+        }
+        if self.state == OTHERS {
+          if self.pos < routes.others.length {
+            const route = routes.others[self.pos]
+            ++self.pos
+            return (route, /* done = */ false)
+          }
+          self.pos = 0
+          ++self.state
+        }
+        return (Route&{}, /* done = */ true)
+      }
+    }
+  }
+
+  fn initializeRoutes(this, session) {
+    assert !this.isInitialized
+    __urlhandlers__(session)
+    for handler in __urlhandlers__ {
+      assert handler.callback
+      this.append(handler)
+    }
+    println("Routes initialized...")
+    each route in this.allRoutes() {
+      println("\t#{route.handler.method} #{route.handler.path}")
+    }
+    // Now we are initialized
+    this.isInitialized = true
+  }
+
+  fn findInsertionIndex(list, path) {
+    return 0 if path.isEmpty() || list.isEmpty()
+    var start = -1
+    var end = -1
+    // Let {start} and {end} be the range of paths in {list} whose 1st part is the
+    // same as {path}'s first {part}.
+    const part = path.first()
+    for var i = 0; i < list.length; ++i {
+      const curr = list.items[i]
+      continue if curr.path.isEmpty()
+      const currPart = curr.path.items[0]
+      if start >= 0 {
+        break if currPart != part
+        end = i
+      } else if currPart == part {
+        start = i
+        end = i
+      }
+    }
+    return defineInsertionIndex(list, path) if start == -1
+    return refineInsertionRange(list, start, end, 1, path)
+  }
+
+  fn defineInsertionIndex(list, path) {
+    const star = "*", starstar = "**", start = 0, end = list.length - 1,
+          partIndex = 0, part = path[partIndex]
+    if isStar(part) {
+      const group = findRangeOf(list, start, end, partIndex, starstar)
+      return group.first if group.first >= 0 else list.length
+    }
+    if isStarStar(part) {
+      const group = findRangeOf(list, start, end, partIndex, star)
+      return (group.last + 1) if group.last >= 0 else list.length
+    }
+    var group = findRangeOf(list, start, end, partIndex, star)
+    return group.first if group.first >= 0
+    group = findRangeOf(list, start, end, partIndex, starstar)
+    return group.first if group.first >= 0
+    return list.length
+  }
+
+  // Sorting order:
+  //    '*' comes before '**'
+  //    A name comes before both '*' and '**'.
+  fn refineInsertionRange(list, start, end, partIndex, path): Int32 {
+    const star = "*"
+    const starstar = "**"
+    assert partIndex <= path.length
+    assert start <= end
+    if partIndex == path.length {
+      return start
+    }
+    const part = path[partIndex]
+    var group = findRangeOf(list, start, end, partIndex, part)
+    if group.first >= 0 {
+      return refineInsertionRange(list, group.first, group.last, partIndex + 1, path)
+    }
+    if isStar(part) {
+      group = findRangeOf(list, start, end, partIndex, starstar)
+      return group.first if group.first >= 0 else (end + 1)
+    }
+    if isStarStar(part) {
+      group = findRangeOf(list, start, end, partIndex, star)
+      return (group.last + 1) if group.last >= 0 else (end + 1)
+    }
+    group = findRangeOf(list, start, end, partIndex, star)
+    return group.first if group.first >= 0
+    group = findRangeOf(list, start, end, partIndex, starstar)
+    return group.first if group.first >= 0
+    return end + 1
+  }
+
+  fn findRangeOf(list, start, end, partIndex, name) {
+    var first = -1
+    var last = -1
+    for var i = start; i <= end; ++i {
+      const curr = list.items[i]
+      if first >= 0 {
+        if partIndex < curr.path.length && curr.path.items[partIndex] == name {
+          last = i
+          continue
+        }
+        break
+      } 
+      if partIndex < curr.path.length && curr.path.items[partIndex] == name {
+        first = i
+        last = i
+      }
+    }
+    return { first = first, last = last }
+  }
+
+  fn isStar(s)      = s.length  == 1 && s.text[0] == '*'
+  fn isStarStar(s)  = s.length  == 2 && s.text[0] == '*' && s.text[1] == '*'
+}
+
+//-------------------------------------------------------------------------------
+fn resolve(dispatcher) {
+  return routes.resolve(dispatcher, dispatcher.request.method, dispatcher.request.url.path)
+}
+
+fn errorHandler(dispatcher) {
+  const items = [ "/", "**" ]
+  const path = List(string){
+    items = &items[0],
+    length = 2
+  }
+  return routes.resolve(dispatcher, "", path)
+}

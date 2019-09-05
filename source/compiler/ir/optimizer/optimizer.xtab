@@ -1,0 +1,68 @@
+fn run(ctx) {
+  import worker
+
+  const provider = worker.BatchProvider{ program = ctx.ssa }
+  const    start = time.clock()
+  auto generator = provider.functions()
+  const  context = {
+             srw = atomic.ExclusiveLock{},
+       generator = generator,
+         program = ctx.ssa,
+             ids = ctx.ids,
+          solver = { solved = { loads = 0, jumps = 0, phis = 0, expressions = 0 },
+                    removed = 0, added = 0, passes = 0 },
+             dce = { removed = { blocks = 0, values = 0 }, passes = 0, retargeted = 0 },
+         inliner = { callsites = { visited = 0, inlineable = 0 }, inlined = 0 },
+    singleThread = false
+  }
+  threads.run(context) with {
+    auto batch = List(ssa.Function*){}
+    for it.generator.fill(batch) {
+      for function in batch {
+        for {
+          /* solver */ {
+            import solver
+            auto pass = solver.Solver{ function = function, kw_exitReason = it.ids.kw_exitReason }
+            pass.run(it)
+          }
+          /* dce */ {
+            import dce
+            auto pass = dce.DeadCodeElimination{ function = function }
+            pass.run(it)
+            break if pass.removed.blocks == 0 // Continue if  we can eliminate more.
+          }
+        }
+      }
+    }
+  }
+
+  /* inliner */
+  //import inliner
+  //inliner.run(context)
+
+  const elapsed = time.elapsed(start)
+  println("#{'optimizer'}#[%<darkblue|cyan>]: {\r\n\
+    #{'purpose'}#[%wl12]: #{'optimizes code'}#[%<darkyellow>],\r\n\
+    #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+    #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+    #{'solver'}#[%wl12]: {\r\n\
+      #{'purpose'}#[%wl24]: #{'solves expressions and propagates constants'}#[%<darkyellow>],\r\n\
+      #{'solved'}#[%wl24]: { loads: #{context.solver.solved.loads}#[%,%<gray>], \
+                           jumps: #{context.solver.solved.jumps}#[%,%<gray>], \
+                            phis: #{context.solver.solved.phis}#[%,%<gray>], \
+                     expressions: #{context.solver.solved.expressions}#[%,%<gray>] },\r\n\
+      #{'removed'}#[%wl24]: #{context.solver.removed}#[%,%<gray>],\r\n\
+      #{'added'}#[%wl24]: #{context.solver.added}#[%,%<gray>],\r\n\
+      #{'passes'}#[%wl24]: #{context.solver.passes}#[%,%<gray>] },\r\n\
+    #{'dce'}#[%wl12]: {\r\n\
+      #{'purpose'}#[%wl24]: #{'dead code elimination'}#[%<darkyellow>],\r\n\
+      #{'removed'}#[%wl24]: { blocks: #{context.dce.removed.blocks}#[%,%<gray>], \
+                              values: #{context.dce.removed.values}#[%,%<gray>] },\r\n\
+      #{'retargeted'}#[%wl24]: #{context.dce.retargeted}#[%,%<gray>],\r\n\
+    #{'inliner'}#[%wl12]: {\r\n\
+      #{'purpose'}#[%wl24]: #{'eliminates callsites by inlining function bodies'}#[%<darkyellow>],\r\n\
+      #{'callsites'}#[%wl24]: { visited: #{context.inliner.callsites.visited}#[%,%<gray>], \
+                             inlineable: #{context.inliner.callsites.inlineable}#[%,%<gray>] (#{100.0 * context.inliner.callsites.inlineable / context.inliner.callsites.visited}#[%d2%<gray>])%, \
+                                inlined: #{context.inliner.inlined}#[%,%<gray>] (#{100.0 * context.inliner.inlined / context.inliner.callsites.inlineable}#[%d2%<gray>])% } } },\r\n\
+    #{'memory'}#[%wl12]: #{memory.mformat()} }")
+}

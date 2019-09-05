@@ -1,0 +1,298 @@
+Statement
+Diagram(
+  HorizontalChoice(
+    Choice(0,
+      NonTerminal('BlockStatement'),
+      NonTerminal('IfStatement'),
+      NonTerminal('ForStatement'),
+      NonTerminal('ForInStatement'),
+      NonTerminal('EachStatement'),
+      NonTerminal('SwitchStatement'),
+      NonTerminal('ReturnStatement')
+    ),
+    Choice(0,
+      NonTerminal('BreakStatement'),
+      NonTerminal('ContinueStatement'),
+      NonTerminal('GotoStatement'),
+      NonTerminal('YieldStatement'),
+      NonTerminal('DeferStatement'),
+      NonTerminal('Declaration'),
+      NonTerminal('Expression')
+    )
+  )
+)
+
+ForStatement
+Diagram(
+  Stack(
+    Sequence('for',
+      Optional(Sequence(OneOrMore(Choice(0, NonTerminal('Expression'), NonTerminal('VariableDeclaration')), ','), ';')),
+      Optional(NonTerminal('Expression'))
+    ),
+    Optional(Sequence(';', OneOrMore(NonTerminal('Expression'), ','))),
+    NonTerminal('Statement')
+  )
+)
+
+CaseStatement
+Diagram(
+  Choice(0, 
+    Sequence('case',
+      Choice(0,
+        Sequence(NonTerminal('Identifier'), ':', NonTerminal('TypeName')),
+        NonTerminal('CommaExpression')
+      )
+    ),
+    Sequence('default')
+  ),
+  NonTerminal('Statement')
+)
+
+Declaration
+Diagram(
+  Choice(0, NonTerminal('ImportDeclaration'), NonTerminal('AliasDeclaration'), NonTerminal('DefineDeclaration'),
+    NonTerminal('VariableDeclaration'), NonTerminal('StructDeclaration'), NonTerminal('UnionDeclaration'),
+    NonTerminal('EnumDeclaration'), NonTerminal('FunctionDeclaration')
+  )
+)
+
+EnumDeclaration
+Diagram(
+  Stack(
+    Sequence(
+      ZeroOrMore(Choice(0, 'static', 'const', 'readonly')),
+      'enum',
+      Optional(NonTerminal('Identifier')),
+      Optional(Sequence('(', NonTerminal('TypeName'), ')'))
+    ),
+    Sequence('{', ZeroOrMore(Choice(0, NonTerminal('NameValue'), NonTerminal('Declaration')), ','), '}')
+  )
+)
+
+FnDeclaration
+Diagram(
+  Stack(
+    Sequence(Optional(Choice(0, Sequence(Optional('auto'), 'async'), 'synchronized', 'abstract')), 'fn', ZeroOrMore(NonTerminal('Identifier'), '.')),
+    Optional(Sequence('(', Optional(NonTerminal('FunctionParameters')), ')')),
+    Optional(Sequence(':', NonTerminal('TypeName'))),
+    Choice(0,
+      Sequence('=', NonTerminal('Expression')),
+      NonTerminal('BlockStatement')
+    )
+  )
+)
+
+UrlHandlerDeclaration
+Diagram(
+  Stack(
+    Sequence('urlhandler', Optional(NonTerminal('Identifier')), NonTerminal('UrlPath'), Sequence('(', Optional(NonTerminal('FunctionParameters')), ')')),
+    NonTerminal('BlockStatement')
+  )
+)
+
+ExternDeclaration
+Diagram(
+  Stack(
+    Sequence('extern', NonTerminal('Identifier'), Sequence('(', Optional(NonTerminal('FunctionParameters')), ')')),
+    Choice(0, 
+      Sequence(':', NonTerminal('TypeName')), 
+      Sequence('=', NonTerminal('Expression'))
+    )
+  )
+)
+
+TextFunctionDeclaration
+Diagram(
+  Stack(
+    Sequence(HorizontalChoice(Choice(0, 'html', 'css', 'json'), Choice(0, 'sql', 'blob')), ZeroOrMore(NonTerminal('Identifier'), '.')),
+    Optional(Sequence('(', Optional(NonTerminal('FunctionParameters')), ')')),
+    Optional(Sequence(':', NonTerminal('TypeName'))),
+    NonTerminal('TextBlockStatement')
+  )
+)
+
+TextBlockStatement
+Diagram(
+  Choice(0,
+    Sequence('{', OneOrMore(Choice(0, NonTerminal('TextExpression'), NonTerminal('Interpolation'))), '}'),
+    Sequence('#{', OneOrMore(Choice(0, NonTerminal('TextExpression'), NonTerminal('Interpolation'))), '#}')
+  )
+)
+
+Import
+Diagram(
+  Stack(
+    Sequence(Choice(0, 'import', 'export'), OneOrMore(Sequence(NonTerminal('Identifier'), ZeroOrMore(Sequence('.', NonTerminal('Identifier')))), ','),
+    Optional(Sequence('as', NonTerminal('Identifier')))),
+    Optional(Sequence('from', NonTerminal('Identifier'), ZeroOrMore(Sequence('.', NonTerminal('Identifier')))))
+  )
+)
+
+UrlPath
+Diagram(
+  '"', Optional(Sequence(NonTerminal('Text'), '://')), OneOrMore(Choice(0, Choice(2, '*', '**', Skip(), NonTerminal('Text'))), '/'), Optional(Sequence(':', NonTerminal('Number'))), '"'
+)
+
+TypeName
+Diagram(
+  Stack(
+    Choice(0,
+      Sequence('(', OneOrMore(NonTerminal('TypeName'), ','), ')'),
+      Sequence('[', NonTerminal('TypeName'), Optional(Sequence(',', NonTerminal('Integer'))), ']'),
+      Sequence('{', OneOrMore(Sequence(NonTerminal('Identifier'), ':', NonTerminal('TypeName')), ','), '}'),
+      Sequence(
+        OneOrMore(NonTerminal('Identifier'), '.'),
+        Optional(
+          Sequence('(', NonTerminal('TypeNames'), ')')
+        )
+      ),
+      NonTerminal('TypeDeclaration')
+    ),
+    ZeroOrMore(Choice(0, '*', '&'))
+  )
+)
+
+Variable
+Diagram(
+  Stack(
+    Sequence(
+      Choice(0, 
+        OneOrMore(Choice(0, 'static', 'const', 'readonly', 'auto', 'var'))
+      ),
+      NonTerminal('VariableName'),
+      Sequence('=', NonTerminal('Expression'))    
+    ),
+    ZeroOrMore(
+      Sequence(',', 
+        NonTerminal('VariableName'), 
+        '=', NonTerminal('Expression')
+      )
+    )
+  )
+)
+
+Struct
+Diagram(
+  Stack(
+    Sequence(
+      ZeroOrMore(HorizontalChoice(Choice(0, 'static', 'const'), Choice(0, 'readonly', 'auto'))),
+      'struct',
+      Optional(NonTerminal('Identifier'))
+    ),
+    Optional(Sequence('(', OneOrMore(NonTerminal('TypeName'), ','), ')')),
+    Optional(Sequence(':', OneOrMore(NonTerminal('TypeName'), ','))),
+    Sequence('{', ZeroOrMore(NonTerminal('Declaration')), '}')
+  )
+)
+
+Assignment
+Diagram(
+  Optional(
+    OneOrMore(
+      Sequence(NonTerminal('LogicalExpression'),
+        HorizontalChoice(
+          Choice(0, '&=', '|=', '^=', '>>>=', '>>=', '<<='),
+          Choice(0, '-=', '+=', '%=', '/=', '*=', '='),
+        )
+      )
+    )
+  ), 
+  NonTerminal('IfExpression')
+)
+
+IfExpression
+Diagram(
+  NonTerminal('LogicalExpression'), 
+  Optional(Sequence('if', NonTerminal('LogicalExpression'), Optional(Sequence('else', NonTerminal('Expression')))))
+)
+
+Binary
+Diagram(
+  NonTerminal('BitwiseExpression'), Optional(Sequence(Choice(0, '&&', '||'), NonTerminal('LogicalExpression')))
+)
+
+UnaryPrefix
+Diagram(
+  Choice(0, 
+    Sequence(OneOrMore(Choice(0, '--', '++', '&', '*', '-', '+', '!')), NonTerminal('UnarySuffix')),
+    Sequence('delete', NonTerminal('Expression'),
+      Optional(Sequence('with', NonTerminal('Expression')))
+    ),
+    Sequence('new', NonTerminal('InitializerExpression'))
+  )
+)
+
+PostFix
+Diagram(
+  Stack(
+    Sequence(Optional('await', 'skip'), Optional('auto', 'skip'), NonTerminal('Term'), Optional(OneOrMore(Sequence('.', NonTerminal('PostFixExpression'))))),
+    ZeroOrMore(Choice(0, '*', '&')),
+    ZeroOrMore(
+      Choice(0,
+        Sequence('(', ZeroOrMore(Sequence(Optional(Sequence(NonTerminal('Identifier'), '=')), NonTerminal('Expression')), ','), ')'),
+        Sequence('[', ZeroOrMore(NonTerminal('Expression'), ','), ']'),
+        Sequence('{', ZeroOrMore(NonTerminal('NameValueExpression'), ','), '}')
+      )
+    )
+  )
+)
+
+Term
+Diagram(
+  Choice(0,
+    Sequence('(', NonTerminal('Expression'), ')'),
+    NonTerminal('TupleLiteral'),
+    NonTerminal('ArrayLiteral'),
+    NonTerminal('ObjectLiteral'),
+    NonTerminal('StructDeclaration'),
+    NonTerminal('UnionDeclaration'),
+    NonTerminal('EnumDeclaration'),
+    NonTerminal('FunctionDeclaration'),
+    NonTerminal('Identifier'),
+    NonTerminal('Literal')
+  )
+)
+
+Character
+Diagram(
+  "\\",
+  Choice(0, 
+    HorizontalChoice(
+      Choice(0, '0', "'", '"', '?', '\\', '#'), 
+      Choice(0, 'a', 'b', 'f', 'n', 'r', 't', 'v'),
+      Choice(0,
+        Sequence('x', NonTerminal('HexDigit'), Comment('× 2')),
+        Sequence('u', NonTerminal('HexDigit'), Comment('× 4')),
+        Sequence('U', NonTerminal('HexDigit'), Comment('× 6')),
+        Sequence('&', NonTerminal('Identifier'), ';'),
+      )
+    )
+  )
+)
+
+StringLiteral
+Diagram(
+Choice(0, Sequence('"', Optional(OneOrMore(Choice(0, NonTerminal('QuotedCharaters'), NonTerminal('Interpolation')))), '"'),
+Sequence("'", Choice(0,  Sequence(NonTerminal('QuotedCharaters'), OneOrMore(NonTerminal('QuotedCharaters'))), 
+Sequence(Optional(NonTerminal('QuotedCharaters')), OneOrMore(Choice(0, NonTerminal('QuotedCharaters'), NonTerminal('Interpolation'))))), 
+"'")
+)
+)
+
+DecimalNumber
+Diagram(
+  '[0-9]',
+  Optional(
+    OneOrMore(Choice(0, '[0-9]', '_')), 'skip'
+  ),
+  Choice(0,
+    Optional(
+      Sequence(
+        Choice(0, 'u', 'U', 'i', 'I'),
+        Optional(
+          Choice(0, '8', '16', '32', '64'), 'skip'
+        )
+      ), 'skip'
+    )
+  )
+)

@@ -1,0 +1,17 @@
+fn getComputerName(nameType = os.ComputerNameNetBIOS) {
+  var s = String{}
+  var requiredLength = 0
+  assert !os.GetComputerNameExA(nameType, 0, &requiredLength)
+  assert os.GetLastError() == os.ERROR_MORE_DATA
+  s.reserve(requiredLength)
+  assert os.GetComputerNameExA(nameType, s.text, &requiredLength)
+  assert requiredLength >= 0 && requiredLength < s.capacity
+  s.text[s.length = requiredLength] = ''
+  return s
+}
+
+fn numberOfProcessors() {
+  var systemInfo = os.SYSTEM_INFO{}
+  os.GetSystemInfo(&systemInfo)
+  return systemInfo.dwNumberOfProcessors
+}

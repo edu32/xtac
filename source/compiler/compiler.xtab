@@ -1,0 +1,537 @@
+export std
+export memory, math, atomic, time, os, fs, string, String, char, Queue, List, Dict from std
+export fileio as fio from aio
+
+export src, ast, ssa
+export Kind as Tok from tokens
+
+export diagnostics, threads
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Utf16 {
+  const   text = WChar*{}
+  const length = 0
+  const   hash = 0u64
+
+  fn dispose(this) {
+    delete this.text
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Identifier {
+  const   text = Char*{}
+  const length = 0
+  const   hash = 0u64
+
+  fn dispose(this) {
+    delete this.text
+  }
+
+  fn isEmpty(this)     = this.length == 0
+  fn isNotEmpty(this)  = this.length > 0
+  fn isRandom(this)    = this.length && this.text[0] == '~'
+  fn isNotRandom(this) = !this.length || this.text[0] != '~'
+  fn textIs(this, other, caseSensitive = true) {
+    return false if this.length != other.length
+    if caseSensitive {
+      return os.strncmp(this.text, other.text, other.length) == 0
+    }
+    return os._strnicmp(this.text, other.text, other.length) == 0
+  }
+  fn textIsNot(this, other, caseSensitive = true) = !this.textIs(other, caseSensitive)
+  fn format(this, stream, fmt = "") {
+    const str = string{ text = this.text, length = this.length }
+    return str.format(stream, fmt)
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Identifiers {
+  readonly         srw = atomic.ExclusiveLock{}
+  const         values = Dict(Identifier*){}
+  const         utf16s = Dict(Utf16*){}
+
+  readonly     kw_main = Identifier*{}
+  readonly       kw_os = Identifier*{}
+  readonly      kw_std = Identifier*{}
+  readonly  kw_strings = Identifier*{}
+  readonly  kw_wstring = Identifier*{}
+  readonly   kw_string = Identifier*{}
+  readonly   kw_String = Identifier*{}
+  readonly     kw_this = Identifier*{}
+  readonly     kw_self = Identifier*{}
+  readonly    kw_super = Identifier*{}
+  readonly   kw_length = Identifier*{}
+  readonly    kw_items = Identifier*{}
+  readonly     kw_text = Identifier*{}
+  readonly    kw_print = Identifier*{}
+  readonly  kw_println = Identifier*{}
+  readonly   kw_format = Identifier*{}
+  readonly   kw_memory = Identifier*{}
+  readonly   kw_malloc = Identifier*{}
+  readonly    kw_mfree = Identifier*{}
+  readonly     kw_next = Identifier*{}
+  readonly       kw_it = Identifier*{}
+  readonly  kw_dispose = Identifier*{}
+  readonly kw_disposeWith = Identifier*{}
+  readonly   kw_formatter = Identifier*{}
+  readonly    kw_builtins = Identifier*{}
+  readonly     kw_console = Identifier*{}
+  readonly      kw_stream = Identifier*{}
+  readonly         kw_srw = Identifier*{}
+  readonly        kw_lock = Identifier*{}
+  readonly      kw_unlock = Identifier*{}
+  readonly kw_synchronize = Identifier*{}
+  readonly        kw_crlf = Identifier*{}
+  readonly      kw_append = Identifier*{}
+
+  readonly       kw_align = Identifier*{}
+
+  readonly     kw_overlapped = Identifier*{}
+  readonly     kw_OVERLAPPED = Identifier*{}
+  readonly     kw_iocallback = Identifier*{}
+  readonly  kw_iotransferred = Identifier*{}
+  readonly       kw_ioresult = Identifier*{}
+  readonly      kw_ioawaiter = Identifier*{}
+  readonly      kw_ioawaited = Identifier*{}
+  readonly    kw_getioreturn = Identifier*{}
+  readonly       kw_ioresume = Identifier*{}
+  readonly      kw_iostopped = Identifier*{}
+  readonly       kw_ioreturn = Identifier*{}
+  readonly     kw_autoDelete = Identifier*{}
+
+  readonly           kw_retval = Identifier*{}
+  readonly       kw_exitReason = Identifier*{}
+  readonly               kw_is = Identifier*{}
+  readonly           kw_nameof = Identifier*{}
+  readonly           kw_typeid = Identifier*{}
+  readonly             kw_file = Identifier*{}
+  readonly         kw_function = Identifier*{}
+  readonly             kw_line = Identifier*{}
+  readonly  kw_atomic_subtract = Identifier*{}
+  readonly       kw_atomic_add = Identifier*{}
+  readonly kw_atomic_decrement = Identifier*{}
+  readonly kw_atomic_increment = Identifier*{}
+  readonly     kw_atomic_pause = Identifier*{}
+  readonly   kw_atomic_cmpxchg = Identifier*{}
+  readonly      kw_rotate_left = Identifier*{}
+  readonly     kw_rotate_right = Identifier*{}
+  readonly         kw_round_up = Identifier*{}
+  readonly       kw_round_down = Identifier*{}
+  readonly         kw_truncate = Identifier*{}
+
+  readonly kw_formatVoid      = Identifier*{}
+  readonly kw_formatBool      = Identifier*{}
+  readonly kw_formatWChar     = Identifier*{}
+  readonly kw_formatUInt8     = Identifier*{}
+  readonly kw_formatUInt16    = Identifier*{}
+  readonly kw_formatUInt32    = Identifier*{}
+  readonly kw_formatUInt64    = Identifier*{}
+  readonly kw_formatChar      = Identifier*{}
+  readonly kw_formatInt8      = Identifier*{}
+  readonly kw_formatInt16     = Identifier*{}
+  readonly kw_formatInt32     = Identifier*{}
+  readonly kw_formatInt64     = Identifier*{}
+  readonly kw_formatFloat     = Identifier*{}
+  readonly kw_formatDouble    = Identifier*{}
+
+  readonly kw_dstrax          = Identifier*{}
+
+  readonly kw_mswsock_function_table = Identifier*{}
+  readonly kw_mswsock_dll            = Identifier*{}
+
+  readonly    counter = 1
+
+  fn dispose(this) {
+    delete this.values with fn(x) = delete x
+    delete this.utf16s with fn(x) = delete x
+  }
+
+  fn initialize(this) {
+    import std.collections.dict
+
+    const empty = new Identifier{ hash = dict.NULL_HASH }
+    this.values.append(dict.NULL_HASH, empty)
+
+    const utf16 = new Utf16{ hash = dict.NULL_HASH }
+    this.utf16s.append(dict.NULL_HASH, utf16)
+
+    this.kw_main    = this.get("main2")
+    this.kw_os      = this.get("os")
+    this.kw_std     = this.get("std")
+    this.kw_strings = this.get("strings")
+    this.kw_wstring = this.get("wstring")
+    this.kw_string  = this.get("string")
+    this.kw_String  = this.get("String")
+    this.kw_this    = this.get("this")
+    this.kw_self    = this.get("self")
+    this.kw_super   = this.get("super")
+    this.kw_length  = this.get("length")
+    this.kw_items   = this.get("items")
+    this.kw_text    = this.get("text")
+    this.kw_print   = this.get("print")
+    this.kw_println = this.get("println")
+    this.kw_format  = this.get("format")
+    this.kw_memory  = this.get("memory")
+    this.kw_malloc  = this.get("malloc")
+    this.kw_mfree   = this.get("mfree")
+    this.kw_next    = this.get("next")
+    this.kw_it      = this.get("it")
+    this.kw_dispose = this.get("dispose")
+    this.kw_disposeWith = this.get("disposeWith")
+    this.kw_formatter   = this.get("formatter")
+    this.kw_builtins    = this.get("builtins")
+    this.kw_console     = this.get("console")
+    this.kw_stream      = this.get("stream")
+    this.kw_srw         = this.get("srw")
+    this.kw_lock        = this.get("lock")
+    this.kw_unlock      = this.get("unlock")
+    this.kw_synchronize = this.get("synchronize")
+    this.kw_crlf        = this.get("\r\n")
+    this.kw_append      = this.get("append")
+
+    this.kw_align       = this.get("align")
+
+    this.kw_overlapped    = this.get("overlapped")
+    this.kw_OVERLAPPED    = this.get("OVERLAPPED")
+    this.kw_iocallback    = this.get("iocallback")
+    this.kw_iotransferred = this.get("__iotransferred__")
+    this.kw_ioresult      = this.get("__ioresult__")
+    this.kw_ioawaiter     = this.get("__awaiter__")
+    this.kw_ioawaited     = this.get("__awaited__")
+    this.kw_getioreturn   = this.get("__get_ioreturn__")
+    this.kw_ioresume      = this.get("__resume__")
+    this.kw_iostopped     = this.get("__stopped__")
+    this.kw_ioreturn      = this.get("__ioreturn__")
+    this.kw_autoDelete    = this.get("__auto_delete__")
+
+    this.kw_retval           = this.get("__retval__")
+    this.kw_exitReason       = this.get("__exit_reason__")
+    this.kw_is               = this.get("__is__")
+    this.kw_nameof           = this.get("__nameof__")
+    this.kw_typeid           = this.get("__typeid__")
+    this.kw_file             = this.get("__file__")
+    this.kw_function         = this.get("__function__")
+    this.kw_line             = this.get("__line__")
+    this.kw_atomic_subtract  = this.get("__atomic_subtract__")
+    this.kw_atomic_add       = this.get("__atomic_add__")
+    this.kw_atomic_decrement = this.get("__atomic_decrement__")
+    this.kw_atomic_increment = this.get("__atomic_increment__")
+    this.kw_atomic_pause     = this.get("__atomic_pause__")
+    this.kw_atomic_cmpxchg   = this.get("__atomic_cmpxchg__")
+    this.kw_rotate_left      = this.get("__rotate_left__")
+    this.kw_rotate_right     = this.get("__rotate_right__")
+    this.kw_round_up         = this.get("__round_up__")
+    this.kw_round_down       = this.get("__round_down__")
+    this.kw_truncate         = this.get("__truncate__")
+
+    this.kw_formatVoid      = this.get("formatVoid")
+    this.kw_formatBool      = this.get("formatBool")
+    this.kw_formatWChar     = this.get("formatWChar")
+    this.kw_formatUInt8     = this.get("formatUInt8")
+    this.kw_formatUInt16    = this.get("formatUInt16")
+    this.kw_formatUInt32    = this.get("formatUInt32")
+    this.kw_formatUInt64    = this.get("formatUInt64")
+    this.kw_formatChar      = this.get("formatChar")
+    this.kw_formatInt8      = this.get("formatInt8")
+    this.kw_formatInt16     = this.get("formatInt16")
+    this.kw_formatInt32     = this.get("formatInt32")
+    this.kw_formatInt64     = this.get("formatInt64")
+    this.kw_formatFloat     = this.get("formatFloat")
+    this.kw_formatDouble    = this.get("formatDouble")
+
+    this.kw_dstrax          = this.get("__dstrax__")
+
+    this.kw_mswsock_function_table = this.get("__MSWSOCK_FUNCTION_TABLE__")
+    this.kw_mswsock_dll            = this.get("mswsock.dll")
+  }
+
+  synchronized fn nextRandom(this) = this.counter++
+
+  fn random(this, infix) {
+    assert infix.length
+    auto str = String{}
+    str.append("~").append(infix).append("~")
+    this.nextRandom().format(str)
+    return this.get(str)
+  }
+
+  synchronized fn get(this, value) {
+    import hash64 from math
+    import malloc, mcopy from memory
+    import std.collections.dict
+    if !value.length {
+      return this.values.items[0].value
+    }
+    assert value.length > 0
+    const hash = hash64(value.text, value.length, 0xdeadbeef)
+    const  idx = this.values.indexOf(hash)
+    if idx >= 0 {
+      return this.values.items[idx].value
+    }
+    const text = malloc(Char*{}, value.length + 1)
+    mcopy(text, value.text, value.length)
+    const ident = new Identifier{ text = text, length = value.length, hash = hash }
+    this.values.append(hash, ident)
+    return ident
+  }
+
+  fn emptyid(this) = this.get("")
+
+  synchronized fn getUtf16(this, wtext, wlength) {
+    import hash64 from math
+    import malloc, mcopy, mfree from memory
+    import std.collections.dict
+    if !wlength {
+      mfree(wtext)
+      return this.utf16s.items[0].value
+    }
+    assert wlength >= 0
+    const hash = hash64(wtext, wlength, 0xdeadbeef)
+    const  idx = this.utf16s.indexOf(hash)
+    if idx >= 0 {
+      mfree(wtext)
+      return this.utf16s.items[idx].value
+    }
+    const utf16 = new Utf16{ text = wtext, length = wlength, hash = hash }
+    this.utf16s.append(hash, utf16)
+    return utf16
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Location { // 12 B
+  const line = 0
+  const col  = 0
+  const pos  = 0
+
+  fn ==(this, other) = this.line == other.line && this.col == other.col
+  fn !=(this, other) = this.line != other.line || this.col != other.col
+
+
+  fn format(this, s, fmt = "") {
+    this.line.format(s, fmt)
+    ":".format(s, fmt)
+    this.col.format(s, fmt)
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Range { // 24 B
+  var start = Location{}
+  var   end = Location{}
+
+  fn length(this) {
+    assert this.start.pos <= this.end.pos
+    return this.end.pos - this.start.pos
+  }
+
+  fn format(this, s, fmt = "") {
+    if this.start.line == this.end.line {
+      this.start.format(s, fmt)
+      "—".format(s, fmt)
+      this.end.col.format(s, fmt)
+    } else {
+      this.start.format(s, fmt)
+      "—".format(s, fmt)
+      this.end.format(s, fmt)
+    }
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Pos { // 32 B
+  const range = Range{}
+  const file  = -1
+  var   token = Tok{}
+
+  fn isValid(this)    = this.file >= 0
+  fn isNotValid(this) = this.file == -1
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Source {
+  const name = Identifier*{}
+  var  value = String{}
+
+  fn dispose(this) {
+    delete this.value
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Compiler {
+  const sourceFolderPath = String{}
+  const              ids = Identifiers{}
+  const            types = ast.Types{}
+  const          sources = List(Source){}
+  var                src = src.Folder*{}
+  var                ast = ast.Folder*{}
+  var                ssa = ssa.Program*{}
+  const  compilationInfo = {
+    startTime = 0i64,
+    lines     = 0,
+    tokens    = 0,
+    size      = 0, // Bytes
+    id        = 0
+  }
+
+  fn dispose(this) {
+    delete this.sourceFolderPath
+    delete this.sources with fn(x) = delete x
+    delete this.ids
+    delete this.src
+    delete this.types
+    delete this.ast
+    delete this.ssa
+  }
+
+  fn initialize(this, path) {
+    this.sourceFolderPath.append(path)
+    this.ids.initialize()
+    this.types.initialize()
+    this.compilationInfo.startTime = time.clock()
+  }
+}
+
+
+fn compile(compilationId) {
+  import aio
+  import parser, typer, ir
+  import Binary from ir.codegen.binary
+
+  aio.startup()
+
+  println("#{'Compilation'}#[%<darkmagenta|yellow>]: #{compilationId}#[%<cyan>]")
+
+  var binary = Binary{}
+  auto   ctx = Compiler{ sourceFolderPath = fs.currentFolderPath() }
+  ctx.compilationInfo.id = compilationId
+  ctx.initialize("\\www\\source")
+  
+  if !parser.parse(ctx) {
+    if !typer.run(ctx) {
+      if !ir.translate(ctx) {
+        delete ctx.src
+        delete ctx.ast
+
+        //ir.dumpir(ctx)
+
+        import cleaner from ir.lower
+
+        cleaner.run(ctx)
+        //ir.dumpcleaned(ctx)
+
+        import ssagen from ir.lower
+        ssagen.run(ctx)
+        //ir.dumpssa(ctx)
+
+        import optimizer from ir
+        optimizer.run(ctx)
+        //ir.dumpopt(ctx)
+
+        import regalloc from ir
+        regalloc.run(ctx)
+        //ir.dumpregalloc(ctx)
+
+        import codegen from ir
+        binary = codegen.run(ctx)
+        ir.dumpcodegen(ctx)
+      }
+    }
+  }
+  const elapsed = time.elapsed(ctx.compilationInfo.startTime)
+  println("#{'Compilation'}#[%<darkmagenta|yellow>] #{compilationId}#[%<cyan>] #{elapsed}#[%<green>]s")  
+  aio.shutdown()
+
+  return binary
+}
+
+fn computePadding(offset, alignment) {
+  if offset && alignment {
+    return -offset & (alignment - 1)
+  }
+  return 0
+}
+
+fn isaPowerOf2(value) {
+  if value > 1 {
+    const sub = value - 1
+    return (value & sub) == 0
+  }
+  return false
+}
+
+fn computePowerOf2(value) {
+
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+union Immediate {
+  var  bool = false
+  var    u8 = 0u8
+  var wchar = WChar{}
+  var   u16 = 0u16
+  var   u32 = 0u32
+  var   u64 = 0u64
+  var  char = ''
+  var    i8 = 0i8
+  var   i16 = 0i16
+  var   i32 = 0i32
+  var   i64 = 0i64
+  var   f32 = 0f32
+  var   f64 = 0f64
+  var   ptr = null // T* or T&
+  var   str = Identifier*{}
+  var utf16 = Utf16*{}
+
+  var hilo32 = {
+    lo = 0i32, hi = 0i32 
+  }
+  var hilo16 = {
+    lo = 0i16, hi = 0i16 
+  }
+  var hilo8 = {
+    lo = 0i8, hi = 0i8 
+  }
+}
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+enum Status {
+  None = 0u8,
+  Doing,
+  Done,
+
+  fn hasNotStarted(this) = this == None,
+  fn hasStarted(this)    = this != None,
+  fn isBusy(this)        = this == Doing,
+  fn isDone(this)        = this == Done,
+  fn isBusyOrDone(this)  = this != None,
+  fn isNotDone(this)     = this != Done
+} 
+
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+define    SIZE_OF_BYTE  1 //   8 bits
+define    SIZE_OF_WORD  2 //  16 bits
+define     SIZE_OF_INT  4 //  32 bits
+define SIZE_OF_POINTER  8 //  64 bits
+define     SIZE_OF_XMM 16 // 128 bits
+define     SIZE_OF_YMM 32 // 256 bits
+define     SIZE_OF_ZMM 64 // 512 bits
+
+define  SIZE_OF_FLOAT 4
+define SIZE_OF_DOUBLE 8
+
+define  MIN_MEMCOPY_BYTES 256
+
+define MAX_REGISTER_PARAMETERS 4
+define  MAX_REGISTER_ARGUMENTS 4

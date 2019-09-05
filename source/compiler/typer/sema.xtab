@@ -1,0 +1,429 @@
+import CastKind from ast
+
+
+fn cast(destinationType, sourceType, isImplicit) {
+  const isExplicit = !isImplicit
+  return CastKind.NoCast if destinationType == sourceType
+  return CastKind.None   if destinationType.isVoid() || sourceType.isVoid()
+
+  if const dbuiltin = destinationType.isaBuiltin() {
+    return CastKind.Numeric if sourceType.isaBuiltin() // B1 ⟵ B2
+
+    if const senum = sourceType.isanEnum() {
+      if const c = cast(destinationType, senum.valueType, isImplicit) { // B ⟵ E
+        return CastKind.Numeric if CastKind.NoCast
+          else c
+      }
+      return CastKind.None
+    }
+
+    if const sptr = sourceType.isaPointer() {
+      return CastKind.Ptr2Int if isExplicit && destinationType.isIntegral() // I ⟵ T*
+    }
+
+    if const sref = sourceType.isaReference() {
+      return CastKind.Ref2Int if isExplicit && destinationType.isIntegral() // I ⟵ T&
+    }
+  }
+
+  else if const sbuiltin = sourceType.isaBuiltin() {
+    if const denum = destinationType.isanEnum() {
+      if const c = cast(denum.valueType, sourceType, isImplicit) { // E ⟵ N
+        return CastKind.Numeric if CastKind.NoCast
+          else c
+      }
+      return CastKind.None
+    }
+    
+    if const dptr = destinationType.isaPointer() {
+      return CastKind.Int2Ptr if isExplicit && sourceType.isIntegral() // T* ⟵ I
+    }
+    
+    if const dref = destinationType.isaReference() {
+      return CastKind.Int2Ref if isExplicit && sourceType.isIntegral() // T& ⟵ I
+    }
+  }
+
+  else if const denum = destinationType.isanEnum() {
+    if const c = cast(denum.valueType, sourceType, isImplicit) { // E ⟵ I
+      return CastKind.Numeric if CastKind.NoCast
+        else c
+    }
+    return CastKind.None
+  }
+
+  else if const senum = sourceType.isanEnum() {
+
+  }
+
+  else if const dptr = destinationType.isaPointer() {
+    if const sptr = sourceType.isaPointer() { // T* ⟵ U*
+      return CastKind.Ptr2Ptr if isExplicit
+      return CastKind.Ptr2Ptr if dptr.pointee.isVoid() || sptr.pointee.isVoid()
+      if const c = cast(dptr.pointee, sptr.pointee, isImplicit) {
+        return CastKind.Ptr2Ptr if c != CastKind.Numeric
+      }
+    }
+    else if const sref = sourceType.isaReference() { // T* ⟵ U&
+      return CastKind.Ref2Ptr if isExplicit
+      if const c = cast(dptr.pointee, sref.pointee, isImplicit) {
+        return CastKind.Ref2Ptr if c != CastKind.Numeric
+      }
+    }
+    else if const snum = sourceType.isIntegral() { // T* ⟵ N
+      return CastKind.Int2Ptr if isExplicit
+    }
+  }
+
+  else if const sptr = sourceType.isaPointer() {
+    if const dref = destinationType.isaReference() { // T& ⟵ U
+      return CastKind.Ptr2Ref if isExplicit
+      if const c = cast(dref.pointee, sptr.pointee, isImplicit) {
+        return CastKind.Ptr2Ref if c != CastKind.Numeric
+      }
+    }
+  }
+
+  else if const dref = destinationType.isaReference() {
+    if const sref = sourceType.isaReference() { // T& ⟵ U&
+      return CastKind.Ref2Ref if isExplicit
+      if const c = cast(dref.pointee, sref.pointee, isImplicit) {
+        return CastKind.Ref2Ref if c != CastKind.Numeric
+      }
+    }
+    else if const c = cast(dref.pointee, sourceType, isImplicit) { // T& ⟵ U
+      return CastKind.Obj2Ref if isExplicit || c != CastKind.Numeric
+    } else {
+      return CastKind.Obj2Ref if isExplicit
+    }
+  }
+
+  else if const sref = sourceType.isaReference() {
+    if const c = cast(destinationType, sref.pointee, isImplicit) {
+      return CastKind.Ref2Obj if isExplicit || c != CastKind.Numeric // T ⟵ U&
+    }
+  }
+
+  else if const dobject = destinationType.isanObject() {
+    if const sobject = sourceType.isanObject() {
+      if dobject.scope.symbols.length == sobject.scope.symbols.length { // ( ... ) ⟵ ( ... )
+        var nocasts = 0
+        for i, ditem in dobject.scope.symbols {
+          const  sitem = sobject.scope.symbols.items[i]
+          const   dsym = ditem.value
+          const   ssym = sitem.value
+          const dfield = dsym.instance as ast.Field*
+          const sfield = ssym.instance as ast.Field*
+          return CastKind.None if dfield.name != sfield.name
+          if const c = cast(dfield.type, sfield.type, isImplicit) {
+            nocasts += c == CastKind.NoCast
+          } else {
+            return CastKind.None
+          }
+        }
+        return CastKind.Object if isExplicit || nocasts == dobject.scope.symbols.length
+          else CastKind.None
+      }
+    }
+  }
+
+  else if const sobject = sourceType.isanObject() {
+    // Do nothing.
+  }
+
+  else if const darray = destinationType.isanArray() {
+    if const sarray = sourceType.isanArray() { // [T] ⟵ [U]
+      if darray.children.length == sarray.children.length {
+        if const c = cast(darray.element(), sarray.element(), isImplicit) {
+          return CastKind.Object if isExplicit || c == CastKind.NoCast
+        }
+      }
+    }
+    else if const sfixed = sourceType.isaFixedArray() { // [T] ⟵ U[N]
+      if darray.children.length == sfixed.length {
+        if const c = cast(darray.element(), sfixed.element, isImplicit) {
+          return CastKind.Object if isExplicit || c == CastKind.NoCast
+        }
+      }
+    }
+  }
+
+  else if const sarray = sourceType.isanArray() {
+    if const dfixed = destinationType.isaFixedArray() {  // T[N] ⟵ [U]
+      if sarray.children.length == dfixed.length {
+        if const c = cast(dfixed.element, sarray.element(), isImplicit) {
+          return CastKind.Object if isExplicit || c == CastKind.NoCast
+        }
+      }
+    }
+  }
+
+  else if const dfixed = destinationType.isaFixedArray() {
+  }
+
+  else if const sfixed = sourceType.isaFixedArray() {
+  }
+
+  else if const dstruct = destinationType.isaStruct() {
+    if const sstruct = sourceType.isaStruct() {
+      return CastKind.Object if isExplicit || dstruct.isSuperTypeOf(sstruct)
+    }
+  }
+
+  else if const sstruct = sourceType.isaStruct() {
+
+  }
+
+  return CastKind.None
+}
+
+
+fn upperBound(lhs, rhs): ast.Type {
+  return lhs if lhs == rhs || lhs.isUnknown() || rhs.isUnknown()
+  return ast.tyUnknown if lhs.isVoid() || rhs.isVoid()
+  if const   lbuiltin = lhs.isaBuiltin() {
+    if const rbuiltin = rhs.isaBuiltin() {
+      const lsign = lhs.isSigned()
+      const rsigh = rhs.isSigned()
+      const lsize = lhs.size()
+      const rsize = rhs.size()
+      return ast.tyUnknown if lsize > 8 || rsize > 8
+      if lbuiltin == ast.Kind.Float {
+        return ast.tyDouble if rsize > lsize
+          else lhs
+      }
+      if rbuiltin == ast.Kind.Float {
+        return ast.tyDouble if lsize > rsize
+          else rhs
+      }
+      return ast.tyDouble if lbuiltin == ast.Kind.Double || rbuiltin == ast.Kind.Double
+      return lhs if lsize > rsize
+      return rhs if rsize > lsize
+      return lhs if lsign
+        else rhs
+    }
+    else if const renum = rhs.isanEnum() {
+      return upperBound(lhs, renum.valueType)
+    }
+  }
+
+  else if const rbuiltin = rhs.isaBuiltin() {
+    if const lenum = lhs.isanEnum() {
+      return upperBound(lenum.valueType, rhs)
+    }
+  }
+
+  else if const lenum = lhs.isanEnum() {
+    if const renum = rhs.isanEnum() {
+      return upperBound(lenum.valueType, renum.valueType)
+    }
+  }
+
+  else if const renum = rhs.isanEnum() {
+
+  }
+
+  else if const lptr = lhs.isaPointer() {
+    if const rptr = rhs.isaPointer() {
+      return rhs if rptr.pointee.isVoid() // upperBoundOf( T*, Void* ) ⟶ Void*
+      return lhs if lptr.pointee.isVoid() // upperBoundOf( Void*, T* ) ⟶ Void*
+      const ub = upperBound(lptr.pointee, rptr.pointee)
+      if ub == lptr.pointee {
+        return lhs if lptr.pointee.isNotABuiltin()
+      } else if ub == rptr.pointee {
+        return rhs if rptr.pointee.isNotABuiltin()
+      }
+    }
+    else if const rref = rhs.isaReference() {
+      const ub = upperBound(lptr.pointee, rref.pointee)
+      if ub == rref.pointee {
+        return rhs if rref.pointee.isNotABuiltin()
+      }
+    }
+  }
+  
+  else if const lref = lhs.isaReference() {
+    if rhs.isDirect() {
+      const ub = upperBound(lref.pointee, rhs)
+      return ub if ub.isKnown() && ub.isNotABuiltin()
+    }
+    else if const rptr = rhs.isaPointer() {
+      const ub = upperBound(lref.pointee, rptr.pointee)
+      if ub == lref.pointee {
+        return lhs if lref.pointee.isNotABuiltin()
+      }
+    }
+    else if const rref = rhs.isaReference() {
+      const ub = upperBound(lref.pointee, rref.pointee)
+      if ub == lref.pointee {
+        return lhs if lref.pointee.isNotABuiltin()
+      } else if ub == rref.pointee {
+        return rhs if rref.pointee.isNotABuiltin()
+      }
+    }
+  }
+
+  else if const rptr = rhs.isaPointer() {
+
+  }
+
+  else if const rref = rhs.isaReference() {
+    if lhs.isDirect() {
+      const ub = upperBound(lhs, rref.pointee)
+      return ub if ub.isKnown() && ub.isNotABuiltin()
+    }
+  }
+
+  else if const lstruct = lhs.isaStruct() {
+    if const rstruct = rhs.isaStruct() {
+      return lhs if lstruct.isSuperTypeOf(rstruct)
+        else rhs if rstruct.isSuperTypeOf(lstruct)
+        else rootSuperOf(lstruct, rstruct)
+    }
+  }
+
+  else if const larray = lhs.isanArray() {
+    if const rarray = rhs.isanArray() {
+      return lhs if larray.children.length == rarray.children.length && larray.element() == rarray.element()
+    } else if const rfixed = rhs.isaFixedArray() {
+      return lhs if larray.children.length == rfixed.length && larray.element() == rfixed.element
+    }
+  }
+
+  else if const lfixed = lhs.isaFixedArray() {
+    if const rarray = rhs.isanArray() {
+      return lhs if lfixed.length == rarray.children.length && lfixed.element == rarray.element()
+    } else if const rfixed = rhs.isaFixedArray() {
+      return lhs if lfixed.length == rfixed.length && lfixed.element == rfixed.element
+    }
+  }
+
+  return ast.tyUnknown
+}
+
+
+fn rootSuperOf(left, right): ast.Type {
+  if left.supers.length {
+    return rootSuperOf(left.supers.items[0], right)
+  }
+  if right.supers.length {
+    return rootSuperOf(left, right.supers.items[0])
+  }
+  return left.type if left == right && left.derived.length
+    else ast.tyUnknown
+}
+
+
+fn isNumeric(sourceType): CastKind {
+  const bad = ast.CastKind.None
+  if const ref = sourceType.isaReference() {
+    const pointee = ref.pointee
+    if isNumeric(pointee) {
+      return CastKind.Ref2Obj
+    }
+  }
+  if const k = sourceType.isNumeric() {
+    return CastKind.NoCast
+  }
+  if const en = sourceType.isanEnum() {
+    return isNumeric(en.valueType)
+  }
+  return bad
+}
+
+
+fn isaNumber(sourceType): CastKind {
+  const bad = ast.CastKind.None
+  if const ref = sourceType.isaReference() {
+    const pointee = ref.pointee
+    if isaNumber(pointee) {
+      return CastKind.Ref2Obj
+    }
+  }
+  if const k = sourceType.isaNumber() {
+    return CastKind.NoCast
+  }
+  if const en = sourceType.isanEnum() {
+    return isaNumber(en.valueType)
+  }
+  return bad
+}
+
+
+fn isIntegral(sourceType): CastKind {
+  const bad = ast.CastKind.None
+  if const ref = sourceType.isaReference() {
+    const pointee = ref.pointee
+    if isIntegral(pointee) {
+      return CastKind.Ref2Obj
+    }
+  }
+  if const k = sourceType.isIntegral() {
+    return CastKind.NoCast
+  }
+  if const en = sourceType.isanEnum() {
+    return isIntegral(en.valueType)
+  }
+  return bad
+}
+
+
+fn isaConstant(value): ast.Node* {
+  return value if value is ast.Constant
+  if const def = value is ast.Define {
+    return value if isaConstant(def.value)
+  }
+  return false
+}
+
+
+fn getConstant(value): ast.Constant* {
+  switch value {
+    case ast.Name {
+      if value.symbol.instance {
+        return getConstant(value.symbol.instance)
+      }
+    }
+    case ast.MemberName {
+      if value.symbol.instance {
+        return getConstant(value.symbol.instance)
+      }
+    }
+    case ast.Define   return getConstant(value.value)
+    case ast.Constant return value
+  }
+  return null
+}
+
+
+fn isaNarrowingNumericCast(destinationType, sourceType, c) {
+  return false if c != CastKind.Numeric
+  return destinationType.size() < sourceType.size()
+}
+
+
+fn isaSignChangingNumeriCast(destinationType, sourceType, c) {
+  return false if c != CastKind.Numeric
+  return destinationType.isSigned() != sourceType.isSigned()
+}
+
+
+fn isaNarrowingOrSignChangingNumericCast(destinationType, sourceType, c) {
+  return false if c != CastKind.Numeric
+  return destinationType.size() != sourceType.size() || destinationType.isSigned() != sourceType.isSigned()
+}
+
+
+fn isaClassChangingNumeriCast(destinationType, sourceType, c) {
+  return false if c != CastKind.Numeric
+  if destinationType.isaReal() {
+    return sourceType.isNotAReal()
+  } 
+  return sourceType.isNotIntegral()
+}
+
+
+fn isNumericCastSuitableForEnumEntry(destinationType, sourceType, c) {
+  return !isaClassChangingNumeriCast(destinationType, sourceType, c) &&
+         !isaNarrowingOrSignChangingNumericCast(destinationType, sourceType, c)
+}

@@ -1,0 +1,826 @@
+
+//-------------------------------------------------------------------------------
+// General.
+//-------------------------------------------------------------------------------
+struct GUID {
+  readonly Data1 = 0u32
+  readonly Data2 = 0u16
+  readonly Data3 = 0u16
+  readonly Data4 = Char[ 8 ]
+}
+union ULARGE_INTEGER {
+  readonly u = {
+    LowPart  = 0u32,
+    HighPart = 0u32
+  }
+  readonly QuadPart = 0u64
+}
+union LARGE_INTEGER {
+  readonly u = {
+    LowPart  = 0u32,
+    HighPart = 0i32
+  }
+  readonly QuadPart = 0i64
+}
+
+extern SetLastError(dwErrCode) = void
+extern GetLastError()       = 0u32
+extern CloseHandle(hObject) = 0
+extern DebugActiveProcess(dwProcessId) = 0u32
+extern GetProcessId(Process) = 0u32
+extern ExitProcess(uExitCode) = void
+
+struct PROCESS_MEMORY_COUNTERS {
+  const cb = 0u32
+  const PageFaultCount = 0u32
+  const PeakWorkingSetSize = 0u64
+  const WorkingSetSize = 0u64
+  const QuotaPeakPagedPoolUsage = 0u64
+  const QuotaPagedPoolUsage = 0u64
+  const QuotaPeakNonPagedPoolUsage = 0u64
+  const QuotaNonPagedPoolUsage = 0u64
+  const PagefileUsage = 0u64
+  const PeakPagefileUsage = 0u64
+}
+struct PROCESS_MEMORY_COUNTERS_EX {
+  const                         cb = 0u32
+  const             PageFaultCount = 0u32
+  const         PeakWorkingSetSize = 0u64
+  const             WorkingSetSize = 0u64
+  const    QuotaPeakPagedPoolUsage = 0u64
+  const        QuotaPagedPoolUsage = 0u64
+  const QuotaPeakNonPagedPoolUsage = 0u64
+  const     QuotaNonPagedPoolUsage = 0u64
+  const              PagefileUsage = 0u64
+  const          PeakPagefileUsage = 0u64
+  const               PrivateUsage = 0u64
+}
+extern GetProcessMemoryInfo(Process, ppsmemCounters, cb) = 0
+
+//-------------------------------------------------------------------------------
+// CRT.
+//-------------------------------------------------------------------------------
+extern memcmp(_Buf1, _Buf2, _Size) = 0
+extern memcpy(_Dst, _Src, _Size)   = null
+extern memmove(_Dst, _Src, _Size)  = null
+extern memset(_Dst, _Val, _Size)   = null
+extern _itoa_s(_Value, _Buffer, _BufferCount, _Radix)  = 0
+extern _ultoa_s(_Value, _Buffer, _BufferCount, _Radix)  = 0
+extern _i64toa_s(_Value, _Buffer, _BufferCount, _Radix) = 0
+extern _ui64toa_s(_Value, _Buffer, _BufferCount, _Radix) = 0
+extern strlen(str) = 0
+extern wcslen(str) = 0
+extern strncmp(string1, string2, count) = 0
+extern _strnicmp(string1, string2, count) = 0
+extern _strtoi64(nptr, endptr, base) = 0i64
+extern _strtoui64(nptr, endptr, base) = 0u64
+extern strtod(nptr, endptr) = 0.0
+extern strtof(strSource, endptr) = 0.0f
+extern _set_errno(value) = 0
+extern qsort_s(base, num, width, compare, context) = void
+
+extern _gcvt_s(buffer, sizeInBytes, value, digits) = 0
+extern _fcvt_s(buffer, sizeInBytes, value, count, dec, sign) = 0
+
+extern exp(_X) = 0.0
+extern log(_X) = 0.0
+extern log10(_X) = 0.0
+extern pow(_X, _Y) = 0.0
+//extern sqrt(_X) = 0.0
+extern _dsign(_X) = 0
+extern fabs(_X) = 0.0
+
+extern expf(_X) = 0f
+extern logf(_X) = 0f
+extern log10f(_X) = 0f
+extern powf(_X, _Y) = 0f
+//extern sqrtf(_X) = 0f
+extern _fdsign(_X) = 0
+extern fabsf(_X) = 0f
+
+extern system(_Command) = 0
+
+//-------------------------------------------------------------------------------
+// Console.
+//-------------------------------------------------------------------------------
+define STD_INPUT_HANDLE  -10
+define STD_OUTPUT_HANDLE -11
+define STD_ERROR_HANDLE  -12
+
+struct COORD {
+  const X = 0u16
+  const Y = 0u16
+}
+
+struct SMALL_RECT {
+  var Left = 0u16
+  var Top = 0u16
+  var Right = 0u16
+  var Bottom = 0u16
+}
+
+struct CONSOLE_SCREEN_BUFFER_INFO {
+  var              dwSize = COORD{}
+  var    dwCursorPosition = COORD{}
+  var         wAttributes = 0u16
+  var            srWindow = SMALL_RECT{}
+  var dwMaximumWindowSize = COORD{}
+}
+
+extern GetStdHandle(nStdHandle) = null
+extern WriteConsoleA(hConsoleOutput, lpBuffer, nNumberOfCharsToWrite, lpNumberOfCharsWritten, lpReserved) = 0
+extern ReadConsoleA(hConsoleInput, lpBuffer, nNumberOfCharsToRead, lpNumberOfCharsRead, pInputControl) = 0
+extern SetConsoleOutputCP(wCodePageID) = 0
+extern SetConsoleTextAttribute(hConsoleOutput, wAttributes) = 0
+extern GetConsoleScreenBufferInfo(hConsoleOutput, lpConsoleScreenBufferInfo) = 0
+extern FillConsoleOutputAttribute(hConsoleOutput, wAttribute, nLength, dwWriteCoord, lpNumberOfAttrsWritten) = 0
+extern FillConsoleOutputCharacterA(hConsoleOutput, cCharacter, nLength, dwWriteCoord, lpNumberOfCharsWritten) = 0
+extern SetConsoleCursorPosition(hConsoleOutput, dwCursorPosition) = 0
+
+//-------------------------------------------------------------------------------
+// Memory.
+//-------------------------------------------------------------------------------
+define HEAP_ZERO_MEMORY 0x00000008
+extern GetProcessHeap() = null
+extern HeapAlloc(hHeap, dwFlags, dwBytes) = null
+extern HeapReAlloc(hHeap, dwFlags, lpMem, dwBytes) = null
+extern HeapFree(hHeap, dwFlags, lpMem) = 0
+ 
+define PAGE_NOACCESS           0x01    
+define PAGE_READONLY           0x02    
+define PAGE_READWRITE          0x04    
+define PAGE_WRITECOPY          0x08    
+define PAGE_EXECUTE            0x10    
+define PAGE_EXECUTE_READ       0x20    
+define PAGE_EXECUTE_READWRITE  0x40    
+define PAGE_EXECUTE_WRITECOPY  0x80    
+define PAGE_GUARD             0x100    
+define PAGE_NOCACHE           0x200    
+define PAGE_WRITECOMBINE      0x400    
+
+define MEM_COMMIT   0x00001000  
+define MEM_RESERVE  0x00002000  
+define MEM_DECOMMIT 0x00004000  
+define MEM_RELEASE  0x00008000  
+define MEM_FREE     0x00010000
+
+extern VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect) = null
+extern VirtualFree(lpAddress, dwSize, dwFreeType) = 0
+
+//-------------------------------------------------------------------------------
+// System info.
+//-------------------------------------------------------------------------------
+define MAX_COMPUTERNAME_LENGTH                31
+define ComputerNameDnsDomain                  0
+define ComputerNameDnsFullyQualified          1
+define ComputerNameDnsHostname                2
+define ComputerNameNetBIOS                    3
+define ComputerNamePhysicalDnsDomain          4
+define ComputerNamePhysicalDnsFullyQualified  5
+define ComputerNamePhysicalDnsHostname        6
+define ComputerNamePhysicalNetBIOS            7
+extern GetComputerNameExA(NameType, lpBuffer, lpnSize) = 0
+
+struct SYSTEM_INFO {
+    var wProcessorArchitecture      = 0u16,
+        wReserved                   = 0u16,
+        dwPageSize                  = 0u32,
+        lpMinimumApplicationAddress = null,
+        lpMaximumApplicationAddress = null,
+        dwActiveProcessorMask       = null,
+        dwNumberOfProcessors        = 0u32,
+        dwProcessorType             = 0u32,
+        dwAllocationGranularity     = 0u32,
+        wProcessorLevel             = 0u16,
+        wProcessorRevision          = 0u16
+}
+extern GetSystemInfo(lpSystemInfo) = Void{}
+
+//-------------------------------------------------------------------------------
+// SRWLOCK
+//-------------------------------------------------------------------------------
+struct SRWLOCK {
+  var ptr = null
+}
+extern AcquireSRWLockExclusive(SRWLock) = void
+extern ReleaseSRWLockExclusive(SRWLock) = void
+extern AcquireSRWLockShared(SRWLock) = void
+extern ReleaseSRWLockShared(SRWLock) = void
+extern TryAcquireSRWLockExclusive(SRWLock) = 0
+extern TryAcquireSRWLockShared(SRWLock) = 0
+
+//-------------------------------------------------------------------------------
+// IOCP.
+//-------------------------------------------------------------------------------
+struct OVERLAPPED {
+  readonly Internal      = 0u64,
+           InternalHigh  = 0u64,
+           Offset        = 0u32,
+           OffsetHigh    = 0u32,
+           hEvent        = null
+
+  fn setOffsets(this, Offset, OffsetHigh) {
+    this.Offset = Offset
+    this.OffsetHigh = OffsetHigh
+  }
+}
+struct OVERLAPPED_ENTRY {
+  readonly lpCompletionKey = null
+  readonly lpOverlapped = OVERLAPPED*{}
+  readonly Internal = null
+  readonly dwNumberOfBytesTransferred = 0u32
+}
+extern CreateIoCompletionPort(FileHandle, ExistingCompletionPort, CompletionKey, NumberOfConcurrentThreads) = null
+extern GetQueuedCompletionStatus(CompletionPort, lpNumberOfBytes, lpCompletionKey, lpOverlapped, dwMilliseconds) = 0
+extern PostQueuedCompletionStatus(CompletionPort, dwNumberOfBytesTransferred, dwCompletionKey, lpOverlapped) = 0
+extern CreateThread(lpThreadAttributes, dwStackSize, lpStartAddress, lpParameter, dwCreationFlags, lpThreadId) = null
+extern GetCurrentThreadId() = 0u32
+extern GetCurrentProcess() = null
+extern GetCurrentThread() = null
+extern SleepEx(dwMilliseconds, bAlertable) = 0u32
+extern WaitForSingleObjectEx(hHandle, dwMilliseconds, bAlertable) = 0u32
+extern WaitForMultipleObjectsEx(nCount, lpHandles, bWaitAll, dwMilliseconds, bAlertable) = 0u32
+extern WaitOnAddress(Address, CompareAddress, AddressSize, dwMilliseconds) = 0
+extern WakeByAddressAll(Address) = void
+extern WakeByAddressSingle(Address) = void
+extern GetCurrentThreadStackLimits(LowLimit, HighLimit) = void
+
+//-------------------------------------------------------------------------------
+// Timer.
+//-------------------------------------------------------------------------------
+extern CreateThreadpoolTimer(pfnti, pv, pcbe) = null
+extern SetThreadpoolTimer(pti, pftDueTime, msPeriod, msWindowLength) = void
+extern WaitForThreadpoolTimerCallbacks(pti, fCancelPendingCallbacks) = void
+extern CloseThreadpoolTimer(pti) = void
+
+//-------------------------------------------------------------------------------
+// File system.
+//-------------------------------------------------------------------------------
+extern CreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile) = null
+extern ReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped) = 0u32
+extern WriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, lpOverlapped) = 0u32
+extern GetModuleFileNameA(hModule, lpFilename, nSize) = 0u32
+extern GetFileAttributesA(lpFileName) = 0u32
+extern GetFileAttributesExA(lpFileName, fInfoLevelId, lpFileInformation) = 0u32
+extern CreateDirectoryA(lpPathName, lpSecurityAttributes) = 0u32
+extern GetTempPathA(nBufferLength, lpBuffer) = 0u32
+extern GetTempFileNameA(lpPathName, lpPrefixString, uUnique, lpTempFileName) = 0u32
+extern FlushFileBuffers(hFile) = 0u32
+extern GetFinalPathNameByHandleA(hFile, lpszFilePath, cchFilePath, dwFlags) = 0u32
+extern GetFileSizeEx(hFile, lpFileSize) = 0u32
+extern SetFilePointerEx(hFile, liDistanceToMove, lpNewFilePointer, dwMoveMethod) = 0u32
+extern SetEndOfFile(hFile) = 0u32
+extern MoveFileA(lpExistingFileName, lpNewFileName) = 0u32
+extern DeleteFileA(lpFileName) = 0u32
+
+struct MODULEINFO {
+  const  lpBaseOfDll = null
+  const  SizeOfImage = 0u32
+  const   EntryPoint = null
+}
+extern GetModuleInformation(hProcess, hModule, lpmodinfo, cb) = 0
+extern GetModuleHandleA(lpModuleName) = null
+extern EnumProcessModules(hProcess, lphModule, cb, lpcbNeeded) = 0
+extern GetProcAddress(hModule, lpProcName) = null
+extern GetModuleBaseNameA(hProcess, hModule, lpBaseName, nSize) = 0u32
+
+struct WIN32_FILE_ATTRIBUTE_DATA {
+  readonly dwFileAttributes = 0u32
+  readonly ftCreationTime = FILETIME{}
+  readonly ftLastAccessTime = FILETIME{}
+  readonly ftLastWriteTime = FILETIME{}
+  readonly nFileSizeHigh = 0u32
+  readonly nFileSizeLow = 0u32
+}
+
+// Enumerate the file system.
+struct WIN32_FIND_DATA {
+  readonly dwFileAttributes = 0u32
+  readonly ftCreationTime = FILETIME{}
+  readonly ftLastAccessTime = FILETIME{}
+  readonly ftLastWriteTime = FILETIME{}
+  readonly nFileSizeHigh = 0u32
+  readonly nFileSizeLow = 0u32
+  readonly dwReserved0 = 0u32
+  readonly dwReserved1 = 0u32
+  readonly cFileName = Char[ MAX_PATH ]
+  readonly cAlternateFileName = Char[ 14 ]
+
+}
+extern FindFirstFileA(lpFileName, lpFindFileData) = null
+extern FindNextFileA(hFindFile, lpFindFileData) = 0
+extern FindClose(hFindFile) = 0
+
+// Mapping.
+extern CreateFileMappingA(hFile, lpAttributes, flProtect, dwMaximumSizeHigh, dwMaximumSizeLow, lpName) = null
+extern MapViewOfFile(hFileMappingObject, dwDesiredAccess, dwFileOffsetHigh, dwFileOffsetLow, dwNumberOfBytesToMap) = null
+extern UnmapViewOfFile(lpBaseAddress) = 0
+
+struct BY_HANDLE_FILE_INFORMATION {
+  readonly dwFileAttributes = 0u32
+  readonly ftCreationTime = FILETIME{}
+  readonly ftLastAccessTime = FILETIME{}
+  readonly ftLastWriteTime = FILETIME{}
+  readonly dwVolumeSerialNumber = 0u32
+  readonly nFileSizeHigh = 0u32
+  readonly nFileSizeLow = 0u32
+  readonly nNumberOfLinks = 0u32
+  readonly nFileIndexHigh = 0u32
+  readonly nFileIndexLow = 0u32
+}
+extern GetFileInformationByHandle(hFile, lpFileInformation) = 0
+
+//-------------------------------------------------------------------------------
+// Time.
+//-------------------------------------------------------------------------------
+struct SYSTEMTIME {
+  readonly wYear = 0u16
+  readonly wMonth = 0u16
+  readonly wDayOfWeek = 0u16
+  readonly wDay = 0u16
+  readonly wHour = 0u16
+  readonly wMinute = 0u16
+  readonly wSecond = 0u16
+  readonly wMilliseconds = 0u16
+}
+
+struct FILETIME {
+  readonly dwLowDateTime  = 0u32
+  readonly dwHighDateTime = 0u32
+
+  fn fromTicks(n) {
+    const p = UInt64(n)
+    return FILETIME{
+      dwHighDateTime = UInt32((p >> 32) & 0xFFFFFFFF),
+      dwLowDateTime  = UInt32(p & 0xFFFFFFFF)
+    }
+  }
+
+  fn ticks(this) = UInt64(this.dwLowDateTime) |
+                   (UInt64(this.dwHighDateTime) << 32)
+}
+extern GetLocalTime(lpSystemTime) = void
+extern GetSystemTime(lpSystemTime) = void
+
+extern SystemTimeToFileTime(lpSystemTime, lpFileTime) = 0
+extern FileTimeToSystemTime(lpFileTime, lpSystemTime) = 0
+
+extern TzSpecificLocalTimeToSystemTime(lpTimeZoneInformation, lpLocalTime, lpUniversalTime) = 0
+extern SystemTimeToTzSpecificLocalTime(lpTimeZone, lpUniversalTime, lpLocalTime) = 0
+
+extern GetSystemTimePreciseAsFileTime(lpSystemTimeAsFileTime) = void
+
+extern QueryPerformanceCounter(lpPerformanceCount) = 0
+extern QueryPerformanceFrequency(lpFrequency) = 0
+
+//-------------------------------------------------------------------------------
+// Network.
+//-------------------------------------------------------------------------------
+ struct WSAData {
+  var wVersion        = 0u16
+  var wHighVersion    = 0u16
+  var szDescription   = Char[ WSADESCRIPTION_LEN + 1 ]
+  var szSystemStatus  = Char[ WSASYS_STATUS_LEN + 1 ]
+  var iMaxSockets     = 0u16
+  var iMaxUdpDg       = 0u16
+  var lpVendorInfo    = Char*{}
+}
+struct WSABUF {
+  readonly len = 0
+  readonly buf = Char*{}
+}
+struct TRANSMIT_FILE_BUFFERS {
+  readonly Head = null
+  readonly HeadLength = 0u32
+  readonly Tail = null
+  readonly TailLength = 0u32
+
+  fn isEmpty(this) = this.HeadLength == 0 && this.TailLength == 0
+}
+struct ADDRINFOA {
+  readonly ai_flags = 0
+  readonly ai_family = 0
+  readonly ai_socktype = 0
+  readonly ai_protocol = 0
+  readonly ai_addrlen = 0u64
+  readonly ai_canonname = Char*{}
+  readonly ai_addr = SOCKADDR*{}
+  readonly ai_next = ADDRINFOA*{}
+}
+extern WSAStartup(wVersionRequested, lpWSAData) = 0
+extern WSACleanup() = 0
+extern WSAGetLastError() = 0
+extern WSAAddressToStringA(lpsaAddress, dwAddressLength, lpProtocolInfo, lpszAddressString, lpdwAddressStringLength) = 0
+extern AcceptEx(sListenSocket, sAcceptSocket, lpOutputBuffer, dwReceiveDataLength, dwLocalAddressLength, dwRemoteAddressLength, lpdwBytesReceived, lpOverlapped) = 0
+extern ConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped) = 0
+extern TransmitFile(hSocket, hFile, nNumberOfBytesToWrite, nNumberOfBytesPerSend, lpOverlapped, lpTransmitBuffers, dwFlags) = 0
+extern WSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine) = 0
+extern WSASend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpOverlapped, lpCompletionRoutine) = 0
+extern WSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags) = 0
+extern socket(af, type, protocol) = null
+extern closesocket(s) = 0
+extern bind(s, name, namelen) = 0
+extern listen(s, backlog) = 0
+extern setsockopt(s, level, optname, optval, optlen) = 0
+extern getsockopt(s, level, optname, optval, optlen) = 0
+extern getsockname(s, name, namelen) = 0
+extern getpeername(s, name, namelen) = 0
+extern htonl(hostlong)  = 0u32
+extern htons(hostshort) = 0u16
+extern ntohl(netlong) = 0u32
+extern ntohs(netshort) = 0u16
+extern getaddrinfo(pNodeName, pServiceName, pHints, ppResult) = 0
+extern freeaddrinfo(pAddrInfo) = void
+extern WSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer, 
+                lpcbBytesReturned, lpOverlapped, lpCompletionRoutine) = 0
+//-------------------------------------------------------------------------------
+// Ip addresses.
+//-------------------------------------------------------------------------------
+struct SOCKADDR {
+  readonly sa_family = 0u16
+  readonly sa_data = Char[ 14 ]
+}
+struct SOCKET_ADDRESS {
+  readonly lpSockaddr = SOCKADDR*{}
+  readonly iSockaddrLength = 0
+}
+struct IP_ADAPTER_UNICAST_ADDRESS {
+  readonly Length = 0u32
+  readonly Flags = 0u32
+  readonly Next = IP_ADAPTER_UNICAST_ADDRESS*{}
+  readonly Address = SOCKET_ADDRESS{}
+  readonly PrefixOrigin = 0
+  readonly SuffixOrigin = 0
+  readonly DadState = 0
+  readonly ValidLifetime = 0u32
+  readonly PreferredLifetime = 0u32
+  readonly LeaseLifetime = 0u32
+  readonly OnLinkPrefixLength = 0u8
+}
+struct IP_ADAPTER_ADDRESS {
+  readonly Length = 0u32
+  readonly Flags = 0u32
+  readonly Next = IP_ADAPTER_ADDRESS*{}
+  readonly Address = SOCKET_ADDRESS{}
+}
+struct IP_ADAPTER_PREFIX {
+  readonly Length = 0u32
+  readonly Flags = 0u32
+  readonly Next = IP_ADAPTER_PREFIX*{}
+  readonly Address = SOCKET_ADDRESS{}
+  readonly PrefixLength = 0u32
+}
+struct IP_ADAPTER_DNS_SUFFIX {
+  readonly Next = IP_ADAPTER_DNS_SUFFIX*{}
+  readonly String = WChar[ MAX_DNS_SUFFIX_STRING_LENGTH ]
+}
+struct IP_ADAPTER_ADDRESSES {
+  readonly Length = 0u32
+  readonly IfIndex = 0u32
+  readonly Next = IP_ADAPTER_ADDRESSES*{}
+  readonly AdapterName = Char*{}
+  readonly FirstUnicastAddress = IP_ADAPTER_UNICAST_ADDRESS*{}
+  readonly FirstAnycastAddress = IP_ADAPTER_ADDRESS*{}
+  readonly FirstMulticastAddress = IP_ADAPTER_ADDRESS*{}
+  readonly FirstDnsServerAddress = IP_ADAPTER_ADDRESS*{}
+  readonly DnsSuffix = WChar*{}
+  readonly Description = WChar*{}
+  readonly FriendlyName = WChar*{}
+  readonly PhysicalAddress = Byte[ MAX_ADAPTER_ADDRESS_LENGTH ]
+  readonly PhysicalAddressLength = 0u32
+  readonly Flags = 0u32
+  readonly Mtu = 0u32
+  readonly IfType = 0u32
+  readonly OperStatus = 0u32
+  readonly Ipv6IfIndex = 0u32
+  readonly ZoneIndices = UInt32[ 16 ]
+  readonly FirstPrefix = IP_ADAPTER_PREFIX*{}
+  readonly TransmitLinkSpeed = 0u64
+  readonly ReceiveLinkSpeed = 0u64
+  readonly FirstWinsServerAddress = IP_ADAPTER_ADDRESS*{}
+  readonly FirstGatewayAddress = IP_ADAPTER_ADDRESS*{}
+  readonly Ipv4Metric = 0u32
+  readonly Ipv6Metric = 0u32
+  readonly Luid = 0u64
+  readonly Dhcpv4Server = SOCKET_ADDRESS{}
+  readonly CompartmentId = 0u32
+  readonly NetworkGuid = GUID{}
+  readonly ConnectionType = 0u32
+  readonly TUNNEL_TYPE = 0u32
+  readonly Dhcpv6Server = SOCKET_ADDRESS{}
+  readonly Dhcpv6ClientDuid = Byte[ MAX_DHCPV6_DUID_LENGTH ]
+  readonly Dhcpv6ClientDuidLength = 0u32
+  readonly Dhcpv6Iaid = 0u32
+  readonly FirstDnsSuffix = IP_ADAPTER_DNS_SUFFIX*{}
+}
+extern GetAdaptersAddresses(Family, Flags, Reserved, AdapterAddresses, SizePointer) = 0u32
+
+//-------------------------------------------------------------------------------
+// Stringapiset.h.
+//-------------------------------------------------------------------------------
+extern WideCharToMultiByte(CodePage, dwFlags, lpWideCharStr, cchWideChar, lpMultiByteStr, cbMultiByte, lpDefaultChar, lpUsedDefaultChar) = 0
+extern MultiByteToWideChar(CodePage, dwFlags, lpMultiByteStr, cbMultiByte, lpWideCharStr, cchWideChar) = 0
+
+//-------------------------------------------------------------------------------
+// The registry.
+//-------------------------------------------------------------------------------
+define HKEY_CLASSES_ROOT                   Void*{ 0x80000000 }
+define HKEY_CURRENT_USER                   Void*{ 0x80000001 }
+define HKEY_LOCAL_MACHINE                  Void*{ 0x80000002 }
+define HKEY_USERS                          Void*{ 0x80000003 }
+define HKEY_PERFORMANCE_DATA               Void*{ 0x80000004 }
+define HKEY_PERFORMANCE_TEXT               Void*{ 0x80000050 }
+define HKEY_PERFORMANCE_NLSTEXT            Void*{ 0x80000060 }
+define HKEY_CURRENT_CONFIG                 Void*{ 0x80000005 }
+define HKEY_DYN_DATA                       Void*{ 0x80000006 }
+define HKEY_CURRENT_USER_LOCAL_SETTINGS    Void*{ 0x80000007 }
+
+define KEY_ALL_ACCESS          0xF003F
+define KEY_ENUMERATE_SUB_KEYS  0x0008
+define KEY_QUERY_VALUE         0x0001
+define KEY_READ                0x20019
+
+extern RegOpenKeyExA(hKey, lpSubKey, ulOptions, samDesired, phkResult) = 0
+extern RegCloseKey(hKey) = 0
+extern RegQueryInfoKeyA(hKey, lpClass, lpcClass, lpReserved, lpcSubKeys, lpcMaxSubKeyLen, lpcMaxClassLen, lpcValues,
+                        lpcMaxValueNameLen, lpcMaxValueLen, lpcbSecurityDescriptor, lpftLastWriteTime) = 0
+extern RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved, lpClass, lpcClass, lpftLastWriteTime) = 0
+extern RegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, lpType, lpData, lpcbData) = 0
+extern RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData) = 0
+extern RegGetValueA(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData) = 0
+
+//-------------------------------------------------------------------------------
+// Crypto.
+//-------------------------------------------------------------------------------
+extern BCryptOpenAlgorithmProvider(phAlgorithm, pszAlgId, pszImplementation, dwFlags) = 0
+extern BCryptCloseAlgorithmProvider(hAlgorithm, dwFlags) = 0
+extern BCryptGenRandom(hAlgorithm, pbBuffer, cbBuffer, dwFlags) = 0
+
+//-------------------------------------------------------------------------------
+// DbgHelp.
+//-------------------------------------------------------------------------------
+extern SymFunctionTableAccess64(hProcess, AddrBase) = null
+extern SymGetModuleBase64(hProcess, qwAddr) = 0u64
+
+
+//-------------------------------------------------------------------------------
+// SQLite.
+//-------------------------------------------------------------------------------
+define SQLITE_OPEN_READONLY         0x00000001  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_READWRITE        0x00000002  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_CREATE           0x00000004  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_DELETEONCLOSE    0x00000008  /* VFS only */
+define SQLITE_OPEN_EXCLUSIVE        0x00000010  /* VFS only */
+define SQLITE_OPEN_AUTOPROXY        0x00000020  /* VFS only */
+define SQLITE_OPEN_URI              0x00000040  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_MEMORY           0x00000080  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_MAIN_DB          0x00000100  /* VFS only */
+define SQLITE_OPEN_TEMP_DB          0x00000200  /* VFS only */
+define SQLITE_OPEN_TRANSIENT_DB     0x00000400  /* VFS only */
+define SQLITE_OPEN_MAIN_JOURNAL     0x00000800  /* VFS only */
+define SQLITE_OPEN_TEMP_JOURNAL     0x00001000  /* VFS only */
+define SQLITE_OPEN_SUBJOURNAL       0x00002000  /* VFS only */
+define SQLITE_OPEN_MASTER_JOURNAL   0x00004000  /* VFS only */
+define SQLITE_OPEN_NOMUTEX          0x00008000  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_FULLMUTEX        0x00010000  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_SHAREDCACHE      0x00020000  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_PRIVATECACHE     0x00040000  /* Ok for sqlite3_open_v2() */
+define SQLITE_OPEN_WAL              0x00080000  /* VFS only */
+
+define SQLITE_OK           0   /* Successful result */
+/* beginning-of-error-codes */
+define SQLITE_ERROR        1   /* Generic error */
+define SQLITE_INTERNAL     2   /* Internal logic error in SQLite */
+define SQLITE_PERM         3   /* Access permission denied */
+define SQLITE_ABORT        4   /* Callback routine requested an abort */
+define SQLITE_BUSY         5   /* The database file is locked */
+define SQLITE_LOCKED       6   /* A table in the database is locked */
+define SQLITE_NOMEM        7   /* A malloc() failed */
+define SQLITE_READONLY     8   /* Attempt to write a readonly database */
+define SQLITE_INTERRUPT    9   /* Operation terminated by sqlite3_interrupt()*/
+define SQLITE_IOERR       10   /* Some kind of disk I/O error occurred */
+define SQLITE_CORRUPT     11   /* The database disk image is malformed */
+define SQLITE_NOTFOUND    12   /* Unknown opcode in sqlite3_file_control() */
+define SQLITE_FULL        13   /* Insertion failed because database is full */
+define SQLITE_CANTOPEN    14   /* Unable to open the database file */
+define SQLITE_PROTOCOL    15   /* Database lock protocol error */
+define SQLITE_EMPTY       16   /* Internal use only */
+define SQLITE_SCHEMA      17   /* The database schema changed */
+define SQLITE_TOOBIG      18   /* String or BLOB exceeds size limit */
+define SQLITE_CONSTRAINT  19   /* Abort due to constraint violation */
+define SQLITE_MISMATCH    20   /* Data type mismatch */
+define SQLITE_MISUSE      21   /* Library used incorrectly */
+define SQLITE_NOLFS       22   /* Uses OS features not supported on host */
+define SQLITE_AUTH        23   /* Authorization denied */
+define SQLITE_FORMAT      24   /* Not used */
+define SQLITE_RANGE       25   /* 2nd parameter to sqlite3_bind out of range */
+define SQLITE_NOTADB      26   /* File opened that is not a database file */
+define SQLITE_NOTICE      27   /* Notifications from sqlite3_log() */
+define SQLITE_WARNING     28   /* Warnings from sqlite3_log() */
+define SQLITE_ROW         100  /* sqlite3_step() has another row ready */
+define SQLITE_DONE        101  /* sqlite3_step() has finished executing */
+
+/*define SQLITE_INTEGER  1
+define SQLITE_FLOAT    2
+define SQLITE_TEXT     3
+define SQLITE_BLOB     4
+define SQLITE_NULL     5*/
+
+extern sqlite3_open_v2(filename, ppDb, flags, zVfs) = 0
+extern sqlite3_close_v2(db) = 0
+extern sqlite3_errcode(db) = 0
+extern sqlite3_errmsg(db) = Char*{}
+extern sqlite3_errstr(code) = Char*{}
+extern sqlite3_db_filename(db, zDbName) = Char*{}
+extern sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail) = 0
+extern sqlite3_step(pStmt) = 0
+extern sqlite3_finalize(pStmt) = 0
+extern sqlite3_column_count(pStmt) = 0
+extern sqlite3_column_name(pStmt, iCol) = Char*{}
+extern sqlite3_column_type(pStmt, iCol) = 0
+extern sqlite3_column_int64(pStmt, iCol) = Int64{}
+extern sqlite3_column_double(pStmt, iCol) = Double{}
+extern sqlite3_column_text(pStmt, iCol) = Char*{}
+extern sqlite3_column_blob(pStmt, iCol) = Byte*{}
+extern sqlite3_column_bytes(pStmt, iCol) = 0
+extern sqlite3_exec(db, pSql, cb, cbArg, errMsg) = 0
+extern sqlite3_last_insert_rowid(db) = 0i64
+extern sqlite3_changes(db) = 0
+
+//-------------------------------------------------------------------------------
+// Constants.
+//-------------------------------------------------------------------------------
+define S_OK                       0
+define SIZEOF_POINTER             8
+define NULL                       Void*{}
+define INVALID_HANDLE_VALUE       Void*{-1}
+define INVALID_SOCKET             Void*{-1}
+define FALSE                      0
+define TRUE                       1
+define MAXIMUM_WAIT_OBJECTS       64
+define INFINITE_TIMEOUT           0xFFFFFFFF
+define WAIT_OBJECT_0              0
+define WAIT_TIMEOUT               258
+define MAX_PATH                   260
+define MAX_FILE_PATH              0x200 // 512 characters
+define MAX_PORT_NUMBER            0xFFFF
+define MAX_ADAPTER_ADDRESS_LENGTH 8
+define MAX_DHCPV6_DUID_LENGTH     130
+define MAX_DNS_SUFFIX_STRING_LENGTH 256
+
+define INVALID_FILE_ATTRIBUTES    0xFFFFFFFF
+define FILE_ATTRIBUTE_DIRECTORY   0x00000010
+define FILE_ATTRIBUTE_NORMAL      0x00000080
+define FILE_ATTRIBUTE_TEMPORARY   0x00000100
+
+define FILE_FLAG_WRITE_THROUGH       0x80000000
+define FILE_FLAG_OVERLAPPED          0x40000000
+define FILE_FLAG_NO_BUFFERING        0x20000000
+define FILE_FLAG_RANDOM_ACCESS       0x10000000
+define FILE_FLAG_SEQUENTIAL_SCAN     0x08000000
+define FILE_FLAG_DELETE_ON_CLOSE     0x04000000
+define FILE_FLAG_BACKUP_SEMANTICS    0x02000000
+define FILE_FLAG_POSIX_SEMANTICS     0x01000000
+define FILE_FLAG_SESSION_AWARE       0x00800000
+define FILE_FLAG_OPEN_REPARSE_POINT  0x00200000
+define FILE_FLAG_OPEN_NO_RECALL      0x00100000
+define FILE_FLAG_FIRST_PIPE_INSTANCE 0x00080000
+
+define FILE_BEGIN                 0
+define FILE_CURRENT               1
+define FILE_END                   2
+
+define GENERIC_READ               0x80000000
+define GENERIC_WRITE              0x40000000
+define GENERIC_READ_WRITE         GENERIC_READ | GENERIC_WRITE
+
+define FILE_SHARE_NONE            0x00000000
+define FILE_SHARE_READ            0x00000001
+define FILE_SHARE_WRITE           0x00000002
+define FILE_SHARE_DELETE          0x00000004
+define FILE_SHARE_READ_WRITE      FILE_SHARE_READ | FILE_SHARE_WRITE
+define FILE_SHARE_ALL             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+define CREATE_NEW                 1
+define CREATE_ALWAYS              2
+define OPEN_EXISTING              3
+define OPEN_ALWAYS                4
+define TRUNCATE_EXISTING          5
+
+define GetFileExInfoStandard      0
+
+define FILE_MAP_WRITE             0x0002
+define FILE_MAP_READ              0x0004
+
+define AF_UNSPEC                  0
+define AF_INET                    2
+define AF_INET6                   23
+
+define SOCK_STREAM                1
+define SOCK_DGRAM                 2
+
+define IPPROTO_TCP                6
+define IPPROTO_UDP                17
+
+define WSADESCRIPTION_LEN         256
+define WSASYS_STATUS_LEN          128
+
+define WSA_FLAG_OVERLAPPED        1
+
+define SOL_SOCKET                 0xffff
+define IPPROTO_IPV6               41
+define IPV6_V6ONLY                27
+
+define SOMAXCONN                  0x7fffffff
+define SO_UPDATE_ACCEPT_CONTEXT   0x700B
+define SO_UPDATE_CONNECT_CONTEXT  0x7010
+
+define SIO_GET_EXTENSION_FUNCTION_POINTER 3355443206
+
+define STATUS_CLOSED              false
+define STATUS_OPEN                true
+
+define CP_UTF8                    65001
+
+define TF_USE_DEFAULT_WORKER      0x00
+define TF_DISCONNECT              0x01
+define TF_REUSE_SOCKET            0x02
+define TF_WRITE_BEHIND            0x04
+define TF_USE_SYSTEM_THREAD       0x10
+define TF_USE_KERNEL_APC          0x20
+
+define BCRYPT_RSA_ALGORITHM                    w"RSA"
+define BCRYPT_RSA_SIGN_ALGORITHM               w"RSA_SIGN"
+define BCRYPT_DH_ALGORITHM                     w"DH"
+define BCRYPT_DSA_ALGORITHM                    w"DSA"
+define BCRYPT_RC2_ALGORITHM                    w"RC2"
+define BCRYPT_RC4_ALGORITHM                    w"RC4"
+define BCRYPT_AES_ALGORITHM                    w"AES"
+define BCRYPT_DES_ALGORITHM                    w"DES"
+define BCRYPT_DESX_ALGORITHM                   w"DESX"
+define BCRYPT_3DES_ALGORITHM                   w"3DES"
+define BCRYPT_3DES_112_ALGORITHM               w"3DES_112"
+define BCRYPT_MD2_ALGORITHM                    w"MD2"
+define BCRYPT_MD4_ALGORITHM                    w"MD4"
+define BCRYPT_MD5_ALGORITHM                    w"MD5"
+define BCRYPT_SHA1_ALGORITHM                   w"SHA1"
+define BCRYPT_SHA256_ALGORITHM                 w"SHA256"
+define BCRYPT_SHA384_ALGORITHM                 w"SHA384"
+define BCRYPT_SHA512_ALGORITHM                 w"SHA512"
+define BCRYPT_AES_GMAC_ALGORITHM               w"AES-GMAC"
+define BCRYPT_AES_CMAC_ALGORITHM               w"AES-CMAC"
+define BCRYPT_ECDSA_P256_ALGORITHM             w"ECDSA_P256"
+define BCRYPT_ECDSA_P384_ALGORITHM             w"ECDSA_P384"
+define BCRYPT_ECDSA_P521_ALGORITHM             w"ECDSA_P521"
+define BCRYPT_ECDH_P256_ALGORITHM              w"ECDH_P256"
+define BCRYPT_ECDH_P384_ALGORITHM              w"ECDH_P384"
+define BCRYPT_ECDH_P521_ALGORITHM              w"ECDH_P521"
+define BCRYPT_RNG_ALGORITHM                    w"RNG"
+define BCRYPT_RNG_FIPS186_DSA_ALGORITHM        w"FIPS186DSARNG"
+define BCRYPT_RNG_DUAL_EC_ALGORITHM            w"DUALECRNG"
+define BCRYPT_SP800108_CTR_HMAC_ALGORITHM      w"SP800_108_CTR_HMAC"
+define BCRYPT_SP80056A_CONCAT_ALGORITHM        w"SP800_56A_CONCAT"
+define BCRYPT_PBKDF2_ALGORITHM                 w"PBKDF2"
+define BCRYPT_CAPI_KDF_ALGORITHM               w"CAPI_KDF"
+
+define GAA_FLAG_SKIP_UNICAST        0x0001
+define GAA_FLAG_SKIP_ANYCAST        0x0002
+define GAA_FLAG_SKIP_MULTICAST      0x0004
+define GAA_FLAG_SKIP_DNS_SERVER     0x0008
+define GAA_FLAG_INCLUDE_PREFIX      0x0010
+define GAA_FLAG_SKIP_FRIENDLY_NAME  0x0020
+define GAA_FLAG_INCLUDE_WINS_INFO   0x0040
+define GAA_FLAG_INCLUDE_GATEWAYS    0x0080
+define GAA_FLAG_INCLUDE_ALL_INTERFACES      0x0100
+define GAA_FLAG_INCLUDE_ALL_COMPARTMENTS    0x0200
+define GAA_FLAG_INCLUDE_TUNNEL_BINDINGORDER 0x0400
+
+define REG_NONE                    0 // No value type
+define REG_SZ                      1 // Unicode nul terminated string
+define REG_EXPAND_SZ               2 // Unicode nul terminated string 
+define REG_BINARY                  3 // Free form binary
+define REG_DWORD                   4 // 32-bit number
+define REG_DWORD_LITTLE_ENDIAN     4 // 32-bit number (same as REG_DWORD)
+define REG_DWORD_BIG_ENDIAN        5 // 32-bit number
+define REG_LINK                    6 // Symbolic Link (unicode)
+define REG_MULTI_SZ                7 // Multiple Unicode strings
+define REG_RESOURCE_LIST           8 // Resource list in the resource map
+define REG_FL_RESOURCE_DESCRIPTOR  9 // Resource list in the hardware description
+define REG_RESOURCE_REQUIREMENTS_LIST 10
+define REG_QWORD                   11 // 64-bit number
+define REG_QWORD_LITTLE_ENDIAN     11 // 64-bit number (same as REG_QWORD)
+
+//-------------------------------------------------------------------------------
+// Error codes.
+//-------------------------------------------------------------------------------
+define SOCKET_ERROR                 -1
+
+define ERROR_NO_MORE_FILES          18
+define ERROR_BUFFER_OVERFLOW        111
+define ERROR_INSUFFICIENT_BUFFER    122
+define ERROR_ALREADY_EXISTS         183
+define ERROR_MORE_DATA              234
+define ERROR_IO_INCOMPLETE          996
+define ERROR_IO_PENDING             997
+define ERROR_TIMEOUT                1460
+define WSAECONNRESET                10054
+define WSAESHUTDOWN                 10058

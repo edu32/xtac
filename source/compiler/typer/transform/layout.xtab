@@ -1,0 +1,450 @@
+fn run(context, symbol) {
+  auto pass = Layout{ typer = context.typer }
+  pass.layoutSymbol(symbol)
+  pass.layoutPointees()
+  context.update(pass)
+}
+
+
+struct SharedFields {
+  const list = List(ast.Symbol*){}
+
+  fn dispose(this) {
+    delete this.list
+  }
+}
+
+
+struct SharedList {
+  const fields = List(SharedFields){}
+
+  fn dispose(this) {
+    delete this.fields with fn(x) = delete x
+  }
+
+  fn append(this, symbol) {
+    if this.fields.isEmpty() {
+      this.fields.append(SharedFields{})
+    }
+    const field = symbol.instance as ast.Field*
+    assert field.sharedIndex with field.name
+    for field.sharedIndex >= this.fields.length {
+      this.fields.append(SharedFields{})
+    }
+    this.fields.items[field.sharedIndex].list.append(symbol)
+  }
+}
+
+
+struct Layout {
+  const          typer = Typer&{}
+  const          stack = List(ast.Symbol*){}
+  const       pointees = Dict(ast.Symbol*){}
+  readonly     folders = 0
+  readonly       files = 0
+  readonly    builtins = 0
+  readonly     structs = 0
+  readonly      unions = 0
+  readonly       enums = 0
+  readonly   functions = 0
+  readonly      arrays = 0
+  readonly     objects = 0
+  readonly fixedArrays = 0
+
+
+  fn dispose(this) {
+    delete this.stack
+    delete this.pointees
+  }
+
+
+  fn layoutPointees(this) {
+    for item in this.pointees {
+      this.layoutSymbol(item.value)
+    }
+  }
+
+
+  fn layoutType(this, pos, type): (Int32, Int32) {
+    if const ptr = type.isIndirect() {
+      if const symbol = getSymbolOfPointer(ptr) {
+        if this.pointees.indexOf(symbol) < 0 {
+          this.pointees.append(symbol, symbol)
+        }
+      }
+      fn getSymbolOfPointer(ptr): ast.Symbol* {
+        if const ptr2 = ptr.pointee.isIndirect() {
+          return getSymbolOfPointer(ptr2)
+        }
+        return ptr.pointee.isaSymbol()
+      }
+      return (/* size = */ SIZE_OF_POINTER, /* alignment = */ SIZE_OF_POINTER)
+    }
+
+    if const symbol = type.isaSymbol() {
+      if !symbol.instance {
+        symbol.beginLayout() 
+        this.cberr(pos, symbol) with {
+          println("unexpected template type during layout\r\n\t\
+            → found: #{nameof(it.template)}: #{it.type()}")
+        }
+        symbol.finishLayout()
+        return (/* size = */ 0, /* alignment = */ 0)
+      }
+      return this.layoutSymbol(symbol)
+    } 
+
+    if const size = type.size() {
+      assert type.isaBuiltin() || type.isIndirect()
+      return (/* size = */ size, /* alignment = */ size)
+    }
+
+    if type.isNotVoid() {
+      this.cberr(pos, type) with {
+        println("cannot compute layout for #{it}")
+      }
+    }
+
+    return (/* size = */ 0, /* alignment = */ 0)
+  }
+
+
+  fn layoutSymbol(this, symbol): (Int32, Int32) {
+    if this.canLayoutSymbol(symbol) {
+      const instance = symbol.instance
+      switch instance {
+        case ast.Folder     this.layoutFolder(symbol)
+        case ast.File       this.layoutFile(symbol)
+        case ast.Builtin    this.layoutBuiltin(symbol)
+        case ast.Struct     this.layoutStruct(symbol)
+        case ast.Union      this.layoutUnion(symbol)
+        case ast.Enum       this.layoutEnum(symbol)
+        case ast.Function   this.layoutFunction(symbol)
+        case ast.Import     this.layoutImport(symbol)
+        case ast.Define     this.layoutDefine(symbol)
+
+        case ast.Local      this.layoutVariable(symbol)
+        case ast.Parameter  this.layoutVariable(symbol)
+        case ast.Field      this.layoutVariable(symbol)
+        case ast.Global     this.layoutVariable(symbol)
+
+        case ast.Array      this.layoutArray(symbol)
+        case ast.Object     this.layoutObject(symbol)
+        case ast.FixedArray this.layoutFixedArray(symbol)
+
+        default this.cberr(symbol.instance.pos, symbol.instance) with {
+          println("unknown symbol instance\r\n\t\
+            → #{nameof(it)}: #{it.type}")
+        }
+      }
+    }
+    return (symbol.size, symbol.alignment)
+  }
+
+  fn canLayoutSymbol(this, symbol) {
+    return false if !symbol
+
+    return false if symbol.layoutStatus.isDone()
+
+    if symbol.layoutStatus.isBusy() {
+      if const instance = symbol.instance {
+        this.cberr(instance.pos, instance) with {
+          println("cyclic redundancy on #{nameof(it)}")
+        }
+      } else if const template = symbol.template {
+        this.cberr(template.pos, template) with {
+          println("cyclic redundancy on #{nameof(it)}")
+        }
+      } else {
+        assert 0
+      }
+      return false
+    }
+
+    return true
+  }
+
+
+  fn layoutFolder(this, symbol) {
+    const instance = symbol.instance as ast.Folder*
+
+    symbol.beginLayout()    
+    symbol.finishLayout()
+
+    ++this.folders
+  }
+
+
+  fn layoutFile(this, symbol) {
+    const instance = symbol.instance as ast.File*
+
+    symbol.beginLayout()    
+    symbol.finishLayout()
+
+    ++this.files
+  }
+
+
+  fn layoutBuiltin(this, symbol) {
+    const instance = symbol.instance as ast.Builtin*
+
+    symbol.beginLayout()
+
+    (symbol.size, symbol.alignment) = this.layoutType(instance.pos, instance.type)
+
+    symbol.finishLayout()
+
+    ++this.builtins
+  }
+
+
+  fn layoutStruct(this, symbol) {
+    const instance = symbol.instance as ast.Struct*
+    const template = symbol.template is src.Struct
+
+    assert template
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    this.layoutFields(symbol, instance.scope, template.alignment)
+    
+    this.stack.removeLast()
+    symbol.finishLayout()
+
+    ++this.structs
+  }
+
+
+  fn layoutUnion(this, symbol) {
+    const instance = symbol.instance as ast.Union*
+    const template = symbol.template is src.Union
+
+    assert template
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    symbol.alignment = template.alignment
+
+    var hasNoFixedAlignment = symbol.alignment == 0
+
+    for item in instance.scope.symbols {
+      const fieldSymbol = item.value
+      if const field = fieldSymbol.instance is ast.Field {
+        assert !fieldSymbol.replacedBy && !field.sharedIndex
+        const (fieldSize, fieldAlignment) = this.layoutSymbol(fieldSymbol)
+             symbol.size = math.max(fieldSize, symbol.size)
+        if hasNoFixedAlignment {
+          symbol.alignment = math.max(symbol.alignment, fieldAlignment)
+        }
+      }
+    }
+
+    symbol.size += computePadding(symbol.size, symbol.alignment)
+    
+    this.stack.removeLast()
+    symbol.finishLayout()
+
+    ++this.unions
+  }
+
+
+  fn layoutEnum(this, symbol) {
+    const instance = symbol.instance as ast.Enum*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    (symbol.size, symbol.alignment) = this.layoutType(instance.pos, instance.valueType)
+    
+    this.stack.removeLast()
+    symbol.finishLayout()
+
+    ++this.enums
+  }
+
+
+  fn layoutFunction(this, symbol) {
+    const instance = symbol.instance as ast.Function*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+    
+    (symbol.size, symbol.alignment) = (SIZE_OF_POINTER, SIZE_OF_POINTER)
+    
+    this.stack.removeLast()
+    symbol.finishLayout()
+
+    this.layoutType(instance.pos, instance.fnreturn)
+
+    ++this.functions
+  }
+
+
+  fn layoutArray(this, symbol) {
+    const instance = symbol.instance as ast.Array*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    (symbol.size, symbol.alignment) = this.layoutType(instance.pos, instance.element())
+    symbol.size *= instance.children.length
+    
+    this.stack.removeLast()
+    symbol.finishLayout()
+
+    ++this.arrays
+  }
+
+
+  fn layoutObject(this, symbol) {
+    const instance = symbol.instance as ast.Object*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    if instance.kind == instance.Kind.Generator {
+      this.layoutGeneratorFields(symbol, instance.scope)
+    } else {
+      this.layoutFields(symbol, instance.scope, alignment = 0)
+    }
+    
+    this.stack.removeLast()
+    symbol.finishLayout()
+
+    ++this.objects
+  }
+
+
+  fn layoutFixedArray(this, symbol) {
+    const instance = symbol.instance as ast.FixedArray*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    (symbol.size, symbol.alignment) = this.layoutType(instance.pos, instance.element)
+    symbol.size *= instance.length
+    
+    this.stack.removeLast()
+    symbol.finishLayout()
+
+    ++this.fixedArrays
+  }
+
+
+  fn layoutImport(this, symbol) {
+    const instance = symbol.instance as ast.Import*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    this.layoutSymbol(instance.resolved)
+
+    this.stack.removeLast()    
+    symbol.finishLayout()
+  }
+
+
+  fn layoutDefine(this, symbol) {
+    const instance = symbol.instance as ast.Define*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    (symbol.size, symbol.alignment) = this.layoutType(instance.pos, instance.type)
+
+    this.stack.removeLast()    
+    symbol.finishLayout()
+  }
+
+
+  fn layoutVariable(this, symbol) {
+    const instance = symbol.instance as ast.Variable*
+
+    symbol.beginLayout()
+    this.stack.append(symbol)
+
+    (symbol.size, symbol.alignment) = this.layoutType(instance.pos, instance.type)
+
+    this.stack.removeLast()
+    symbol.finishLayout()
+  }
+
+
+  fn layoutGeneratorFields(this, object, scope) {
+    const list = SharedList{}
+
+    for item in scope.symbols {
+      list.append(item.value)
+    }
+
+    for fields in list.fields {
+      continue if fields.list.isEmpty()
+
+      for symbol in fields.list {
+        this.layoutSymbol(symbol)
+      }
+    }
+
+    for fields in list.fields {
+      continue if fields.list.isEmpty()
+
+      var   maxPadding = 0
+      var      maxSize = 0
+      var maxAlignment = 0
+      for symbol in fields.list {
+        const currentPadding = computePadding(object.size, symbol.alignment)
+                  maxPadding = math.max(maxPadding, currentPadding)
+                     maxSize = math.max(maxSize, symbol.size)
+                maxAlignment = math.max(maxAlignment, symbol.alignment)
+      }
+
+      object.size += maxPadding
+
+      for symbol in fields.list {
+        symbol.offset = object.size
+      }
+
+      object.size += maxSize
+
+      object.alignment = math.max(object.alignment, maxAlignment)
+    }
+
+    object.size += computePadding(object.size, object.alignment) // Padding after struct
+
+    delete list
+  }
+
+
+  fn layoutFields(this, object, scope, alignment) {
+    object.alignment = alignment
+    const hasNoFixedAlignment = alignment == 0
+    for item in scope.symbols {      
+      const   symbol = item.value
+      if const field = symbol.instance is ast.Field {
+        assert !symbol.replacedBy && !field.sharedIndex
+        const (fieldSize, fieldAlignment) = this.layoutSymbol(symbol)
+            object.size += computePadding(object.size, fieldAlignment) // Padding before field
+           symbol.offset = object.size
+            object.size += fieldSize
+        if hasNoFixedAlignment {
+          object.alignment = math.max(object.alignment, fieldAlignment)
+        }
+      }
+    }
+    object.size += computePadding(object.size, object.alignment) // Padding after struct
+  }
+
+
+  fn cberr(this, pos, ctx, cb) {
+    this.typer.cberr(pos, ctx, cb)
+    this.typer.printLayoutSite(this.stack)
+  }
+
+
+  fn cbinfo(this, pos, ctx, cb) {
+    this.typer.cbinfo(pos, ctx, cb)
+    this.typer.printLayoutSite(this.stack)
+  }
+}

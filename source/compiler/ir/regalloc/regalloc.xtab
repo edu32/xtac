@@ -1,0 +1,523 @@
+export Register from ssa
+export  RegKind from ssa
+export    Scale from ssa
+
+fn run(ctx) {
+  import worker
+
+  gprs.initialize()
+  xmms.initialize()
+
+  const provider = worker.BatchProvider{ program = ctx.ssa }
+  const    start = time.clock()
+  auto generator = provider.functions()
+  const  context = {
+             srw = atomic.ExclusiveLock{}, 
+       generator = generator,
+             ids = ctx.ids,
+    singleThread = true
+  }
+  threads.run(context) with {
+    auto batch = List(ssa.Function*){}
+    for it.generator.fill(batch) {
+      for function in batch {
+        import Allocator from allocator
+        auto pass = Allocator{ function = function }
+        pass.run(it)
+      }
+    }
+  }
+
+  const elapsed = time.elapsed(start)
+  println("#{'regalloc'}#[%<darkblue|cyan>]: {\r\n\
+    #{'purpose'}#[%wl12]: #{'allocates registers'}#[%<darkyellow>],\r\n\
+    #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+    #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+    #{'memory'}#[%wl12]: #{memory.mformat()} }")
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+struct Gprs {
+  readonly rax = Register{}
+  readonly rcx = Register{}
+  readonly rdx = Register{}
+  readonly rbx = Register{}
+  readonly rsp = Register{}
+  readonly rbp = Register{}
+  readonly rsi = Register{}
+  readonly rdi = Register{}
+  readonly  r8 = Register{}
+  readonly  r9 = Register{}
+  readonly r10 = Register{}
+  readonly r11 = Register{}
+  readonly r12 = Register{}
+  readonly r13 = Register{}
+  readonly r14 = Register{}
+  readonly r15 = Register{}
+
+  fn initialize(this) {
+    // Volatile     = rax, rcx, rdx,  r8,  r9, r10, r11
+    // Non volatile = rbx, rsp, rbp, rsi, rdi, r12, r13, r14, r15
+    // Preference   =   1    2    3    4    5    6    7    8    9   10   11   12   13   14,  15,   0
+    //                r11, r10,  r9,  r8, rdx, rcx, rax, rbx, rbp, r14, r13, r15, rdi, rsi, r12, rsp
+    //                 ^    ^                                                                     ^
+    //                scratch                                                                  reserved
+    this.rax.setGpr(name =  0, preference =  7, isVolatile = true)
+    this.rcx.setGpr(name =  1, preference =  6, isVolatile = true)
+    this.rdx.setGpr(name =  2, preference =  5, isVolatile = true)
+    this.rbx.setGpr(name =  3, preference =  8, isVolatile = false)
+    this.rsp.setGpr(name =  4, preference =  0, isVolatile = false)
+    this.rbp.setGpr(name =  5, preference =  9, isVolatile = false)
+    this.rsi.setGpr(name =  6, preference = 14, isVolatile = false)
+    this.rdi.setGpr(name =  7, preference = 13, isVolatile = false)
+     this.r8.setGpr(name =  8, preference =  4, isVolatile = true)
+     this.r9.setGpr(name =  9, preference =  3, isVolatile = true)
+    this.r10.setGpr(name = 10, preference =  2, isVolatile = true)
+    this.r11.setGpr(name = 11, preference =  1, isVolatile = true)
+    this.r12.setGpr(name = 12, preference = 15, isVolatile = false)
+    this.r13.setGpr(name = 13, preference = 11, isVolatile = false)
+    this.r14.setGpr(name = 14, preference = 10, isVolatile = false)
+    this.r15.setGpr(name = 15, preference = 12, isVolatile = false)
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+struct Xmms {
+  readonly  xmm0 = Register{}
+  readonly  xmm1 = Register{}
+  readonly  xmm2 = Register{}
+  readonly  xmm3 = Register{}
+  readonly  xmm4 = Register{}
+  readonly  xmm5 = Register{}
+  readonly  xmm6 = Register{}
+  readonly  xmm7 = Register{}
+  readonly  xmm8 = Register{}
+  readonly  xmm9 = Register{}
+  readonly xmm10 = Register{}
+  readonly xmm11 = Register{}
+  readonly xmm12 = Register{}
+  readonly xmm13 = Register{}
+  readonly xmm14 = Register{}
+  readonly xmm15 = Register{}
+
+  fn initialize(this) {
+    // Volatile     = xmm0, xmm1, xmm2, xmm3,  xmm4, xmm5
+    // Non volatile = xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, xmm14, xmm15
+    // Preference   =   1      2     3     4     5     6     7     8     9    10     11     12     13     14,    15     16
+    //                xmm5, xmm4, xmm3, xmm2, xmm1, xmm0, xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, xmm14, xmm15
+    //                 ^     ^
+    //                 scratch
+     this.xmm0.setXmm(name =  0, preference =  6, isVolatile = true)
+     this.xmm1.setXmm(name =  1, preference =  5, isVolatile = true)
+     this.xmm2.setXmm(name =  2, preference =  4, isVolatile = true)
+     this.xmm3.setXmm(name =  3, preference =  3, isVolatile = true)
+     this.xmm4.setXmm(name =  4, preference =  2, isVolatile = true)
+     this.xmm5.setXmm(name =  5, preference =  1, isVolatile = true)
+     this.xmm6.setXmm(name =  6, preference =  7, isVolatile = false)
+     this.xmm7.setXmm(name =  7, preference =  8, isVolatile = false)
+     this.xmm8.setXmm(name =  8, preference =  9, isVolatile = false)
+     this.xmm9.setXmm(name =  9, preference = 10, isVolatile = false)
+    this.xmm10.setXmm(name = 10, preference = 11, isVolatile = false)
+    this.xmm11.setXmm(name = 11, preference = 12, isVolatile = false)
+    this.xmm12.setXmm(name = 12, preference = 13, isVolatile = false)
+    this.xmm13.setXmm(name = 13, preference = 14, isVolatile = false)
+    this.xmm14.setXmm(name = 14, preference = 15, isVolatile = false)
+    this.xmm15.setXmm(name = 15, preference = 16, isVolatile = false)
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
+const gprs = Gprs{}
+const xmms = Xmms{}
+
+
+//---------------------------------------------------------------------------------------------------------
+enum SlotState { Limbo, Busy, Free }
+struct Slot {
+  var       qprev = Slot*{}, qnext = Slot*{}
+  const       reg = Register{}
+  readonly  range = UseRange*{}
+  readonly   hint = UseRange*{}
+  readonly   uses = 0
+  readonly  state = SlotState{}
+  var isPreserved = false
+
+
+  fn isNotPreserved(this) = !this.isPreserved
+  fn isFree(this)      = this.range == null
+  fn isBusy(this)      = this.range
+  fn isHinted(this)    = this.hint
+  fn isNotHinted(this) = !this.hint
+
+  fn isR12(this)    = this.reg == gprs.r12
+  fn isNotR12(this) = this.reg != gprs.r12
+
+  fn allocate(this, range) {
+    assert !this.range && range.slot == this
+    this.range = range
+    ++this.uses
+    assert this.state == SlotState.Limbo
+    this.state = SlotState.Busy
+  }
+
+  fn release(this, range) {
+    assert this.range && this.range == range && range.slot == this
+    this.range = null
+     this.hint = null
+    if const next = range.qnext {
+      assert next.isNotAllocated()
+      if next.isNotFixed() {
+        this.hint = next
+      }
+    }
+    assert this.state == SlotState.Busy
+    this.state = SlotState.Limbo
+  }
+
+  fn limbo2free(this) {
+    assert this.state == SlotState.Limbo
+    this.state = SlotState.Free
+  }
+
+  fn free2limbo(this) {
+    assert this.state == SlotState.Free
+    this.state = SlotState.Limbo
+  }
+}
+
+
+struct GprSlots {
+  const rax = Slot{}
+  const rcx = Slot{}
+  const rdx = Slot{}
+  const rbx = Slot{}
+  const rsp = Slot{}
+  const rbp = Slot{}
+  const rsi = Slot{}
+  const rdi = Slot{}
+  const  r8 = Slot{}
+  const  r9 = Slot{}
+  const r10 = Slot{}
+  const r11 = Slot{}
+  const r12 = Slot{}
+  const r13 = Slot{}
+  const r14 = Slot{}
+  const r15 = Slot{}
+}
+
+
+struct XmmSlots {
+  const  xmm0 = Slot{}
+  const  xmm1 = Slot{}
+  const  xmm2 = Slot{}
+  const  xmm3 = Slot{}
+  const  xmm4 = Slot{}
+  const  xmm5 = Slot{}
+  const  xmm6 = Slot{}
+  const  xmm7 = Slot{}
+  const  xmm8 = Slot{}
+  const  xmm9 = Slot{}
+  const xmm10 = Slot{}
+  const xmm11 = Slot{}
+  const xmm12 = Slot{}
+  const xmm13 = Slot{}
+  const xmm14 = Slot{}
+  const xmm15 = Slot{}
+}
+
+//---------------------------------------------------------------------------------------------------------
+struct UseRange {
+  var      qprev = UseRange*{}, qnext = UseRange*{}
+  var      xprev = UseRange*{}, xnext = UseRange*{}
+  const    owner = Definition*{}
+  var      start = Definition*{}
+  var        end = Definition*{}
+  var    isFixed = Slot*{}
+  readonly  slot = Slot*{}
+  readonly  hint = Slot*{}
+  var   avoidR12 = false
+  var   isActive = false
+  var   isaWrite = false
+  var isaMemoryOperand = false
+
+  fn isaRead(this)       = !this.isaWrite
+  fn isaHole(this)       = !this.isActive
+  fn length(this)        = Int32(this.end - this.start) + 1
+  fn regKind(this)       = RegKind.None if this.owner.value.type.isNotLoadable()       else
+                           RegKind.Xmm  if this.owner.value.type.isaRealOrPacked()     else
+                           RegKind.Gpr
+  fn isDefinition(this)  = this.isActive && this.start == this.owner
+  fn isNotFixed(this)    = !this.isFixed
+  fn isAllocated(this)   = this.slot
+  fn isNotAllocated(this)= !this.slot
+  fn isHinted(this)      = this.hint
+
+  fn isSplittable(this)  = !this.isActive && start < end
+  fn isSpillable(this)   = !this.isActive || this.owner.value is ssa.Phi
+  fn isNotSpillable(this)= this.isActive  && this.owner.value !is ssa.Phi
+
+  fn allocate(this, slot) {
+    assert !this.slot
+    assert !this.isFixed || this.isFixed == slot
+    this.slot = slot
+    slot.allocate(this)
+    if this.avoidR12 {
+      assert slot.isNotR12()
+    }
+  }
+
+  fn release(this) {
+    assert this.slot
+    this.slot.release(this)
+    if const hint = this.slot.hint {
+      assert hint == this.qnext
+      hint.hint = this.slot
+    }
+  }
+
+  fn invalidate(this) {
+    assert this.slot
+    this.slot.release(this)
+    this.slot = null
+  }
+}
+
+
+struct Definition {
+  var    qprev = Definition*{}, qnext = Definition*{}
+  const  value = ssa.Value*{}
+  const ranges = Queue(UseRange){}
+  const inputs = List(UseRange*){}
+  var    spill = ssa.Local*{}
+
+  fn dispose(this) {
+    delete this.ranges with fn(x) = delete x
+    delete this.inputs
+  }
+}
+
+
+struct UseRanges {
+  const ranges = Queue(UseRange)&{}
+  const  owner = Definition*{}
+
+
+  fn validate(this, top, pos) {
+    each range in this.ranges.iterator() {
+      assert range.start && range.end
+      assert range.start <= range.end
+      assert range.start.value && range.end.value
+      assert range.owner && range.owner == this.owner
+      if const prev = range.qprev {
+        assert prev.start && prev.end
+        assert prev.start <= prev.end
+        assert prev.start.value && prev.end.value
+        assert prev.owner && prev.owner == this.owner
+        assert prev.end.value.index + 1 == range.start.value.index
+      }
+      if const next = range.qnext {
+        assert next.start && next.end
+        assert next.start <= next.end with "top = #{top} #{next.start.value.index} < #{next.end.value.index}"
+        assert next.start.value && next.end.value
+        assert next.owner && next.owner == this.owner
+        assert range.end.value.index + 1 == next.start.value.index
+      }
+      if range.isActive {
+        assert range.start == range.end || range.owner.value is ssa.Phi
+      }
+    }
+  }
+
+
+  fn findContainingRange(this, pos) {
+    for var found = this.ranges.first; found; found = found.qnext {
+      if pos >= found.start && pos <= found.end {
+        return found
+      }
+    }
+    return null
+  }
+
+
+  fn split(this, range, pos) {
+    assert range.start < pos && range.end >= pos && range.isaHole()
+    const hole = this.makeHole(start = pos, end = range.end)
+    range.end = pos.qprev
+    this.ranges.insertAfter(hole, range)
+    return hole
+  }
+
+
+  fn insertActive(this, range, pos, fixed, isaWrite, avoidR12) {
+    const start = range.start
+    const   end = range.end
+    const  prev = pos.qprev
+    const  next = pos.qnext
+    assert start < end
+    assert start <= pos
+    assert pos <= end
+    var active = UseRange*{}
+    if start == pos {
+      assert next && next <= end
+      assert !range.isFixed || range.isFixed == fixed
+      //    pos___pos   next___end
+      //        ^            ^
+      //      range        hole
+      this.ranges.insertAfter(this.makeHole(next, end), range)
+      range.isaWrite = isaWrite
+      range.avoidR12 = avoidR12
+      range.isActive = true
+       range.isFixed = fixed
+           range.end = pos
+      active = range
+    } else if end == pos {
+      assert prev && start <= prev
+      //  start___prev   pos___pos
+      //        ^            ^
+      //      hole         range
+      assert !range.isFixed || range.isFixed == fixed
+      this.ranges.insertBefore(this.makeHole(start, prev), range)
+      range.isaWrite = isaWrite
+      range.avoidR12 = avoidR12
+      range.isActive = true
+       range.isFixed = fixed
+         range.start = pos
+      active = range
+    } else {
+      assert prev && next
+      assert start <= prev
+      assert end >= next
+      //  start___prev   pos___pos   next___end
+      //        ^            ^            ^
+      //      range        active       hole
+      active = this.makeActive(pos, pos, fixed, isaWrite, avoidR12)
+      this.ranges.insertAfter(active, range)
+      this.ranges.insertAfter(this.makeHole(next, end), active)
+      range.end = prev
+    }
+    return active
+  }
+
+
+  fn prependActive(this, pos, fixed, isaWrite, avoidR12) {
+    assert this.ranges.first
+    const range = this.ranges.first
+    const start = range.start
+    const  prev = start.qprev
+    const  next = pos.qnext
+    var  active = UseRange*{}
+    assert prev && next
+    assert pos < start
+    assert next <= start
+    assert pos <= prev
+    if range.isaHole() {
+      //  pos___pos   next___start
+      //      ^            ^
+      //    active       range  
+      active = this.ranges.prepend(this.makeActive(pos, pos, fixed, isaWrite, avoidR12))
+      range.start = next
+    } else if next <= prev {
+      //  pos___pos   next___prev   start___start
+      //      ^            ^              ^
+      //    active       hole           range
+      this.ranges.prepend(this.makeHole(next, prev))
+      active = this.ranges.prepend(this.makeActive(pos, pos, fixed, isaWrite, avoidR12))
+    } else {
+      //  pos___pos   start___start
+      //      ^             ^
+      //    active        hole
+      assert prev == pos && next == start
+      active = this.ranges.prepend(this.makeActive(pos, pos, fixed, isaWrite, avoidR12))
+    }
+    return active
+  }
+
+
+  fn appendActive(this, pos, fixed, isaWrite, avoidR12) {
+    assert this.ranges.last
+    const range = this.ranges.last
+    const   end = range.end
+    const  prev = pos.qprev
+    const  next = end.qnext
+    var  active = UseRange*{}
+    assert prev && next
+    assert end < pos
+    assert end <= prev
+    assert next <= pos
+    if range.isaHole() {
+      //  end___prev   pos___pos
+      //      ^            ^
+      //    range        active    
+      active = this.ranges.append(this.makeActive(pos, pos, fixed, isaWrite, avoidR12))
+      range.end = prev
+    } else if next <= prev {
+      //  end___end  next___prev   pos___pos
+      //      ^           ^            ^
+      //    range       hole         active
+      this.ranges.append(this.makeHole(next, prev))
+      active = this.ranges.append(this.makeActive(pos, pos, fixed, isaWrite, avoidR12))
+    } else {
+      //  end___end   pos___pos
+      //      ^           ^
+      //    range       active
+      assert next == pos && prev == end
+      active = this.ranges.append(this.makeActive(pos, pos, fixed, isaWrite, avoidR12))
+    }
+    return active
+  }
+
+
+  fn extendTo(this, pos) {
+    assert this.ranges.last
+    const first = this.ranges.first
+    const  last = this.ranges.last
+    if pos < first.start {
+      const prev = first.start.qprev
+      assert prev
+      if first.isActive {
+        //  pos___prev  start___...
+        //      ^             ^
+        //    hole          active
+        return this.ranges.prepend(this.makeHole(pos, prev))
+      }
+      //  pos___...
+      //      ^
+      //    hole
+      first.start = pos
+      return first
+    }
+    if pos > last.end {
+      const next = last.end.qnext
+      assert next
+      if last.isActive {
+        //  ...___end  next___pos
+        //      ^           ^
+        //    active      hole
+        return this.ranges.append(this.makeHole(next, pos))
+      }
+      //  ...___pos
+      //      ^
+      //    hole
+      last.end = pos
+      return last
+    }
+    assert 0
+    return null
+  }
+
+
+  fn makeActive(this, start, end, fixed, isaWrite, avoidR12) {
+    assert start <= end && (!fixed || fixed.reg.isValid())
+    return new UseRange{ owner = this.owner, start = start, end = end, isFixed = fixed, isActive = true,
+      isaWrite = isaWrite, avoidR12 = avoidR12 }
+  }
+
+
+  fn makeHole(this, start, end) {
+    assert start <= end
+    return new UseRange{ owner = this.owner, start = start, end = end, isActive = false, isaWrite = false }
+  }
+}

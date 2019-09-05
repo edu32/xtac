@@ -1,0 +1,257 @@
+
+  define MAX_TRANSPORT_CHUNK_LENGTH 0x2000
+
+//-----------------------------------------------------------------------------------------------------
+async fn sendTextResponse(socket, request, response, content, contentType) {
+  auto buffer = String{}
+  auto stream = socket.send(buffer)
+
+  setMandatoryResponseHeaders(request, response)
+  setTextContent(request, response, content, contentType)
+  writeResponseHead(buffer, response)
+
+  buffer.append(content)
+  const (lastSend, done) = await stream
+  return !done
+}
+
+//-----------------------------------------------------------------------------------------------------
+async fn sendAwaitableResponse(socket, request, response, content, contentType) {
+  var lastSend = 0
+  var done = false
+  auto buffer = String{}
+  auto stream = socket.send(buffer)
+        
+  setMandatoryResponseHeaders(request, response)
+  setGeneratedContent(request, response, content, contentType)
+  writeResponseHead(buffer, response)
+
+  auto chunks = String{}
+
+  await each contentChunk in content {
+    continue if contentChunk.isEmpty()
+    if chunks.length + contentChunk.length > MAX_TRANSPORT_CHUNK_LENGTH {      
+      each rem in makeTransportChunks(chunks, contentChunk) {
+        break if rem == 0
+        writeChunk(buffer, chunks)
+        (lastSend, done) = await stream
+        break if done
+        buffer.clear()
+        chunks.clear()
+      }
+      break if done
+    } else {
+      chunks.append(contentChunk)
+      await aio.run(self) // Switch threads to prevent stack overflow.
+    }
+  }
+  if done {
+    // Do nothing.
+  } else if chunks.length {
+    writeChunk(buffer, chunks)
+    writeChunk(buffer, "")
+    (lastSend, done) = await stream
+  } else {
+    writeChunk(buffer, "")
+    (lastSend, done) = await stream
+  }
+  return !done
+}
+
+//-----------------------------------------------------------------------------------------------------
+async fn sendFileResponse(socket, request, response, path) {
+  const fHandle = os.CreateFileA(path.text, 
+                                 os.GENERIC_READ,
+                                 os.FILE_SHARE_READ_WRITE,
+                                 null,
+                                 os.OPEN_EXISTING,
+                                 os.FILE_ATTRIBUTE_NORMAL | os.FILE_FLAG_OVERLAPPED | os.FILE_FLAG_SEQUENTIAL_SCAN,
+                                 null)
+  defer os.CloseHandle(fHandle)
+  for {
+    if fHandle == os.INVALID_HANDLE_VALUE {
+      response.setStatus(STATUS_INTERNAL_SERVER_ERROR)
+      break
+    } 
+    const li = os.LARGE_INTEGER{}
+    if !os.GetFileSizeEx(fHandle, li) {
+      response.setStatus(STATUS_INTERNAL_SERVER_ERROR)
+      break
+    }
+    const lastWriteTime = fs.getLastWriteTime(path)
+    const fileNameExtension = fs.getExtension(path, true)
+    auto buffer = String{}
+    auto etag = makeETag(path)
+    const status = fileResponseStatusFromETagMatching(request, etag)
+    response.setStatus(status)
+    if status == STATUS_OK {
+      auto stream = socket.sendFile(fHandle, buffer, "")          
+      setMandatoryResponseHeaders(request, response)
+      setFileContent(request, response, fileNameExtension, li.QuadPart, etag, lastWriteTime)
+      writeResponseHead(buffer, response)
+      return await stream
+    }
+    auto stream = socket.send(buffer)          
+    setMandatoryResponseHeaders(request, response)
+    setFileContent(request, response, fileNameExtension, li.QuadPart, etag, lastWriteTime)
+    writeResponseHead(buffer, response)
+    const (lastSend, done) = await stream
+    return !done
+  }
+  auto buffer = String{}
+  auto stream = socket.send(buffer)
+  setMandatoryResponseHeaders(request, response)
+  setTextContent(request, response, "", "")
+  writeResponseHead(buffer, response)
+  const (lastSend, done) = await stream
+  return !done
+}
+
+fn makeETag(path) {
+  const info = fs.getFileTimes(path)
+  const lastWriteTime = info.lastWriteTime
+  assert lastWriteTime.ticks
+  const s = String{}
+  //println("#{lastWriteTime.ticks}")
+  s.append("\"").encodeBase16(&lastWriteTime.ticks, sizeof(lastWriteTime.ticks)).append("\"")
+  return s
+}
+
+fn fileResponseStatusFromETagMatching(request, etag) {
+  if const ifMatch = request.headers.find("If-Match") {
+    if ifMatch.value != etag {
+      return STATUS_PRECONDITION_FAILED
+    }
+  } else if const ifNoneMatch = request.headers.find("If-None-Match") {
+    //println("ifNoneMatch = #{ifNoneMatch.value}; etag = #{etag}")
+    if ifNoneMatch.value == etag {
+      return STATUS_NOT_MODIFIED
+    }
+  }
+  return STATUS_OK
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn setMandatoryResponseHeaders(request, response) {
+  if response.version.isEmpty() {
+    response.version.append("HTTP/1.1")
+  }
+  if response.phrase.isEmpty() {
+    response.phrase.append("Hakuna matata")
+  }
+  if response.status == UNKNOWN_STATUS {
+    response.setStatus(STATUS_OK)
+  } else {
+    assert response.status >= 100 && response.status < 1000
+  }
+  const server = response.headers["Server"]
+  if server.value.isEmpty() {
+    server.value.append("xtab")
+  }
+  const date = response.headers["Date"]
+  if date.value.isEmpty() {
+    time.now().format(date.value)
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn setTextContent(request, response, content, contentType) {
+  const contentTypeHeader = response.headers["Content-Type"]
+  if contentType.length {
+    contentTypeHeader.value.clear().append(contentType)
+  } else if contentTypeHeader.value.isEmpty() {
+    contentTypeHeader.value.clear().append("text/html;charset=utf-8")
+  }
+
+  const contentLength = response.headers["Content-Length"]
+  contentLength.value.clear()
+  content.length.format(contentLength.value.clear())
+}
+
+fn setGeneratedContent(request, response, content, contentType) {
+  const contentTypeHeader = response.headers["Content-Type"]
+  if contentType.length {
+    contentTypeHeader.value.clear().append(contentType)
+  } else if contentTypeHeader.value.isEmpty() {
+    contentTypeHeader.value.clear().append("text/html;charset=utf-8")
+  }
+
+  const transferEncoding = response.headers["Transfer-Encoding"]
+  transferEncoding.value.clear().append("chunked")
+
+  const xt = response.headers["X-Sender"]
+  xt.value.append("some-name=some-value;a=b;c=d;e=f, google=bot\"the good one\";is-not='good';but=is-bad, yethos")
+}
+
+fn setFileContent(request, response, fileNameExtension, fileSize, etag, lastWriteTime) {
+  import std.winreg
+  auto mimeType = winreg.getContentTypeFromFileNameExtension(fileNameExtension)
+  const contentTypeHeader = response.headers["Content-Type"]
+  contentTypeHeader.value.clear().append(mimeType)
+
+  const contentLength = response.headers["Content-Length"]
+  contentLength.value.clear()
+  fileSize.format(contentLength.value.clear())
+
+  const etagHeader = response.headers["ETag"]
+  etagHeader.value.clear().append(etag)
+
+  const cacheControlHeader = response.headers["Cache-Control"]
+  cacheControlHeader.value.clear().append("public,max-age=0")
+
+  const lastModifiedHeader = response.headers["Last-Modified"]
+  lastWriteTime.format(lastModifiedHeader.value)
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn writeResponseHead(buffer, response) {
+  buffer.append(response.version).append(" ")
+  response.status.format(buffer)
+  buffer.append(" ")
+  buffer.append(response.phrase).append("\r\n")
+  each header in response.headers.iterator() {
+    writeHeader(buffer, header)
+  }
+  buffer.append("\r\n")
+}
+
+fn writeHeader(buffer, header) {
+  return if header.name.isEmpty()
+  buffer.append(header.name).append(": ")
+  buffer.append(header.value).append("\r\n")
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn makeTransportChunks(buffer, content) {
+  return {
+    pos = content.text,
+    end = content.end(),
+    buffer = buffer,
+    next = fn(self) {
+      return (0, /* done = */ true) if self.pos == self.end
+      assert self.pos < self.end
+      const avail = MAX_TRANSPORT_CHUNK_LENGTH - self.buffer.length
+      if avail > 0 {
+        const length = math.min(self.end - self.pos, avail)
+        self.buffer.appendTextAndLength(self.pos, length)
+        self.pos += length
+        return (self.end - self.pos, /* done  = */ false)
+      }
+      return (self.end - self.pos, /* done = */ false)
+    }
+  }
+}
+
+fn writeChunk(buffer, chunk) {
+  if chunk.isEmpty() {
+    buffer.append("0\r\n\r\n")
+  } else {
+    var numbuf = Char[ 0x20 ]
+    assert !os._ultoa_s(chunk.length, numbuf, numbuf.length, 16)
+    var s = string.fromArray(numbuf)
+    s.removeLeadingChars('0')
+    assert s.length
+    buffer.append(s).append("\r\n")
+    buffer.append(chunk).append("\r\n")
+  }
+}

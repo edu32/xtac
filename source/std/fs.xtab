@@ -1,0 +1,343 @@
+//-----------------------------------------------------------------------------------------------------
+// DriveLetter ':' '\'
+fn extractFilePathInfo(path) {
+  var info = {
+    path = string.fromBuffer(path),
+    full = "",
+    name = "",
+    extension = ""
+  }
+  return info if path.isEmpty()
+  const   end = path.end()
+  const start = path.text
+  var   slash = end
+  var     dot = end
+  for --slash; slash > start; --slash {
+    const ch = *slash
+    if ch == '.' {
+      continue if dot
+      dot = slash
+    } else {
+      break if ch == '\\'
+    }
+  }
+  ++slash
+  info.full.setFromRange(slash, end)
+  if dot < end {
+    info.name.setFromRange(slash, dot)
+    info.extension.setFromRange(dot + 1, end)
+  } else {
+    info.name = info.full
+  }
+  return info
+}
+
+fn getFileSize(path) {
+  const wfad = os.WIN32_FILE_ATTRIBUTE_DATA{}
+  var n = 0i64
+  if os.GetFileAttributesExA(path.text, os.GetFileExInfoStandard, &wfad) {
+    n = Int64((UInt64(wfad.nFileSizeHigh) << 32) | (UInt64(wfad.nFileSizeLow)))
+    return n
+  }
+  println("os.GetFileAttributesExA failed with #{os.GetLastError()} for #{path}")
+  return -1
+}
+
+fn getFileName(path, includeExtension = true) {
+  const end   = path.end()
+  const start = path.text
+  var   dot   = Char*{}
+
+  for var pos = end; --pos > start; {
+    if *pos == '\\' {
+      if includeExtension {
+        return string.fromRange(pos + 1, end)
+      }
+      return string.fromRange(pos + 1, dot)
+    }
+    if !dot && *pos == '.' {
+      dot = pos
+    }
+  }
+  return ""
+}
+
+fn getExtension(path, includeDot = false) {
+  const end   = path.end()
+  const start = path.text
+  var   dot   = end
+  for --dot; dot > start; --dot {
+    if *dot == '.' {
+      break if dot[-1] == '.' || dot + 1 == end
+      if !includeDot {
+        ++dot
+      }
+      return string.fromRange(dot, end)
+    }
+  }
+  return ""
+}
+
+fn getFileTimes(path) {
+  import Date from time
+  const wfda = os.WIN32_FILE_ATTRIBUTE_DATA{}
+  assert os.GetFileAttributesExA(path.text, os.GetFileExInfoStandard, &wfda)
+  return {
+    creationTime = Date.fromFileTime(wfda.ftCreationTime),
+    lastAccessTime = Date.fromFileTime(wfda.ftLastAccessTime),
+    lastWriteTime = Date.fromFileTime(wfda.ftLastWriteTime)
+  }
+}
+
+fn getLastWriteTime(path) {
+  import Date from time
+  const wfda = os.WIN32_FILE_ATTRIBUTE_DATA{}
+  assert os.GetFileAttributesExA(path.text, os.GetFileExInfoStandard, &wfda)
+  return Date.fromFileTime(wfda.ftLastWriteTime)
+}
+//-----------------------------------------------------------------------------------------------------
+fn deleteFile(path) {
+  return os.DeleteFileA(path.text)
+}
+
+//-----------------------------------------------------------------------------------------------------
+// Returns true if a {path} to a file exists on disk.
+fn isaFilePath(path) {  
+  const attrib = os.GetFileAttributesA(path.text)
+  return attrib != os.INVALID_FILE_ATTRIBUTES && !(attrib & os.FILE_ATTRIBUTE_DIRECTORY)
+}
+
+//-----------------------------------------------------------------------------------------------------
+// Returns true if a {path} to a folder exists on disk.
+fn isaFolderPath(path) {
+  const attrib = os.GetFileAttributesA(path.text)
+  return attrib != os.INVALID_FILE_ATTRIBUTES && (attrib & os.FILE_ATTRIBUTE_DIRECTORY)
+}
+
+//-----------------------------------------------------------------------------------------------------
+// Returns a generator for the text between '\' in a path.
+fn pathParts(path) {
+  return {
+    pos = path.text,
+    end = path.end(),
+    next = fn(self) {
+      return ("", true) if self.pos == self.end
+      assert self.pos < self.end
+      if *self.pos == '\\' || *self.pos == '/'
+        ++self.pos
+      if self.pos < self.end {
+        const start = self.pos
+        for ; self.pos < self.end && *self.pos != '\\' && *self.pos != '/'; ++self.pos {}
+        return (string.fromRange(start, self.pos), false)
+      }
+      return ("", true)
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+// Ensures that a {path} to a file or folder exists on disk.
+fn ensureFileExistsPartByPart(path) {
+  assert 0
+  return true if isaFile(path)
+}
+
+fn ensureFolderExistsPartByPart(path) {
+  auto temp = String{}
+  return true if isaFolderPath(path)
+  each part in pathParts(path) {
+    continue if part.isEmpty()
+    temp.append("\\") if temp.length
+    temp.append(part)
+    continue if part.endsWithChar(':')
+    return false if !ensureFolderExists(temp)
+  }
+  return isaFolderPath(temp)
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn ensureFolderExists(path) {
+  if !os.CreateDirectoryA(path.text, null) {
+    return os.GetLastError() == os.ERROR_ALREADY_EXISTS
+  }
+  return isaFolderPath(path)
+}
+
+//-----------------------------------------------------------------------------------------------------
+// Returns the full path to the currently running '.exe'.
+fn currentModulePath {
+  var buffer = Char[os.MAX_FILE_PATH]
+  const size = os.GetModuleFileNameA(os.NULL, buffer, buffer.length)
+  assert size with "os.GetModuleFileName failed with #{os.GetLastError()}"
+  assert size < buffer.length with "Module file name too long: #{size} vs. maximum of #{buffer.length}"
+  return String.fromTextAndLength(&buffer[0], size)
+}
+
+//-----------------------------------------------------------------------------------------------------
+// Returns the full path to the folder where the currently running '.exe' is excluding
+// the terminating '\'.
+fn currentFolderPath {
+  var moduleName = currentModulePath()
+  const start = moduleName.begin()
+  var pos = moduleName.end()
+  for --pos > start && *pos != '\\' {}
+  assert pos >= start with "#{moduleName} is not a valid name of the current module"
+  var result = String.fromRange(start, pos)
+  moduleName.dispose()
+  return result
+}
+
+//-----------------------------------------------------------------------------------------------------
+// Returns the full path to the folder where the currently running '.exe' is excluding
+// the terminating '\'.
+fn expandPathRelativeToCurrentFolderPath(rel) {
+  const path  = currentFolderPath()
+  const end   = rel.end()
+  var   pos   = rel.text
+  var   mark  = rel.text
+  for ; pos < end; ++pos {
+    if *pos == '\\' || *pos == '/' {
+      take(path, string.fromRange(mark, pos))
+      mark = pos + 1
+    }
+  }
+  take(path, string.fromRange(mark, pos))
+  return path
+
+  fn take(path, fragment) {
+    return if fragment.isEmpty()
+    if fragment == "." { // Stay in the same folder.
+      return
+    }
+    if fragment == ".." { // Go up 1 level
+      const start = fragment.text
+      var   end   = fragment.end()
+      for --end > start {
+        if *end == '\\' {
+          path.removeFrom(end - start)
+        }
+      }
+      assert 0
+      return
+    }
+    path.append("\\").append(fragment)
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn enumerateFiles(path, extension = "") {
+  each entry in auto enumerate(path, extension) {
+    if entry.isaFile {
+      yield entry
+    } else each entry2 in auto enumerateFiles(entry.path, extension) {
+      yield entry2
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn enumerate(path, extension = "") {
+  struct Entry {
+    var path      = String{}
+    var name      = ""
+    var shortName = ""
+    var extension = ""
+    var size      = 0u64
+    var isaFile   = false
+    var isaFolder = false
+    fn parseName(this) {
+      if this.isaFile {
+        const dot = this.name.lastIndexOfChar('.')
+        return if dot < 1
+        return if this.name.text[dot - 1] == '.' || dot + 1 == this.name.length
+        this.shortName = string.fromTextAndLength(this.name.text, dot)
+        this.extension = string.fromRange(this.name.text + dot + 1, this.name.end())
+      } else {
+        this.shortName = this.name
+      }
+    }
+  }
+  const endsWithSlash = path.endsWithChar('\\')
+  auto search = String.fromBuffer(path)
+  if !endsWithSlash {
+    search.append("\\")
+  }
+  search.append("*")
+  if extension.length {
+    if !extension.beginsWithChar('.') {
+      search.append(".")
+    }
+    search.append(extension)
+  }
+  var wfd = os.WIN32_FIND_DATA{}
+  const handle = os.FindFirstFileA(search.text, &wfd)
+  if handle == os.INVALID_HANDLE_VALUE {
+    println("os.FindFirstFileA failed with #{os.GetLastError()} for #{search}")
+  } else {
+    auto foundName = String{}
+    for {
+      const entry = Entry{}
+      const cFileName = string.fromArray(wfd.cFileName)
+      foundName.clear().append(path)
+      if !endsWithSlash {
+        foundName.append("\\")
+      }
+      foundName.append(cFileName)
+      entry.name = cFileName
+      entry.path = foundName
+      if cFileName == "." || cFileName == ".." {
+        // Do nothing.
+      } else {
+        entry.isaFolder = wfd.dwFileAttributes & os.FILE_ATTRIBUTE_DIRECTORY
+        entry.isaFile = !entry.isaFolder
+        entry.size = (UInt64(wfd.nFileSizeHigh) << 32) | wfd.nFileSizeLow
+        entry.parseName()
+        yield &entry
+      }
+      if os.FindNextFileA(handle, &wfd) {
+        // Do nothing.
+      } else {
+        const hResult = os.GetLastError()
+        assert hResult == os.ERROR_NO_MORE_FILES with "os.FindNextFileA failed with #{hResult} for #{search}"
+        break
+      }
+    }
+    assert os.FindClose(handle) with "os.FindClose failed with #{os.GetLastError()} for #{path}"
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+define       NO_BYTE_ORDER_MARK 0x0
+define     UTF8_BYTE_ORDER_MARK 0x1 // EF BB BF
+define UTF16_LE_BYTE_ORDER_MARK 0x2 // FF FE
+define UTF16_BE_BYTE_ORDER_MARK 0x3 // FE FF
+define UTF32_LE_BYTE_ORDER_MARK 0x4 // FF FE 00 00
+define UTF32_BE_BYTE_ORDER_MARK 0x5 // 00 00 FE FF
+
+fn readByteOrderMark(const text, const length) {
+  assert length >= 0
+  const pos = Byte*{ text }
+  const end = pos + length
+  return (0, NO_BYTE_ORDER_MARK) if !length
+  if *pos == 0xEF {
+    return (3, UTF8_BYTE_ORDER_MARK) if pos + 2 < end && pos[1] == 0xBB && pos[2] == 0xBF
+  } 
+  if *pos == 0xFE {
+    return (2, UTF16_BE_BYTE_ORDER_MARK) if pos + 1 < end && pos[1] == 0xFF
+  }
+  if *pos == 0x00 {
+    return (4, UTF32_LE_BYTE_ORDER_MARK) if pos + 3 < end && pos[1] == 0x00 && pos[2] == 0xFE
+                                                                            && pos[3] == 0xFF
+  }
+  if *pos == 0xFF {
+    if pos + 1 < end {
+      if pos[1] == 0xFE {
+        if pos + 3 < end {
+          return (4, UTF32_LE_BYTE_ORDER_MARK) if pos[2] == 0x00 && pos[3] == 0x00
+        }
+        return (2, UTF16_LE_BYTE_ORDER_MARK)
+      }
+    }
+  }
+  return (0, NO_BYTE_ORDER_MARK)
+}

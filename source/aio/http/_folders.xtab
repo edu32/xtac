@@ -1,0 +1,66 @@
+//-------------------------------------------------------------------------------
+/* --+--www--+--public--+--assets
+             |
+             +--private--+--temp
+                         |
+                         +--db--+
+                         |      |
+                         |      +--temp
+                         |
+                         +--downloads
+                         |
+                         +--certificates
+*/
+struct Folders {
+  readonly public         = String{}
+    readonly assets       = String{}
+
+  readonly private        = String{}
+    readonly temp         = String{}
+    readonly db           = String{}
+      readonly dbTemp     = String{}
+    readonly downloads    = String{}
+    readonly certificates = String{}
+
+  fn dispose(this) {
+    delete this.public
+      delete this.assets
+    delete this.private
+      delete this.temp
+      delete this.db
+        delete this.dbTemp
+      delete this.downloads
+      delete this.certificates
+  }
+
+  fn initialize(this) {
+    auto www = fs.currentFolderPath()
+    www.append("\\www")
+    assert fs.ensureFolderExists(www)
+    this.public.append(www).append("\\public")
+      this.assets.append(this.public).append("\\assets")
+    this.private.append(www).append("\\private")
+      this.temp.append(this.private).append("\\temp")
+      this.db.append(this.private).append("\\db")
+        this.dbTemp.append(this.db).append("\\temp")
+      this.downloads.append(this.private).append("\\downloads")
+      this.certificates.append(this.private).append("\\certificates")
+    assert fs.ensureFolderExists(this.public)
+      assert fs.ensureFolderExists(this.assets)
+    assert fs.ensureFolderExists(this.private)
+      assert fs.ensureFolderExists(this.temp)
+      assert fs.ensureFolderExists(this.db)
+        assert fs.ensureFolderExists(this.dbTemp)
+      assert fs.ensureFolderExists(this.downloads)
+      assert fs.ensureFolderExists(this.certificates)
+    println("Server folders:\r\n\
+            \t#{this.public}\r\n\
+            \t\t#{this.assets}\r\n\
+            \t#{this.private}\r\n\
+            \t\t#{this.temp}\r\n\
+            \t\t#{this.db}\r\n\
+            \t\t\t#{this.dbTemp}\r\n\
+            \t\t#{this.downloads}\r\n\
+            \t\t#{this.certificates}\r\n")
+  }
+}

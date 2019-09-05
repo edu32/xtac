@@ -1,0 +1,375 @@
+struct string {
+  readonly text   = Char*{},
+           length = 0
+
+
+  fn dispose(this) {
+    this.text = null
+    this.length = 0
+  }
+
+
+  fn clear(this): this {
+    this.length = 0
+  }
+
+
+  fn fromArray(array) {
+    return fromTextAndLength(Char*{ &array[0] }, strlen(&array[0]))
+  }
+
+
+  fn fromArrayAndLength(array, length) {
+    return fromTextAndLength(&array[0], length)
+  }
+
+
+  fn fromText(text) {
+    const chars = Char*{text}
+    var length = 0
+    if chars {
+      length = strlen(chars)
+    }
+    return fromTextAndLength(chars, length)
+  }
+
+
+  fn fromTextAndLength(text, length): string {
+    assert length >= 0
+    return string{ text = Char*{ text }, length = length }
+  }
+
+
+  fn fromRange(textBegin, textEnd) {
+    return fromTextAndLength(textBegin, textEnd - textBegin)
+  }
+
+
+  fn fromBuffer(buffer) {
+    return fromTextAndLength(buffer.text, buffer.length)
+  }
+
+
+  fn begin(this) = this.text
+  fn end(this)   = this.text + this.length
+
+
+  fn startsWithChar(this, ch, caseSensitive = true) {
+    if caseSensitive {
+      return this.length && this.text[0] == ch
+    }
+    return this.length && char.toLowerCase(this.text[0]) == char.toLowerCase(ch)
+  }
+
+
+  fn beginsWithChar(this, ch, caseSensitive = true) {
+    if caseSensitive {
+      return this.length && this.text[0] == ch
+    }
+    return this.length && char.toLowerCase(this.text[0]) == char.toLowerCase(ch)
+  }
+
+
+  fn endsWithChar(this, ch, caseSensitive = true) {
+    if caseSensitive {
+      return this.length && this.text[this.length - 1] == ch
+    }
+    return this.length && char.toLowerCase(this.text[this.length - 1]) == char.toLowerCase(ch)
+  }
+
+  fn setFromTextAndLength(this, text, length): this {
+    assert length >= 0 with "#{length}"
+    this.text = text
+    this.length = length
+  }
+
+
+  fn setFromRange(this, textBegin, textEnd): this {
+    return this.setFromTextAndLength(textBegin, textEnd - textBegin)
+  }
+
+
+  fn setFromBuffer(this, buffer): this {
+    return this.setFromTextAndLength(buffer.text, buffer.length)
+  }
+
+
+  fn setLength(this, length): this {
+    if length == -1 {
+      if this.text {
+        this.length = os.strlen(this.text)
+      } else {
+        this.length = 0
+      }
+    } else {
+      assert length >= 0
+      this.length = length
+    }
+  }
+
+
+  fn terminate(this, length): this {
+    this.setLength(length)
+    if this.text {
+      this.text[this.length] = ''
+    } else {
+      assert this.isEmpty()
+    }
+  }
+
+
+  fn == (this, other) {
+    return this.compare(other) == 0
+  }
+
+
+  fn != (this, other) {
+    return this.compare(other) != 0
+  }
+
+
+  fn [](this, index) {
+    assert index >= 0 && index <= this.length with "Index #{index} out of bounds: 0 - #{this.length}"
+    return *&this.text[index]
+  }
+
+
+  fn isEmpty(this) = this.length == 0
+
+
+  fn indexOfChar(this, ch, caseSensitive = true) {
+    const lower = char.toLowerCase(ch)
+    for var i = 0; i < this.length; ++i {
+      const curr = this.text[i]
+      if caseSensitive {
+        return i if ch == curr
+      } else {
+        return i if char.toLowerCase(curr) == lower
+      }
+    }
+    return -1
+  }
+
+
+  fn lastIndexOfChar(this, ch, caseSensitive = true) {
+    const lower = char.toLowerCase(ch)
+    for var i = this.length; --i >= 0; {
+      const curr = this.text[i]
+      if caseSensitive {
+        return i if ch == curr
+      } else {
+        return i if char.toLowerCase(curr) == lower
+      }
+    }
+    return -1
+  }
+
+
+  fn containsChar(this, ch, caseSensitive = true) = this.indexOfChar(ch, caseSensitive) >= 0
+
+
+  fn indexOf(this, s, caseSensitive = true) {
+    const part = ""
+    for var i = 0; i < this.length; ++i {
+      const end = i + s.length
+      break if end > this.length
+      part.setFromTextAndLength(this.text + i, s.length)
+      return i if part.compare(s, caseSensitive) == 0
+    }
+    return -1
+  }
+
+
+  fn lastIndexOf(this, s, caseSensitive = true) {
+    const part = ""
+    for var i = this.length; --i >= 0; {
+      const start = i - s.length
+      break if start < 0
+      part.setFromTextAndLength(this.text + start, s.length)
+      return i if part.compare(s, caseSensitive) == 0
+    }
+    return -1
+  }
+
+
+  fn contains(this, s, caseSensitive = true) = this.indexOf(s, caseSensitive) >= 0
+
+  fn beginsWith(this, s, caseSensitive = true) {
+    if s.length <= this.length {
+      const part = fromTextAndLength(this.text, s.length)
+      return part.compare(s, caseSensitive) == 0
+    }
+    return false
+  }
+
+  fn endsWith(this, s, caseSensitive = true) {
+    const i = this.length - s.length
+    if i >= 0 {
+      const part = fromTextAndLength(this.text + i, s.length)
+      return part.compare(s, caseSensitive) == 0
+    }
+    return false
+  }
+
+
+  fn characters(this) {
+    return {
+      pos = this.text,
+      end = this.text + this.length,
+      next = fn(self) {
+        assert self.pos <= self.end
+        if self.pos < self.end
+          return (*self.pos++, false)
+        return ('', true)
+      }
+    }
+  }
+
+
+  fn words(this) {
+    return {
+      pos = this.text,
+      end = this.text + this.length,
+      next = fn(self) {
+        assert self.pos <= self.end
+        if self.pos < self.end {
+          for ; self.pos < self.end && !char.isAlphaOrDigit(*self.pos); ++self.pos {}
+          return ("", true) if self.pos == self.end
+          const start = self.pos
+          for ++self.pos; self.pos < self.end && char.isAlphaOrDigit(*self.pos); ++self.pos {}
+          return (string.fromTextAndLength(start, self.pos - start) , false)
+        }
+        return ("", true)
+      }
+    }
+  }
+
+
+  fn parseInt(this, base = 10) {
+    const (n, nok) = _tryParseInt(this, base)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseInt(this, base = 10) {
+    return _tryParseInt(this, base)
+  }
+
+
+  fn parseUInt(this, base = 10) {
+    const (n, nok) = _tryParseUInt(this, base)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseUInt(this, base = 10) {
+    return _tryParseUInt(this, base)
+  }
+
+
+  fn parseFloat(this) {
+    const (n, nok) = _tryParseFloat(this)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseFloat(this) {
+    return _tryParseFloat(this)
+  }
+
+
+  fn parseDouble(this) {
+    const (n, nok) = _tryParseDouble(this)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseDouble(this) {
+    return _tryParseDouble(this)
+  }
+
+
+  fn parseFraction(this, base = 10) {
+    const (n, nok) = _tryParseFraction(this, base)
+    assert nok
+    return n
+  }
+
+
+  fn tryParseFraction(this, base = 10) {
+    return _tryParseFraction(this, base)
+  }
+
+
+  fn format(this, stream, fmt = ""): Void {
+    import builtins from formatter
+    const options = builtins.parseOptions(fmt)
+    formatStr(this, stream, options)
+  }
+
+
+  fn compare(this, other, caseSensitive = true) {
+    return 1  if this.length > other.length
+    return -1 if this.length < other.length
+    return 0 if this.length == 0
+    return 0 if this.text == other.text
+    if caseSensitive 
+      return os.strncmp(this.text, other.text, this.length)
+    return os._strnicmp(this.text, other.text, this.length)
+  }
+
+
+  fn compareLexicographically(this, other, caseSensitive = true) {
+    return _compareLexicographically(this, other, caseSensitive)
+  }
+
+
+  fn trim(this): this {
+    return this if this.isEmpty()
+    var pos = this.text
+    var end = this.end()
+    for ; pos < end && (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n'); ++pos {}
+    if pos < end {
+      for --end; end >= pos && (*end == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n'); --end {}
+      ++end
+    }
+    this.text = pos
+    this.length = end - pos
+  }
+
+
+  fn isQuoted(this) = this.length > 0 && (*this.text == '\'' || *this.text == '"' || *this.text == '`')
+                                      && *this.text == this.text[this.length - 1]
+
+
+  fn unquote(this): this {
+    return this if this.length < 2
+    const quote = *this.text
+    if quote == '\'' || quote == '"' || quote == '`' {
+      if quote == this.text[this.length - 1] {
+        ++this.text
+        this.length -= 2
+      }
+    }
+  }
+
+
+  fn removeLeadingChars(this, ch): this {
+    return this if this.isEmpty()
+    var pos = this.text
+    const end = this.end()
+    for ; pos < end && *pos == ch; ++pos {}
+    this.text = pos
+    this.length = end - pos
+  }
+}
+
+
+struct wstring {
+  readonly   text = WChar*{}
+  readonly length = 0
+}

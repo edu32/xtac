@@ -1,0 +1,732 @@
+//-----------------------------------------------------------------------------------------------------
+struct CallInfo {
+  var  indexSymbol = ast.Symbol*{}
+  var     receiver = ast.Node*{}
+  var    arguments = List(ast.Argument*)&{}
+  const targetType = ast.Type{}
+  var    succeeded = false
+
+  fn dispose(this) {
+    if !this.succeeded {
+      ast.ndispose(this.receiver)
+      ast.ldispose(this.arguments)
+    }
+  }
+
+  fn fromSymbol(indexSymbol, arguments) {
+    return CallInfo{ indexSymbol = indexSymbol, arguments = arguments, targetType = indexSymbol.type() }
+  }
+
+  fn fromName(ctx, name, arguments) {
+    const indexSymbol = name.symbol
+    ctx.throwAway(name)
+    return CallInfo{ indexSymbol = indexSymbol, arguments = arguments, targetType = indexSymbol.type() }
+  }
+
+  fn fromMemberName(ctx, name, arguments) {
+    const    receiver = name.base
+    const indexSymbol = name.symbol
+    name.base = null
+    ctx.throwAway(name)
+    return CallInfo{ indexSymbol = indexSymbol,  receiver = receiver, arguments = arguments,
+                     targetType = indexSymbol.type() }
+  }
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn call(ctx, name, arguments): (ast.Node*, ast.Type) {
+  switch name {
+    case ast.Name {
+      auto info = CallInfo.fromName(ctx, name, arguments)
+      return mkCall(ctx, info)
+    }
+
+    case ast.MemberName {
+      auto info = CallInfo.fromMemberName(ctx, name, arguments)
+      return mkCall(ctx, info)
+    }
+  }
+  ctx.err(name) with {
+    println("#{nameof(it)}: #{it.type} is not callable")
+  }
+  ctx.throwAway(name)
+  ctx.throwAwayList(arguments)
+  return (null, ast.tyUnknown)
+}
+
+fn instantiateParameterLess(ctx, symbol): ast.Type {
+  const        arguments = List(ast.Argument*){}
+  auto              info = CallInfo.fromSymbol(symbol, arguments)
+  const (indirect, type) = mkCall(ctx, info)
+  assert !indirect
+  return type
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn mkCall(ctx, info): (ast.Node*, ast.Type) {
+  const targetSymbol = info.targetType.isaSymbol()
+
+  if !targetSymbol {
+    ctx.err(info, fn(info) = println("(#{'mkCall'}#[%<white|black>]): #{info.targetType} is not callable"))
+    return (null, ast.tyUnknown)
+  }
+
+  if targetSymbol.instance {
+    const type = callInstance(ctx, info, targetSymbol)
+    return (info.receiver, type)
+  }
+
+  if targetSymbol.template {
+    const type = callTemplate(ctx, info, targetSymbol)
+    return (info.receiver, type)
+  }
+
+  ctx.err(info, fn(info) = println("(#{'mkCall'}#[%<white|black>]): #{info.targetType} is not callable"))
+  return (null, ast.tyUnknown)
+}
+
+//-----------------------------------------------------------------------------------------------------
+fn callInstance(ctx, info, targetSymbol): ast.Type {
+  if targetSymbol.instance.isNotATypeNode() {
+    ctx.err(info, fn(info) = println("#{info.targetType} is not callable"))
+    return ast.tyUnknown
+  }
+
+  const instance = targetSymbol.instance as ast.TypeNode*
+  assert targetSymbol.template
+
+  setInstanceArity(ctx, instance.parameters)
+  if !matchInstanceArity(ctx, instance.parameters, info, targetSymbol) {
+    return ast.tyUnknown
+  }
+
+  if !sortArgumentsByInstance(ctx, targetSymbol, instance.parameters, info.arguments) {
+    return ast.tyUnknown
+  }
+
+  if matchTypes(ctx, instance.parameters, info.arguments) {
+    info.succeeded = true
+    return instance.type
+  }
+
+  ctx.typeMisMatch(instance.type, info.arguments)
+  return ast.tyUnknown
+
+  fn setInstanceArity(ctx, parameters) {
+    ctx.arity.nominal = parameters.length
+  }
+}
+
+
+fn matchInstanceArity(ctx, parameters, info, targetSymbol) {
+  const            arguments = info.arguments
+  const hasReceiverParameter = hasThisOrSelfParameter(ctx, parameters)
+  const  hasReceiverArgument = hasReceiverParameter && hasThisOrSelfArgument(ctx, info)
+  if hasReceiverArgument {
+    insertReceiver(ctx, info, hasReceiverParameter, targetSymbol)
+  } else {
+    removeReceiver(ctx, info)
+  }
+  if arguments.length != parameters.length {
+    ctx.arityError(info.targetType, arguments)
+    return false
+  }
+  return true
+
+  fn hasThisOrSelfParameter(ctx, parameters): Identifier* {
+    return null if parameters.isEmpty()
+    const first = parameters.first()
+    const  name = first.name
+    return name if name == ctx.binder.typer.ids.kw_this || name == ctx.binder.typer.ids.kw_self
+      else null
+  }
+
+  fn hasThisOrSelfArgument(ctx, info) {
+    return false if !info.receiver
+    return info.receiver.isNotATypeName()
+  }
+
+  fn insertReceiver(ctx, info, name, targetSymbol) {
+    const indexSymbol = info.indexSymbol
+    if targetSymbol == indexSymbol { // A direct call to {targetSymbol}.
+      insert(ctx, info, name)
+    } else { // An indirect call to {targetSymbol} through {indexSymbol}.
+      const base = ctx.binder.make.copyable(info.receiver, ctx.scope)
+      info.receiver = ctx.binder.make.copy(base, ctx.pos)
+      insert(ctx, info, name)
+      info.receiver = ctx.binder.make.member(base, indexSymbol, ctx.pos)
+    }
+
+    fn insert(ctx, info, name) {
+      const argument = ctx.binder.make.argument(name, info.receiver, info.receiver.pos)
+      info.arguments.insert(0, argument)
+      info.receiver = null
+    }
+  }
+
+  fn removeReceiver(ctx, info) {
+    info.receiver = ctx.throwAway(info.receiver)
+  }
+}
+
+
+fn sortArgumentsByInstance(ctx, symbol, parameters, arguments) {
+  return true if parameters.isEmpty()
+  struct Pair {
+    var parameter = ast.Symbol*{}
+    var  argument = ast.Argument*{}
+  }
+  const errors = ctx.binder.typer.errors
+  const   type = symbol.type()
+  auto    list = List(Pair){}
+  list.setLength(parameters.length)
+  for argumentIndex, value in arguments {
+    var      parameter = ast.Symbol*{}
+    var       argument = ast.Argument*{}
+    var parameterIndex = argumentIndex
+    if argument = value is ast.Argument {
+      if argument.name.isEmpty() || argument.name.isRandom() {
+        if parameterIndex < parameters.length {
+          parameter = parameters.items[parameterIndex]
+          argument.name = parameter.name
+        }
+      } else {
+        parameterIndex = indexOfParameter(parameters, argument.name)
+        if parameterIndex >= 0 {
+          parameter = parameters.items[parameterIndex]
+        }
+      }
+    } else if parameterIndex < parameters.length {
+      parameter = parameters.items[parameterIndex]
+       argument = ctx.binder.make.argument(parameter.name, value, value.pos)
+    } else {
+      argument = ctx.binder.make.argument(ctx.binder.typer.emptyid, value, value.pos)
+    }
+    if !parameter {
+      ctx.err({ type = type, index = argumentIndex, name = argument.name }) with {
+        println("argument #{it.name}#[%<darkred|white>] @ #{it.index}#[%<darkred|white>] not found in \
+          #{it.type}")
+      }
+      delete argument
+    } else if list.items[parameterIndex].parameter {
+      ctx.err({ type = type, index = parameterIndex, name = argument.name }) with {
+        println("parameter #{it.name}#[%<darkred|white>] @ #{it.index}#[%<darkred|white>] of #{it.type} \
+          already assigned a value")
+      }
+      delete argument
+    } else {
+      list.items[parameterIndex] = Pair{ parameter = parameter, argument = argument }
+    }
+  }
+  if errors != ctx.binder.typer.errors {
+    // Do nothing
+  } else for i, pair in list {
+    if const parameter = pair.parameter {
+      if pair.argument {
+        // Ok. An argument for a parameter.
+      } else {
+        ctx.err({ type = type, index = i, name = parameter.name }) with {
+          println("parameter #{it.name}#[%<darkred|white>] @ #{it.index}#[%<darkred|white>] \
+            must be passed an argument\r\n\t\
+            → type: #{it.type}")
+        }
+      }
+    } else {
+      assert 0
+    }
+  }
+  if errors != ctx.binder.typer.errors {
+    // Do nothing.
+  } else if symbol.isaFunction() {
+    takeReferences(ctx, list)
+  }
+  arguments.clear()
+  for pair in list {
+    if pair.argument {
+      arguments.append(pair.argument)
+    }
+  }
+  return errors == ctx.binder.typer.errors
+
+  fn indexOfParameter(parameters, name) {
+    for i, parameter in parameters {
+      return i if name == parameter.name
+    }
+    return -1
+  }
+
+  fn takeReferences(ctx, list) {
+    for pair in list {
+      const argument = pair.argument
+      if argument.value = ctx.binder.make.suitableForFunctionArgument(argument.value) {
+        argument.type = argument.value.type
+      }
+    }
+  }
+}
+
+
+//----------------------------------------------------------------------------------------------------------
+fn callTemplate(ctx, info, targetSymbol): ast.Type {
+  if targetSymbol.template.isNotATypeNode() {
+    ctx.err(info, fn(info) = println("#{'callTemplate'}#[%<red>]: #{info.targetType} is not callable"))
+    return ast.tyUnknown
+  }
+
+  const template = targetSymbol.template as src.TypeNode*
+
+  setTemplateArity(ctx, template.parameters)
+  if !matchTemplateArity(ctx, template.parameters, info, targetSymbol) {
+    return ast.tyUnknown
+  }
+
+  if !sortTemplateArguments(ctx, targetSymbol, template.parameters, info.arguments) {
+    return ast.tyUnknown
+  }
+
+  const found = findInstance(ctx, targetSymbol, info.arguments)
+  return ast.tyUnknown if found.isUnknown()
+
+  info.succeeded = true
+  return found
+
+  fn setTemplateArity(ctx, parameters) {
+    return if !parameters || parameters.children.isEmpty() 
+    const arity = ctx.arity
+    for node in parameters.children {
+      const parameter = node as src.Variable*
+      if parameter.isEllipsis {
+        ++arity.variable
+      } else if parameter.rhs {
+        ++arity.nominal
+      } else {
+        ++arity.positional
+      }
+    }  
+  }
+}
+
+define MAX_VARIABLE_PARAMS 0xffff
+fn matchTemplateArity(ctx, parameters, info, targetSymbol) {
+  const            arguments = info.arguments
+  const                arity = ctx.arity
+  const             optional = MAX_VARIABLE_PARAMS if arity.variable else arity.nominal
+  const                  min = arity.positional
+  const                  max = min + optional
+  const hasReceiverParameter = hasThisOrSelfParameter(ctx, parameters)
+  const  hasReceiverArgument = hasReceiverParameter && hasThisOrSelfArgument(ctx, info)
+  if hasReceiverArgument {
+    insertReceiver(ctx, info, hasReceiverParameter, targetSymbol)
+  } else {
+    removeReceiver(ctx, info)
+  }
+  if arguments.length < min || arguments.length > max {
+    ctx.arityError(info.targetType, arguments)
+    return false
+  }
+  return true
+
+  fn hasThisOrSelfParameter(ctx, parameters): Identifier* {
+    return null if !parameters || parameters.children.isEmpty()
+    const first = parameters.children.first() as src.Variable*
+    const  name = (first.name as src.Name*).value
+    return name if name == ctx.binder.typer.ids.kw_this || name == ctx.binder.typer.ids.kw_self
+      else null
+  }
+
+  fn hasThisOrSelfArgument(ctx, info) {
+    return false if !info.receiver
+    return info.receiver.isNotATypeName()
+  }
+
+  fn insertReceiver(ctx, info, name, targetSymbol) {
+    const indexSymbol = info.indexSymbol
+    if targetSymbol == indexSymbol { // A direct call to {targetSymbol}.
+      insert(ctx, info, name)
+    } else { // An indirect call to {targetSymbol} through {indexSymbol}.
+      const base = ctx.binder.make.copyable(info.receiver, ctx.scope)
+      info.receiver = ctx.binder.make.copy(base, ctx.pos)
+      insert(ctx, info, name)
+      info.receiver = ctx.binder.make.member(base, indexSymbol, ctx.pos)
+    }
+
+    fn insert(ctx, info, name) {
+      const argument = ctx.binder.make.argument(name, info.receiver, info.receiver.pos)
+      info.arguments.insert(0, argument)
+      info.receiver = null
+    }
+  }
+
+  fn removeReceiver(ctx, info) {
+    info.receiver = ctx.throwAway(info.receiver)
+  }
+}
+
+
+fn matchTypes(ctx, parameters, arguments) {
+  import sema
+  for i, parameter in parameters {
+    const argument = arguments.items[i]
+    return false if argument.type != parameter.instance.type
+  }
+  return true
+
+  /*auto casts = List(ast.CastKind){}
+  for i, parameter in parameters {
+    const argument = arguments.items[i]
+    if const c = sema.cast(parameter.type, argument.type, isImplicit = true) {
+      casts.append(c)
+    } else {
+      return false
+    }
+  }
+  for i, c in casts {
+    const parameter = parameters.items[i]
+    const  argument = arguments.items[i]
+    if argument.value = ctx.binder.make.castWith(argument.value, parameter.type, c, argument.value.pos) {
+      argument.type = argument.value.type
+    } else {
+      assert 0
+    }
+  }
+  return true*/
+}
+
+
+fn sortTemplateArguments(ctx, symbol, parameters, arguments) {
+  return true if !parameters || parameters.children.isEmpty()
+  struct Pair {
+    var parameter = src.Variable*{}
+    var  argument = ast.Argument*{}
+  }
+  const errors = ctx.binder.typer.errors
+  const   type = symbol.type()
+  auto    list = List(Pair){}
+  list.setLength(parameters.children.length)
+  for argumentIndex, value in arguments {
+    var      parameter = src.Variable*{}
+    var       argument = ast.Argument*{}
+    var parameterIndex = argumentIndex
+    if argument = value is ast.Argument {
+      if argument.name.isEmpty() || argument.name.isRandom() {
+        if parameterIndex < parameters.children.length {
+          parameter = parameters.children.items[parameterIndex] as src.Variable*
+          argument.name = (parameter.name as src.Name*).value
+        }
+      } else {
+        parameterIndex = indexOfParameter(parameters.children, argument.name)
+        if parameterIndex >= 0 {
+          parameter = parameters.children.items[parameterIndex] as src.Variable*
+        }
+      }
+    } else if parameterIndex < parameters.children.length {
+      parameter = parameters.children.items[parameterIndex] as src.Variable*
+       argument = ctx.binder.make.argument((parameter.name as src.Name*).value, value, value.pos)
+    } else {
+      argument = ctx.binder.make.argument(ctx.binder.typer.emptyid, value, value.pos)
+    }
+    if !parameter {
+      ctx.err({ type = type, index = argumentIndex, name = argument.name }) with {
+        println("argument #{it.name}#[%<darkred|white>] @ #{it.index}#[%<darkred|white>] not found in \
+          #{it.type}")
+      }
+      delete argument
+    } else if list.items[parameterIndex].parameter {
+      ctx.err({ type = type, index = parameterIndex, name = argument.name }) with {
+        println("parameter #{it.name}#[%<darkred|white>] @ #{it.index}#[%<darkred|white>] of #{it.type} \
+          already assigned a value")
+      }
+      delete argument
+    } else {
+      list.items[parameterIndex] = Pair{ parameter = parameter, argument = argument }
+    }
+  }
+  if errors != ctx.binder.typer.errors {
+    // Do nothing
+  } else for i, pair in list {
+    if const parameter = pair.parameter {
+      const       name = (parameter.name as src.Name*).value
+      if pair.argument {
+        // Ok. An argument for a parameter.
+      } else if const rhs = parameter.rhs {
+        if const value = ctx.binder.evaluateParameter(rhs, symbol.scope, ctx) {
+          pair.argument = ctx.binder.make.argument(name, value, value.pos)
+        }
+      } else if parameter.isEllipsis {
+        assert 0 // Ok. Optional. Does not require a parameter.
+      } else {
+        ctx.err({ type = type, index = i, name = name }) with {
+          println("parameter #{it.name}#[%<darkred|white>] @ #{it.index}#[%<darkred|white>] \
+            must be passed an argument\r\n\t\
+            → type: #{it.type}")
+        }
+      }
+    } else {
+      assert !pair.argument
+      pair.parameter = parameters.children.items[i] as src.Variable*
+      const   name = (pair.parameter.name as src.Name*).value
+      if const rhs = pair.parameter.rhs {
+        if const value = ctx.binder.evaluateParameter(rhs, symbol.scope, ctx) {
+          pair.argument = ctx.binder.make.argument(name, value, value.pos)
+        }
+      } else {
+        ctx.err({ type = type, index = i, name = name }) with {
+          println("parameter #{it.name}#[%<darkred|white>] @ #{it.index}#[%<darkred|white>] \
+            must be passed an argument\r\n\t\
+            → target: #{it.type}")
+        }
+      }
+    }
+  }
+  if errors != ctx.binder.typer.errors {
+    // Do nothing.
+  } else if symbol.isaFunction() {
+    takeReferences(ctx, list)
+  }
+  arguments.clear()
+  for pair in list {
+    if pair.argument {
+      arguments.append(pair.argument)
+    }
+  }
+  return errors == ctx.binder.typer.errors
+
+  fn indexOfParameter(parameters, name) {
+    for i, param in parameters {
+      const     parameter = param as src.Variable*
+      const parameterName = parameter.name as src.Name*
+      return i if name == parameterName.value
+    }
+    return -1
+  }
+
+  fn takeReferences(ctx, list) {
+    for pair in list {
+      const argument = pair.argument
+      if argument.value = ctx.binder.make.suitableForFunctionArgument(argument.value) {
+        argument.type = argument.value.type
+      }
+    }
+  }
+}
+
+
+fn findInstance(ctx, symbol, arguments): ast.Type {
+  const   template = symbol.template as src.TypeNode*
+  const overloaded = symbol.scope.findOverloadSet(template.name)
+  if overloaded {
+    assert !overloaded.template.instance
+    assert overloaded.template.template == symbol.template
+    return resolveOverloads(ctx, symbol, overloaded, arguments)
+  }
+  return instantiate(ctx, symbol, arguments)
+}
+
+
+//-----------------------------------------------------------------------------------------------------
+fn resolveOverloads(ctx, symbol, overloaded, arguments): ast.Type {
+  if overloaded.symbols.isEmpty() {
+    return instantiate(ctx, symbol, arguments)
+  }
+  if const template = symbol.template is src.Function {
+    if template.keyword == Tok.Extern {
+      return overloaded.symbols.items[0].type()
+    }
+  }
+  for candidate in overloaded.symbols {
+    assert candidate.instance && candidate.template == symbol.template
+    continue if candidate.isCompilerGenerated // Compiler generated functions don't participate in overload resolution
+    if matchCandidate(ctx, candidate, arguments) {
+      return candidate.type()
+    }
+  }
+  return instantiate(ctx, symbol, arguments)
+
+  fn matchCandidate(ctx, candidate, arguments) {    
+    if const instance = candidate.instance as ast.TypeNode* {
+      return false if instance.parameters.length != arguments.length
+      return matchTypes(ctx, instance.parameters, arguments)
+    }
+    ctx.err(candidate, fn(candidate) = 
+      println("expected a type in matching candidates not #{candidate.type()}"))
+    return false
+  }
+}
+
+
+fn instantiate(ctx, symbol, arguments): ast.Type {
+  switch const template = symbol.template {
+    case s: src.Struct   return instantiateStruct(ctx, symbol.scope, s, arguments)
+    case u: src.Union    return instantiateUnion(ctx, symbol.scope, u, arguments)
+    case e: src.Enum     return instantiateEnum(ctx, symbol.scope, e, arguments)
+    case f: src.Function return instantiateFunction(ctx, symbol.scope, f, arguments)
+    default assert 0
+  }
+  ctx.typeMisMatch(symbol.type(), arguments)
+  return ast.tyUnknown
+}
+
+
+fn instantiateStruct(ctx, templateScope, template, arguments): ast.Type {
+  const   errors = ctx.binder.typer.errors
+  const instance = new ast.Struct{ pos = ctx.binder.mkPos(template), name = template.name, alignment = template.alignment }
+  if template.block {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, ctx.binder.mkPos(template.block),
+      withExit = false, withExitInParent = false)
+  } else {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, instance.pos,
+      withExit = false, withExitInParent = false)
+  }
+  auto str = String{}
+  mkDotName(instance.scope, str)
+  instance.dotName = ctx.binder.typer.ids.get(str)
+  const (symbol, dup) = templateScope.appendSymbol(instance.name, template, instance)
+  if dup {
+    ctx.e_alreadyDeclared(instance.name)
+    return ast.tyUnknown
+  }
+  instance.type.setSymbol(symbol)
+  putInstanceParameters(ctx, instance as ast.TypeNode*, template.parameters, arguments)
+  if ctx.hasNoNewErrors(errors) {
+    ctx.binder.visitStructOrUnion(symbol)
+  }
+  return instance.type
+}
+
+
+fn instantiateUnion(ctx, templateScope, template, arguments): ast.Type {
+  const   errors = ctx.binder.typer.errors
+  const instance = new ast.Union{ pos = ctx.binder.mkPos(template), name = template.name, alignment = template.alignment }
+  if template.block {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, ctx.binder.mkPos(template.block),
+      withExit = false, withExitInParent = false)
+  } else {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, instance.pos,
+      withExit = false, withExitInParent = false)
+  }
+  auto str = String{}
+  mkDotName(instance.scope, str)
+  instance.dotName = ctx.binder.typer.ids.get(str)
+  const (symbol, dup) = templateScope.appendSymbol(instance.name, template, instance)
+  if dup {
+    ctx.e_alreadyDeclared(instance.name)
+    return ast.tyUnknown
+  }
+  instance.type.setSymbol(symbol)
+  putInstanceParameters(ctx, instance as ast.TypeNode*, template.parameters, arguments)
+  if ctx.hasNoNewErrors(errors) {
+    ctx.binder.visitStructOrUnion(symbol)
+  }
+  return instance.type
+}
+
+
+fn instantiateEnum(ctx, templateScope, template, arguments): ast.Type {
+  const   errors = ctx.binder.typer.errors
+  const instance = new ast.Enum{ pos = ctx.binder.mkPos(template), name = template.name }
+  if template.block {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, ctx.binder.mkPos(template.block),
+      withExit = false, withExitInParent = false)
+  } else {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, instance.pos,
+      withExit = false, withExitInParent = false)
+  }
+  auto str = String{}
+  mkDotName(instance.scope, str)
+  instance.dotName = ctx.binder.typer.ids.get(str)
+  const (symbol, dup) = templateScope.appendSymbol(instance.name, template, instance)
+  if dup {
+    ctx.e_alreadyDeclared(instance.name)
+    return ast.tyUnknown
+  }
+  instance.type.setSymbol(symbol)
+  if template.valueType {
+    if const value  = ctx.binder.bind(template.valueType, instance.scope) {
+      instance.valueType = value.type
+      ast.ndispose(value)
+    }
+  } else {
+    instance.valueType = ast.tyInt32
+  }
+  if ctx.hasNoNewErrors(errors) {
+    ctx.binder.visitEnum(symbol)
+  }
+  return instance.type
+}
+
+
+fn instantiateFunction(ctx, templateScope, template, arguments): ast.Type {
+  const   errors = ctx.binder.typer.errors
+  const instance = new ast.Function{ pos = ctx.binder.mkPos(template), name = template.name,
+    keyword = template.keyword }
+  const withExit = !(template.modifiers.isAsync || template.seen.yields)
+  if template.block {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, ctx.binder.mkPos(template.block),
+      withExit, withExitInParent = false)
+  } else {
+    instance.scope = ctx.binder.make.scope(instance, templateScope, instance.pos, withExit,
+      withExitInParent = false)
+  }
+  auto str = String{}
+  ctx.binder.make.dotName(instance.scope, str)
+  instance.dotName = ctx.binder.typer.ids.get(str)
+  const (symbol, dup) = templateScope.appendSymbol(instance.name, template, instance)
+  if dup {
+    ctx.e_alreadyDeclared(instance.name)
+    return ast.tyUnknown
+  }
+  instance.type.setSymbol(symbol)
+  putInstanceParameters(ctx, instance as ast.TypeNode*, template.parameters, arguments)
+  if ctx.hasNoNewErrors(errors) {
+    ctx.binder.visitFunction(symbol)
+  }
+  if instance.keyword == Tok.Extern {
+    ctx.binder.resolveExtern(instance, ctx.pos)
+  }
+  return instance.type
+}
+
+
+fn putInstanceParameters(ctx, instance, parameters, arguments) {
+  return if arguments.length == 0
+  assert parameters && parameters.children.length <= arguments.length
+  for i, argument in arguments {
+    const parameter = parameters.children.items[i] as src.Variable* if i < parameters.children.length
+                      else parameters.children.last() as src.Variable*
+    putInstanceParameter(ctx, instance, parameter, argument)
+  }
+
+  fn putInstanceParameter(ctx, instance, template, argument) {
+    const parameter = ctx.binder.make.parameter(template.modifiers, argument.name, argument.type,
+      ctx.binder.mkPos(template))
+    const (symbol, dup) = instance.scope.appendSymbol(argument.name, ctx.binder.typer.nullTemplate, parameter)    
+    if symbol {
+      instance.parameters.append(symbol)
+    }
+    if dup {
+      ctx.e_alreadyDeclared(argument.name)
+    }
+  } 
+}
+
+
+fn mkDotName(scope, str): void {
+  for var p = scope; p && p.parent; p = p.parent {
+    switch p.owner {
+      case x: ast.Folder   insertDotText(str, x.name)
+      case x: ast.File     insertDotText(str, x.name)
+      case x: ast.Struct   insertDotText(str, x.name)
+      case x: ast.Union    insertDotText(str, x.name)
+      case x: ast.Enum     insertDotText(str, x.name)
+      case x: ast.Function insertDotText(str, x.name)
+    }
+  }
+
+  fn insertDotText(str, name): void {
+    assert name && name.length
+    if str.length {
+      str.insert(0, ".")
+    }
+    str.insert(0, name)
+  }
+}

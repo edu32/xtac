@@ -1,0 +1,409 @@
+fn run(ctx) {
+  import worker
+  const provider = worker.BatchProvider{ program = ctx.ssa }
+  const    start = time.clock()
+  auto generator = provider.functions()
+  const  context = {
+             srw = atomic.ExclusiveLock{},
+       generator = generator,
+    singleThread = false,
+         visited = { functions = 0, blocks = 0, values = 0, assignments = 0 },
+            phis = { created = 0, pruned = 0, passes = 0 },
+    update = synchronized fn(self, pass) {
+      ++self.visited.functions
+           self.visited.blocks += pass.visited.blocks
+           self.visited.values += pass.visited.values
+      self.visited.assignments += pass.visited.assignments
+             self.phis.created += pass.phis.created
+              self.phis.pruned += pass.phis.pruned
+              self.phis.passes += pass.phis.passes
+    }
+  }
+  threads.run(context) with {
+    auto batch = List(ssa.Function*){}
+    for it.generator.fill(batch) {
+      for function in batch {
+        auto pass = BasicFunction{ function = function }
+        pass.run()
+        it.update(pass)
+      }
+    }
+  }
+
+  const elapsed = time.elapsed(start)
+  println("#{'ssagen'}#[%<darkblue|cyan>]: {\r\n\
+    #{'purpose'}#[%wl12]: #{'converts the ir to static single aassignment form'}#[%<darkyellow>],\r\n\
+    #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+    #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+    #{'visited'}#[%wl12]: { functions: #{context.visited.functions}#[%,%<gray>], \
+                               blocks: #{context.visited.blocks}#[%,%<gray>], \
+                               values: #{context.visited.values}#[%,%<gray>] },\r\n\
+    #{'assignments'}#[%wl12]: #{context.visited.assignments}#[%,%<gray>] removed (#{100.0 * context.visited.assignments / context.visited.values}#[%d2%<gray>]%),\r\n\
+    #{'phis'}#[%wl12]: { created: #{context.phis.created}#[%,%<gray>], \
+                          pruned: #{context.phis.pruned}#[%,%<gray>] (#{100.0 * context.phis.pruned / context.phis.created}#[%d2%<gray>]%), \
+                          passes: #{context.phis.passes}#[%,%<gray>] }\r\n\
+    #{'memory'}#[%wl12]: #{memory.mformat()} }")
+}
+
+
+struct BasicBlock {
+  const        block = ssa.Block*{}
+  const predecessors = List(BasicBlock*){}
+  const  definitions = List(ssa.Value*){}
+  var  isaLoopHeader = false
+
+  fn dispose(this) {
+    delete this.predecessors
+    delete this.definitions
+  }
+
+  fn find(this, value) {
+    for definition in this.definitions {
+      return definition if definition.index == value.index
+    }
+    return null
+  }
+
+  fn replaceDefinition(this, value) {
+    for i, definition in this.definitions {
+      if definition.index == value.index {
+        this.definitions.items[i] = value
+        return
+      }
+    }
+    this.definitions.append(value)
+  }
+
+  fn defineVariableIfNotExists(this, value) {
+    for definition in this.definitions {
+      return if definition.index == value.index
+    }
+    this.definitions.append(value)
+  }
+
+  fn defineVariableIfNotOwn(this, value) {
+    for i, definition in this.definitions {
+      if definition.index == value.index {
+        return if definition.parent == this.block
+        this.definitions.items[i] = value
+        return
+      }
+    }
+    this.definitions.append(value)
+  }
+}
+
+
+struct BasicFunction {
+  const       ts = TypeStore&{}
+  const function = ssa.Function*{}
+  const      bbs = List(BasicBlock){}
+  const  visited = { blocks = 0, values = 0, assignments = 0 }
+  const     phis = { created = 0, pruned = 0, passes = 0 } 
+
+
+  fn dispose(this) {
+    delete this.bbs with fn(x) = delete x
+  }
+
+
+  fn run(this) {
+    this.setup()
+    this.visitBasicBlocks()
+    this.pullDefinitions()
+    this.updatePhiOperands()
+    this.tryRemovePhis()
+  }
+
+
+  fn setup(this) {
+    var bidx = 0
+    var vidx = 0
+    each block in this.function.blocks() {
+      block.index = bidx++
+      this.bbs.append(BasicBlock{ block = block })      
+      each value in block.values() {
+        value.index = vidx++
+      }
+    }
+    this.visited.blocks = bidx
+    this.visited.values = vidx
+    for i, bb in this.bbs {
+      each predecessor in bb.block.predecessors() {
+        bb.predecessors.append(this.bbs.items[predecessor.index])
+        if predecessor.index > bb.block.index {
+          bb.isaLoopHeader = true
+        }
+      }
+    }
+  }
+
+
+  fn visitBasicBlocks(this) {
+    for bb in this.bbs {
+      for var value = bb.block.body.first; value; {
+        const qnext = value.qnext
+        switch value {
+          case ssa.Assign  this.visitAssignment(value, bb)
+          default          this.visitDefinition(value, bb)
+        }
+        value = qnext
+      }
+    }
+  }
+
+
+  fn visitAssignment(this, value, bb) {
+    assert value.uses.isEmpty()
+
+    this.readOperand(value, 1, bb)
+
+    const dst = value.operands.items[0]
+    const src = value.operands.items[1]
+
+    if const dstval = dst.isaValue() {
+      const     load = new ssa.Load{ pos = value.pos, name = dstval.name, parent = bb.block, type = value.type, index = dstval.index }
+      const operands = load.initialize(operands = 1)
+      if const  node = src.isaNode() {
+        operands.set(0, node)
+      } else if const imm = src.isanImmediate() {
+        operands.imm(0, imm)
+      } else {
+        assert 0
+      }
+      bb.block.body.insertBefore(load, value)
+      value.operands.clear()
+      bb.block.body.remove(value)
+      delete value
+      this.defineVariable(load)
+      ++this.visited.assignments
+    } else {
+      println("<phis.visitAssignment>: assignment destination not a value")
+    }
+  }
+
+
+  fn visitDefinition(this, value, bb) {
+    for var i = 0; i < value.operands.length; ++i {
+      this.readOperand(value, i, bb)
+    }
+
+    switch value {
+      case ssa.ElementAt{}
+      case ssa.Store    assert value.uses.isEmpty()
+      case ssa.Assign   assert 0
+      case ssa.Exchange assert value.uses.isEmpty()
+      case ssa.XAdd     assert value.uses.isEmpty()
+      case ssa.Local    {}
+      case ssa.Parameter{
+        if value.parameterIndex < 4 {
+          this.defineVariable(value)
+        }
+      }
+      case ssa.Assert   {}
+      case ssa.Pause    {}
+      case ssa.Yield    assert value.uses.isEmpty()
+      case ssa.Jump     assert value.uses.isEmpty()
+      case ssa.JumpIf   assert value.uses.isEmpty()
+      case ssa.Return   assert value.uses.isEmpty()
+      case ssa.Argument {}
+      default this.defineVariable(value)
+    }
+  }
+
+
+  fn readOperand(this, definition, operandIndex, bb) {
+    const  operand = definition.operands.items[operandIndex]
+    if const value = operand.isaValue() {
+      switch value {
+        case ssa.ElementAt return
+        case ssa.Local     return
+        case ssa.Parameter return if value.parameterIndex > 3
+        case ssa.Argument  return
+      }
+      return if value is ssa.ElementAt
+      const found = this.read(value, bb)
+      definition.operands.set(operandIndex, found, operand.io)
+    }
+  }
+
+
+  fn read(this, value, bb): ssa.Value* {
+    if const found = bb.find(value) {
+      return found
+    }
+    if bb.predecessors.length == 1 && !bb.isaLoopHeader {
+      const predecessor = bb.predecessors.items[0]
+      const       found = this.read(value, predecessor)
+      bb.defineVariableIfNotExists(found)
+      return found
+    }
+    return this.createPhi(value, bb)
+  }
+
+
+  fn createPhi(this, value, bb) {
+    const block = bb.block
+    const   phi = new ssa.Phi{ pos = block.pos, name = value.name, parent = block, type = value.type, index = value.index }
+    phi.initialize(operands = bb.predecessors.length)
+    block.body.prepend(phi)
+    this.defineVariable(phi)
+    this.fillPhiArguments(phi)
+    ++this.phis.created
+    return phi
+  }
+  
+
+  fn fillPhiArguments(this, phi): void {
+    const bb = this.bbs.items[phi.parent.index]
+    for i, predecessor in bb.predecessors {
+      if const found = this.read(phi, predecessor) {
+        phi.operands.set(i, found)
+      }
+    }
+  }
+
+
+  fn defineVariable(this, value) {
+    const bb = this.bbs.items[value.parent.index]
+    bb.replaceDefinition(value)
+  }
+
+
+  fn pullDefinitions(this) {
+    for bb in this.bbs {
+      for predecessor in bb.predecessors {
+        if predecessor.block.index < bb.block.index {
+          for definition in predecessor.definitions {
+            bb.defineVariableIfNotOwn(definition)
+          }
+        }
+      }
+    }
+  }
+
+
+  fn updatePhiOperands(this) {
+    for bb in this.bbs {
+      for var value = bb.block.body.first; value; value = value.qnext {
+        switch value {
+          case ssa.Phi this.visitPhi(value)
+          default break
+        }
+      }
+    }    
+  }
+
+
+  fn visitPhi(this, phi) {
+    const bb = this.bbs.items[phi.parent.index]
+    assert phi.operands.length == bb.predecessors.length
+    for i, operand in phi.operands {
+      const       value = operand.value.node as ssa.Value*
+      const predecessor = bb.predecessors.items[i]
+      assert value.index == phi.index && value.name == phi.name
+      if const found = this.findPhiArgument(value, predecessor) {
+        phi.operands.set(i, found)
+      } else {
+        println("<readPhiOperand>: could not find phi operand")
+      }
+    }
+  }
+
+
+  fn findPhiArgument(this, value, predecessor) {
+    if const found = predecessor.find(value) {
+      return found
+    }
+    assert 0
+    return null
+  }
+
+
+  fn tryRemovePhis(this) {
+    var pruned = this.phis.pruned
+    for {
+      for bb in this.bbs {
+        for var value = bb.block.body.first; value; {
+          const qnext = value.qnext
+          switch value {
+            case ssa.Phi this.tryRemovePhi(value)
+          }
+          value = qnext
+        }
+      }
+      ++this.phis.passes
+      break if pruned == this.phis.pruned
+      pruned = this.phis.pruned
+    }
+  }
+
+
+  fn tryRemovePhi(this, phi):void {
+    if phi.uses.isEmpty() {
+      this.removePhi(phi, replacer = ssa.Value*{})
+      return
+    }
+
+    const           bb = this.bbs.items[phi.parent.index]
+    var         unique = ssa.Value*{}
+    var selfReferences = 0
+
+    return if bb.isaLoopHeader
+
+    /*return if bb.isaLoopHeader && bb.predecessors.length == 1 &&
+              phi.operands.items[0].value.node != phi*/
+
+    for operand in phi.operands {
+      const argument = operand.value.node as ssa.Value*
+      if argument == phi {
+        ++selfReferences  
+      } else if !unique {
+        unique = argument as ssa.Value*  
+      } else if unique != argument {
+        unique = null
+        break
+      }
+    }
+
+    if unique && unique != phi {
+      this.removePhi(phi, unique)
+    }
+  }
+
+
+  fn removePhi(this, phi, replacer):void {
+    const   bb = this.bbs.items[phi.parent.index]
+    auto users = List(ssa.Phi*){}
+
+    if replacer {
+      this.copyUsersOfPhi(phi, users)
+      phi.replace(replacer)
+    } else {
+      phi.operands.clear()
+    }
+    bb.block.body.remove(phi)
+    delete phi
+    ++this.phis.pruned
+
+    for user in users {
+      this.tryRemovePhi(user)
+    }
+  }
+
+
+  fn copyUsersOfPhi(phi, list) {
+    for use in phi.uses {
+      const operand = use.operand()
+      if const user = operand.value.node is ssa.Phi {
+        continue if user == phi
+        var found = list.contains(phi) with phi, other {
+          return phi == other
+        }
+        if !found {
+          list.append(user)
+        }
+      }
+    }
+  }
+}

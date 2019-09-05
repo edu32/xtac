@@ -1,0 +1,87 @@
+fn toUpperCase(ch) = (ch - 'a' + 'A') if ch >= 'a' && ch <= 'z' else ch
+
+fn toLowerCase(ch) = (ch - 'A' + 'a') if ch >= 'A' && ch <= 'Z' else ch
+
+fn toDigit(ch) = (ch - '0') if ch >= '0' && ch <= '9' else -1
+
+fn fromHex(ch) = (ch - '0')      if ch >= '0' && ch <= '9' 
+            else (ch - 'a' + 10) if ch >= 'a' && ch <= 'f'
+            else (ch - 'A' + 10) if ch >= 'A' && ch <= 'F'
+            else -1
+
+fn isUpperCase(ch) = ch >= 'A' && ch <= 'Z'
+
+fn isLowerCase(ch) = ch >= 'a' && ch <= 'z'
+
+fn isaDigit(ch) = ch >= '0' && ch <= '9'
+
+fn isHex(ch) = (ch >= 'a' && ch <= 'f') ||
+               (ch >= 'A' && ch <= 'F') ||
+               (ch >= '0' && ch <= '9')
+fn isOctal(ch) = ch >= '0' && ch <= '7'
+
+fn isAlpha(ch) = (ch >= 'a' && ch <= 'z') ||
+                 (ch >= 'A' && ch <= 'Z')
+
+fn isAlphaOrDigit(ch)    = isAlpha(ch) || isaDigit(ch)
+
+fn isaSpace(ch)          = ch == ' '  || ch == '\t'
+fn isaNewLine(ch)        = ch == '\r' || ch == '\n'
+fn isaSpaceOrNewLine(ch) = ch == ' '  || ch == '\t' || ch == '\r' || ch == '\n'
+
+fn isaSlash(ch)         = ch == '\\' || ch == '/'
+fn isaQuote(ch)         = ch == '\'' || ch == '"' || ch == '`'
+
+fn isaUtf8LeadByte(ch) {
+  return 1 if  (ch & 0b1000_0000) == 0
+  return 2 if  (ch & 0b1110_0000) == 0b1100_0000
+  return 3 if  (ch & 0b1111_0000) == 0b1110_0000
+  return 4 if  (ch & 0b1111_1000) == 0b1111_0000
+  return 0
+}
+
+fn isaUtf8FollowingByte(ch) {
+  return (ch & 0b1100_0000) == 0b1000_0000
+}
+
+
+fn isaWordBoundary(ch) {
+  return false if isAlphaOrDigit(ch) || ch == '_'
+  return false if isaUtf8LeadByte(ch) > 1 || isaUtf8FollowingByte(ch)
+  return true
+}
+
+fn encodeBase16(ch, useUpperCase = false) {
+  const result = Char[ 2 ]
+  const hi = (ch >> 4 ) & 0xf
+  const lo = ch & 0xf
+  const hiHex = ('0' + hi) if hi < 0xa 
+   else ('A' + (hi - 0xa)) if useUpperCase
+   else ('a' + (hi - 0xa))
+  const loHex = ('0' + lo) if lo < 0xa 
+   else ('A' + (lo - 0xa)) if useUpperCase
+   else ('a' + (lo - 0xa))
+  result[0] = hiHex
+  result[1] = loHex
+  return result
+}
+
+fn decodeBase16(hiHex, loHex) {
+  const hi = fromHex(hiHex)
+  const lo = fromHex(loHex)
+  if lo >= 0 && hi >= 0 {
+    const ch = lo | (hi << 4)
+    return (Char(ch), true)
+  }
+  return ('', false)
+}
+
+fn decodePercentEncoded(hiHex, loHex) {
+  const hi = fromHex(hiHex)
+  const lo = fromHex(loHex)
+  if lo >= 0 && hi >= 0 {
+    const ch = lo | (hi << 4)
+    return (Char(ch), true)
+  }
+  return ('', false)
+}

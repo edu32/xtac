@@ -1,0 +1,2062 @@
+import Kind, Condition from ssa
+
+define oplhs 0
+define oprhs 1
+
+struct Solver {
+  const      function = ssa.Function*{}
+  const     nullValue = ssa.Value*{}
+  const nullImmediate = Immediate*{}
+  readonly     solved = { loads = 0, jumps = 0, phis = 0, expressions = 0 }
+  readonly    removed = 0
+  readonly      added = 0
+  readonly     passes = 0
+  const kw_exitReason = Identifier*{}
+
+  fn run(this, ctx) {
+    var bidx = 0, vidx = 0
+    each block in this.function.blocks() {
+      block.index = bidx++
+      each value in block.values() {
+        value.index = vidx++
+      }
+    }
+    var removed = 0
+    var   added = 0
+    for {
+      ++this.passes
+      each block in this.function.blocks() {
+        for var value = block.body.first; value; {
+          const qnext = value.qnext
+          this.solve(value)
+          value = qnext
+        }
+      }
+      break if removed == this.removed && added == this.added
+      removed = this.removed
+        added = this.added
+    }
+    synchronize(ctx)
+    ctx.solver.solved.loads += this.solved.loads
+    ctx.solver.solved.jumps += this.solved.jumps
+     ctx.solver.solved.phis += this.solved.phis
+    ctx.solver.solved.expressions += this.solved.expressions
+    ctx.solver.removed += this.removed
+      ctx.solver.added += this.added
+     ctx.solver.passes += this.passes
+  }
+
+
+  fn solve(this, expr) {
+    const solution = Immediate{}
+    switch expr {   
+      case ssa.JumpIf {
+        if const immediate = expr.operands.items[1].isanImmediate() {
+          this.solveJumpIf(expr, immediate.value.u64)
+          ++this.solved.jumps
+        }
+      }
+    }
+    return if expr.uses.isEmpty()
+    switch expr {
+      case ssa.Load {
+        // dst ⟵ src        
+        if const immediate = expr.operands.items[0].isanImmediate() {
+              solution.u64 = immediate.value.u64
+          if this.propagate(expr, solution) {
+            ++this.solved.loads
+          }
+        } else if const value = this.solveLoad(expr) {
+          if this.replace(expr, value) {
+            ++this.solved.loads
+          }
+        }
+      }  
+      case ssa.Decrement {
+        // dst ⟵ ++src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveDecrement(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Increment {
+        // dst ⟵ ++src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveIncrement(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Negate {
+        // dst ⟵ -src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveNegate(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.BitwiseNot {
+        // dst ⟵ ~src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveBitwiseNot(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.SignExtend {
+        // dst ⟵ signextend src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveSignExtend(solution, expr.type, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.ZeroExtend {
+        // dst ⟵ zeroextend src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveZeroExtend(solution, expr.type, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.NarrowingCast {
+        // dst ⟵ narrow src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveNarrowingCast(solution, expr.type, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.NumericCast {
+        // dst ⟵ numericast src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveNumericCast(solution, expr.type, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.BitCast {
+        // dst ⟵ bitcast src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveBitCast(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Round {
+        // dst ⟵ round src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveRound(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.SquareRoot {
+        // dst ⟵ sqrt src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveSquareRoot(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Abs {
+        // dst ⟵ abs src
+        if const     src = expr.operands.items[0].isanImmediate() {
+          if const value = this.solveAbs(solution, src) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Compare {
+        // dst ⟵ cmp lhs, rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveCompare(solution, lhs, expr.op, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        } else if const phi = expr.operands.items[0].isaNode() is ssa.Phi {
+          if rhs {
+            if const value = this.solveCompareLhsPhi(solution, phi, expr.op, rhs) {
+              ++this.solved.expressions
+              this.propagate(expr, value)
+            }
+          }
+        }
+      }
+      case ssa.Or {
+        // dst ⟵ lhs | rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveOr(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.XOr {
+        // dst ⟵ lhs ^ rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveXOr(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.And {
+        // dst ⟵ lhs & rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveAnd(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.LeftShift {
+        // dst ⟵ lhs << rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveLeftShift(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.RightShift {
+        // dst ⟵ lhs >> rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveRightShift(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.UnsignedRightShift {
+        // dst ⟵ lhs >>> rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveUnsignedRightShift(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Subtract {
+        // dst ⟵ lhs - rhs
+        const (immediate, value) = this.solveSubtract(solution, expr)
+        if immediate {
+          ++this.solved.expressions
+          this.propagate(expr, immediate)
+        } else if value {
+          ++this.solved.expressions
+          this.replace(expr, value)
+        }
+      }
+      case ssa.Add {
+        // dst ⟵ lhs + rhs
+        const (immediate, value) = this.solveAdd(solution, expr)
+        if immediate {
+          ++this.solved.expressions
+          this.propagate(expr, immediate)
+        } else if value {
+          ++this.solved.expressions
+          this.replace(expr, value)
+        }
+      }
+      case ssa.Remainder {
+        // dst ⟵ lhs % rhs
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveRemainder(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Divide {
+        // dst ⟵ lhs ÷ rhs
+        const (immediate, value) = this.solveDivide(solution, expr)
+        if immediate {
+          ++this.solved.expressions
+          this.propagate(expr, immediate)
+        } else if value {
+          ++this.solved.expressions
+          this.replace(expr, value)
+        }
+      }
+      case ssa.Multiply {
+        // dst ⟵ lhs × rhs
+        const (immediate, value) = this.solveMultiply(solution, expr)
+        if immediate {
+          ++this.solved.expressions
+          this.propagate(expr, immediate)
+        } else if value {
+          ++this.solved.expressions
+          this.replace(expr, value)
+        }
+      }
+      case ssa.Min {
+        // dst ⟵ min(lhs, rhs)
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveMin(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Max {
+        // dst ⟵ max(lhs, rhs)
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveMax(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.RotateLeft {
+        // dst ⟵ rol(lhs, rhs)
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveRotateLeft(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.RotateRight {
+        // dst ⟵ ror(lhs, rhs)
+        const lhs = expr.operands.items[0].isanImmediate()
+        const rhs = expr.operands.items[1].isanImmediate()
+        if lhs && rhs {
+          if const value = this.solveRotateRight(solution, lhs, rhs) {
+            ++this.solved.expressions
+            this.propagate(expr, value)
+          }
+        }
+      }
+      case ssa.Phi {
+        const (immediate, value) = this.solvePhi(solution, expr)
+        if immediate {
+          ++this.solved.phis
+          this.propagate(expr, immediate)
+        } else if value {
+          ++this.solved.phis
+          this.replace(expr, value)
+        }
+      }
+    }
+  }
+
+
+  fn solveJumpIf(this, expr, n) {
+    assert expr.uses.isEmpty()
+    const       block = expr.parent
+    const      iftrue = expr.iftrue()
+    const      ifalse = expr.ifalse()
+    const iftrueIndex = iftrue.indexOfPredecessor(block)
+    const ifalseIndex = ifalse.indexOfPredecessor(block)
+    const iftruePreds = iftrue.uses.length
+    const ifalsePreds = ifalse.uses.length
+
+    assert iftrueIndex >= 0 && ifalseIndex >= 0
+
+    const     jump = new ssa.Jump{ pos = expr.pos, parent = block, type = expr.type }
+    jump.initialize(operands = 1)
+
+    each value in iftrue.values() {
+      switch value {
+        case ssa.Phi {
+          assert value.operands.length == iftruePreds
+        }
+        default break
+      }
+    }
+
+    each value in ifalse.values() {
+      switch value {
+        case ssa.Phi {
+          assert value.operands.length == ifalsePreds
+        }
+        default break
+      }
+    }
+
+    expr.operands.clear() // Removes {block} as a predecessor both {iftrue} and {ifalse}.
+
+    assert iftrue.uses.length == iftruePreds - 1
+    assert ifalse.uses.length == ifalsePreds - 1
+
+    if n { // Always jump to iftrue
+      ifalse.removePhiOperandsAt(ifalseIndex)
+
+      jump.operands.set(0, iftrue)
+
+      const newIndex = iftrue.uses.length - 1
+      iftrue.changePhiOperandsIndex(iftrueIndex, newIndex)
+    } else { // Always jump to ifalse
+      iftrue.removePhiOperandsAt(iftrueIndex)
+
+      jump.operands.set(0, ifalse)
+
+      const newIndex = ifalse.uses.length - 1
+      ifalse.changePhiOperandsIndex(ifalseIndex, newIndex)
+    }
+
+    block.body.remove(expr)
+    delete expr
+
+    block.body.append(jump)
+  }
+
+
+  fn solveLoad(this, expr): ssa.Value* {
+    const operand = expr.operands.items[0]
+    return null if expr.type.isaPointer() && isUsedAsBaseOfMemoryAccessOrInPointerArithmetic(expr)
+    if const src = operand.isaNode() as ssa.Value* {
+      switch src {
+        case ssa.ElementAt return null
+        default {
+          if src.type.isaPointer() {
+            return null if isUsedAsBaseOfMemoryAccessOrInPointerArithmetic(src)
+          }
+          return src
+        }
+      }
+    }
+    return null
+
+    fn isUsedAsBaseOfMemoryAccessOrInPointerArithmetic(expr) {
+      for use in expr.uses {
+        switch use.user {
+          case elem: ssa.ElementAt return true if elem.baseNode() == expr
+          case add: ssa.Add        return true
+          case sub: ssa.Subtract   return true
+        }
+      }
+      return false
+    }
+  }
+
+
+  fn solveDecrement(this, dst, src): Immediate* {
+    switch src.type.kind {
+      case ssa.Kind.Int8   dst.i8  = src.value.i8  - 1i8
+      case ssa.Kind.Int16  dst.i16 = src.value.i16 - 1i16
+      case ssa.Kind.Int32  dst.i32 = src.value.i32 - 1i32
+      case ssa.Kind.Int64  dst.i64 = src.value.i64 - 1i64
+      case ssa.Kind.UInt8  dst.u8  = src.value.u8  - 1u8
+      case ssa.Kind.UInt16 dst.u16 = src.value.u16 - 1u16
+      case ssa.Kind.UInt32 dst.u32 = src.value.u32 - 1u32
+      case ssa.Kind.UInt64 dst.u64 = src.value.u64 - 1u64
+      default return null
+    }
+    return &dst
+  }
+
+
+  fn solveIncrement(this, dst, src): Immediate* {
+    switch src.type.kind {
+      case ssa.Kind.Int8   dst.i8  = src.value.i8  + 1i8
+      case ssa.Kind.Int16  dst.i16 = src.value.i16 + 1i16
+      case ssa.Kind.Int32  dst.i32 = src.value.i32 + 1i32
+      case ssa.Kind.Int64  dst.i64 = src.value.i64 + 1i64
+      case ssa.Kind.UInt8  dst.u8  = src.value.u8  + 1u8
+      case ssa.Kind.UInt16 dst.u16 = src.value.u16 + 1u16
+      case ssa.Kind.UInt32 dst.u32 = src.value.u32 + 1u32
+      case ssa.Kind.UInt64 dst.u64 = src.value.u64 + 1u64
+      default return null
+    }
+    return &dst
+  }
+
+
+  fn solveNegate(this, dst, src): Immediate* {
+    switch src.type.kind {
+      case ssa.Kind.Int8   dst.i8  = -src.value.i8
+      case ssa.Kind.Int16  dst.i16 = -src.value.i16
+      case ssa.Kind.Int32  dst.i32 = -src.value.i32
+      case ssa.Kind.Int64  dst.i64 = -src.value.i64
+      case ssa.Kind.UInt8  dst.u8  = -src.value.u8
+      case ssa.Kind.UInt16 dst.u16 = -src.value.u16
+      case ssa.Kind.UInt32 dst.u32 = -src.value.u32
+      case ssa.Kind.UInt64 dst.u64 = -src.value.u64
+      default return null
+    }
+    return &dst
+  }
+
+
+  fn solveBitwiseNot(this, dst, src): Immediate* {
+    switch src.type.kind {
+      case ssa.Kind.Int8   dst.i8  = ~src.value.i8
+      case ssa.Kind.Int16  dst.i16 = ~src.value.i16
+      case ssa.Kind.Int32  dst.i32 = ~src.value.i32
+      case ssa.Kind.Int64  dst.i64 = ~src.value.i64
+      case ssa.Kind.UInt8  dst.u8  = ~src.value.u8
+      case ssa.Kind.UInt16 dst.u16 = ~src.value.u16
+      case ssa.Kind.UInt32 dst.u32 = ~src.value.u32
+      case ssa.Kind.UInt64 dst.u64 = ~src.value.u64
+      default return null
+    }
+    return &dst
+  }
+
+
+  fn solveSignExtend(this, dst, type, src) {
+    switch type.kind {
+      case ssa.Kind.Int64 {
+        switch src.type.kind {
+          case ssa.Kind.UInt32, ssa.Kind.Int32 {
+            dst.i64 = src.value.i32 // sign-extend
+            return &dst
+          }
+          case ssa.Kind.UInt16, ssa.Kind.Int16 {
+            dst.i64 = src.value.i16 // sign-extend
+            return &dst
+          }
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.i64 = src.value.i8 // sign-extend
+            return &dst
+          }
+        }
+      }
+      case ssa.Kind.Int32 {
+        switch src.type.kind {
+          case ssa.Kind.UInt16, ssa.Kind.Int16 {
+            dst.i64 = src.value.i16 // sign-extend
+            return &dst
+          }
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.i64 = src.value.i8 // sign-extend
+            return &dst
+          }
+        }
+      }
+      case ssa.Kind.Int16 {
+        switch src.type.kind {
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.i64 = src.value.i8 // sign-extend
+            return &dst
+          }
+        }
+      }
+    }
+    assert with "#{src.type} as #{type}"
+    return null
+  }
+
+
+  fn solveZeroExtend(this, dst, type, src) {
+    switch type.kind {
+      case ssa.Kind.UInt64 {
+        switch src.type.kind {
+          case ssa.Kind.UInt32, ssa.Kind.Int32 {
+            dst.u64 = src.value.u32 // zero-extend
+            return &dst
+          }
+          case ssa.Kind.UInt16, ssa.Kind.Int16 {
+            dst.u64 = src.value.u16 // zero-extend
+            return &dst
+          }
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.u64 = src.value.u8 // zero-extend
+            return &dst
+          }
+        }
+      }
+      case ssa.Kind.UInt32 {
+        switch src.type.kind {
+          case ssa.Kind.UInt16, ssa.Kind.Int16 {
+            dst.u64 = src.value.u16 // zero-extend
+            return &dst
+          }
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.u64 = src.value.u8 // zero-extend
+            return &dst
+          }
+        }
+      }
+      case ssa.Kind.UInt16 {
+        switch src.type.kind {
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.u64 = src.value.u8 // zero-extend
+            return &dst
+          }
+        }
+      }
+    }
+    assert with "#{src.type} as #{type}"
+    return null
+  }
+
+
+  fn solveNarrowingCast(this, dst, type, src) {
+    /*  Variants 🡓
+          · U/Int64 to U/Int32/16/8
+          · U/Int32 to U/Int16/8
+          · U/Int16 to U/Int/8
+    */
+    switch src.type.kind {
+      case ssa.Kind.UInt64, ssa.Kind.Int64 {
+        switch type.kind {
+          case ssa.Kind.UInt64, ssa.Kind.Int64 {
+            dst.u64 = src.value.u64 // Do nothing
+            return &dst
+          }
+          case ssa.Kind.UInt32, ssa.Kind.Int32 {
+            dst.u64 = src.value.u32 // zero-extend
+            return &dst
+          }
+          case ssa.Kind.UInt16, ssa.Kind.Int16 {
+            dst.u64 = src.value.u16 // zero-extend
+            return &dst
+          }
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.u64 = src.value.u8 // zero-extend
+            return &dst
+          }
+        }
+      }
+      case ssa.Kind.UInt32, ssa.Kind.Int32 {
+        switch type.kind {
+          case ssa.Kind.UInt32, ssa.Kind.Int32 {
+            dst.u64 = src.value.u32 // Do nothing
+            return &dst
+          }
+          case ssa.Kind.UInt16, ssa.Kind.Int16 {
+            dst.u64 = src.value.u16 // zero-extend
+            return &dst
+          }
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.u64 = src.value.u8 // zero-extend
+            return &dst
+          }
+        }
+      }
+      case ssa.Kind.UInt16, ssa.Kind.Int16 {
+        switch type.kind {
+          case ssa.Kind.UInt16, ssa.Kind.Int16 {
+            dst.u64 = src.value.u16 // Do nothing
+            return &dst
+          }
+          case ssa.Kind.UInt8, ssa.Kind.Int8 {
+            dst.u64 = src.value.u8 // zero-extend
+            return &dst
+          }
+        }
+      }
+    }
+    assert with "#{src.type} as #{type}"
+    return null
+  }
+
+
+  fn solveNumericCast(this, dst, type, src) {
+    /*  Variants 🡓
+          · Float as Double
+          · U/Int32/64 as Double
+          · Double as Float
+          · U/Int32/64 as Float
+    */
+    switch type.kind {
+      case ssa.Kind.Float {
+        switch src.type.kind {
+          case ssa.Kind.Double                 dst.f32 = src.value.f64 as Float
+          case ssa.Kind.UInt32, ssa.Kind.Int32 dst.f32 = src.value.i32 as Float
+          case ssa.Kind.UInt64, ssa.Kind.Int64 dst.f32 = src.value.i64 as Float
+          default assert 0
+        }
+      }
+      case ssa.Kind.Double {
+        switch src.type.kind {
+          case ssa.Kind.Float                  dst.f64 = src.value.f32 as Double
+          case ssa.Kind.UInt32, ssa.Kind.Int32 dst.f64 = src.value.i32 as Double
+          case ssa.Kind.UInt64, ssa.Kind.Int64 dst.f64 = src.value.i64 as Double
+          default assert 0
+        }
+      }
+      case ssa.Kind.UInt32, ssa.Kind.Int32 {
+        switch src.type.kind {
+          case ssa.Kind.Float  dst.i32 = src.value.f32 as Int32
+          case ssa.Kind.Double dst.i32 = src.value.f64 as Int32
+          default assert 0
+        }
+      }
+      case ssa.Kind.UInt64, ssa.Kind.Int64 {
+        switch src.type.kind {
+          case ssa.Kind.Float  dst.i64 = src.value.f32 as Int64
+          case ssa.Kind.Double dst.i64 = src.value.f64 as Int64
+          default assert 0
+        }
+      }
+      default assert 0
+    }
+    return &dst
+  }
+
+
+  fn solveBitCast(this, dst, src) {
+    /*  Variants 🡓
+          · T* as U*
+          · T* as U/Int64
+          · U/Int64 as T*
+          · U/Int64 to Double
+          · U/Int32 to Float
+          · Double to U/Int64
+          · Float to U/Int32
+    */
+    dst.u64 = src.value.u64
+    return &dst
+  }
+
+
+  fn solveRound(this, dst, src) {
+    if 0 {
+      return &dst
+    }
+    return null
+  }
+
+
+  fn solveSquareRoot(this, dst, src) {
+    if 0 {
+      return &dst
+    }
+    return null
+  }
+
+
+  fn solveAbs(this, dst, src) {
+    if 0 {
+      return &dst
+    }
+    return null
+  }
+
+
+  fn solveCompare(this, dst, lhs, condition, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch condition {
+      case Condition.Equal {
+        dst.u8 = lhs.value.u64 == rhs.value.u64
+        return &dst
+      }
+      case Condition.NotEqual {
+        dst.u8 = lhs.value.u64 != rhs.value.u64
+        return &dst
+      }
+      case Condition.Less, Condition.Below {
+        switch lhs.type.kind {
+          case Kind.UInt8 {
+            dst.u8 = lhs.value.u8 < rhs.value.u8
+            return &dst
+          }
+          case Kind.UInt16 {
+            dst.u8 = lhs.value.u16 < rhs.value.u16
+            return &dst
+          }
+          case Kind.UInt32 {
+            dst.u8 = lhs.value.u32 < rhs.value.u32
+            return &dst
+          }
+          case Kind.UInt64 {
+            dst.u8 = lhs.value.u64 < rhs.value.u64
+            return &dst
+          }
+          case Kind.Int8 {
+            dst.u8 = lhs.value.i8 < rhs.value.i8
+            return &dst
+          }
+          case Kind.Int16 {
+            dst.u8 = lhs.value.i16 < rhs.value.i16
+            return &dst
+          }
+          case Kind.Int32 {
+            dst.u8 = lhs.value.i32 < rhs.value.i32
+            return &dst
+          }
+          case Kind.Int64 {
+            dst.u8 = lhs.value.i64 < rhs.value.i64
+            return &dst
+          }
+          case Kind.Float {
+            dst.u8 = lhs.value.f32 < rhs.value.f32
+            return &dst
+          }
+          case Kind.Double {
+            dst.u8 = lhs.value.f64 < rhs.value.f64
+            return &dst
+          }
+        }
+      }
+      case Condition.LessOrEqual, Condition.BelowOrEqual {
+        switch lhs.type.kind {
+          case Kind.UInt8 {
+            dst.u8 = lhs.value.u8 <= rhs.value.u8
+            return &dst
+          }
+          case Kind.UInt16 {
+            dst.u8 = lhs.value.u16 <= rhs.value.u16
+            return &dst
+          }
+          case Kind.UInt32 {
+            dst.u8 = lhs.value.u32 <= rhs.value.u32
+            return &dst
+          }
+          case Kind.UInt64 {
+            dst.u8 = lhs.value.u64 <= rhs.value.u64
+            return &dst
+          }
+          case Kind.Int8 {
+            dst.u8 = lhs.value.i8 <= rhs.value.i8
+            return &dst
+          }
+          case Kind.Int16 {
+            dst.u8 = lhs.value.i16 <= rhs.value.i16
+            return &dst
+          }
+          case Kind.Int32 {
+            dst.u8 = lhs.value.i32 <= rhs.value.i32
+            return &dst
+          }
+          case Kind.Int64 {
+            dst.u8 = lhs.value.i64 <= rhs.value.i64
+            return &dst
+          }
+          case Kind.Float {
+            dst.u8 = lhs.value.f32 <= rhs.value.f32
+            return &dst
+          }
+          case Kind.Double {
+            dst.u8 = lhs.value.f64 <= rhs.value.f64
+            return &dst
+          }
+        }
+      }
+      case Condition.Greater, Condition.Above {
+        switch lhs.type.kind {
+          case Kind.UInt8 {
+            dst.u8 = lhs.value.u8 > rhs.value.u8
+            return &dst
+          }
+          case Kind.UInt16 {
+            dst.u8 = lhs.value.u16 > rhs.value.u16
+            return &dst
+          }
+          case Kind.UInt32 {
+            dst.u8 = lhs.value.u32 > rhs.value.u32
+            return &dst
+          }
+          case Kind.UInt64 {
+            dst.u8 = lhs.value.u64 > rhs.value.u64
+            return &dst
+          }
+          case Kind.Int8 {
+            dst.u8 = lhs.value.i8 > rhs.value.i8
+            return &dst
+          }
+          case Kind.Int16 {
+            dst.u8 = lhs.value.i16 > rhs.value.i16
+            return &dst
+          }
+          case Kind.Int32 {
+            dst.u8 = lhs.value.i32 > rhs.value.i32
+            return &dst
+          }
+          case Kind.Int64 {
+            dst.u8 = lhs.value.i64 > rhs.value.i64
+            return &dst
+          }
+          case Kind.Float {
+            dst.u8 = lhs.value.f32 > rhs.value.f32
+            return &dst
+          }
+          case Kind.Double {
+            dst.u8 = lhs.value.f64 > rhs.value.f64
+            return &dst
+          }
+        }
+      }
+      case Condition.GreaterOrEqual, Condition.AboveOrEqual {
+        switch lhs.type.kind {
+          case Kind.UInt8 {
+            dst.u8 = lhs.value.u8 >= rhs.value.u8
+            return &dst
+          }
+          case Kind.UInt16 {
+            dst.u8 = lhs.value.u16 >= rhs.value.u16
+            return &dst
+          }
+          case Kind.UInt32 {
+            dst.u8 = lhs.value.u32 >= rhs.value.u32
+            return &dst
+          }
+          case Kind.UInt64 {
+            dst.u8 = lhs.value.u64 >= rhs.value.u64
+            return &dst
+          }
+          case Kind.Int8 {
+            dst.u8 = lhs.value.i8 >= rhs.value.i8
+            return &dst
+          }
+          case Kind.Int16 {
+            dst.u8 = lhs.value.i16 >= rhs.value.i16
+            return &dst
+          }
+          case Kind.Int32 {
+            dst.u8 = lhs.value.i32 >= rhs.value.i32
+            return &dst
+          }
+          case Kind.Int64 {
+            dst.u8 = lhs.value.i64 >= rhs.value.i64
+            return &dst
+          }
+          case Kind.Float {
+            dst.u8 = lhs.value.f32 >= rhs.value.f32
+            return &dst
+          }
+          case Kind.Double {
+            dst.u8 = lhs.value.f64 >= rhs.value.f64
+            return &dst
+          }
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn solveCompareLhsPhi(this, dst, phi, condition, rhs) {
+    assert phi.type.kind == rhs.type.kind
+    const (matches, compared) = phiCompare(phi, condition, rhs)
+    if compared == phi.operands.length {
+      if matches == phi.operands.length {
+        dst.u8 = true
+        return &dst
+      }
+      if matches == 0 {
+        dst.u8 = false
+        return &dst
+      }
+    }
+    return null
+
+    fn phiCompare(phi, condition, rhs): (Int32, Int32) {
+      switch condition {
+        case Condition.Equal {
+          var equal = 0
+          var     i = 0
+          for ; i < phi.operands.length; ++i {
+            const operand = phi.operands.items[i]
+            if const lhs = operand.isanImmediate() {
+              equal += lhs.value.u64 == rhs.value.u64
+            } else if const node = operand.isaNode() is ssa.Phi {
+              break if !node.operands.areAllImmediates()
+              const (matches, compared) = phiCompare(node, condition, rhs)
+              break if compared != node.operands.length
+              if matches == node.operands.length {
+                ++equal
+              } else if matches != 0{
+                break
+              }
+            } else {
+              break
+            }
+          }
+          return (equal, i)
+        }
+        case Condition.NotEqual {
+          var notEqual = 0
+          var        i = 0
+          for ; i < phi.operands.length; ++i {
+            const operand = phi.operands.items[i]
+            if const lhs = operand.isanImmediate() {
+              notEqual += lhs.value.u64 != rhs.value.u64
+            } else if const node = operand.isaNode() is ssa.Phi {
+              break if !node.operands.areAllImmediates()
+              const (matches, compared) = phiCompare(node, condition, rhs)
+              break if compared != node.operands.length
+              if matches == node.operands.length {
+                ++notEqual
+              } else if matches != 0{
+                break
+              }
+            } else {
+              break
+            }
+          }
+          return (notEqual, i)
+        }
+      }
+      return (0, 0)
+    }
+  }
+
+
+  fn solveOr(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 | rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 | rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 | rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 | rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 | rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 | rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 | rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 | rhs.value.i64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveXOr(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 ^ rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 ^ rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 ^ rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 ^ rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 ^ rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 ^ rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 ^ rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 ^ rhs.value.i64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveAnd(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 & rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 & rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 & rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 & rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 & rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 & rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 & rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 & rhs.value.i64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveLeftShift(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 << rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 << rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 << rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 << rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 << rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 << rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 << rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 << rhs.value.i64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveRightShift(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 >> rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 >> rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 >> rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 >> rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 >> rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 >> rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 >> rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 >> rhs.value.i64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveUnsignedRightShift(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 >>> rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 >>> rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 >>> rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 >>> rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 >>> rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 >>> rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 >>> rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 >>> rhs.value.i64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveSubtract(this, dst, expr): (Immediate*, ssa.Value*) {
+    const  left = expr.operands.items[oplhs]
+    const right = expr.operands.items[oprhs]
+    const  type = expr.type
+
+    if const   lhs = left.isanImmediate() {
+      if const rhs = right.isanImmediate() {
+        return (this.solveSubtractImmediates(dst, lhs, rhs), this.nullValue)
+      }
+      else if type.isNotIntegral() {
+        // Do nothing.
+      }
+      else if lhs.value.i64 == 0i64 { // 0 - rhs ⟶ -rhs
+        const rhs = right.value.node as ssa.Value*
+        const neg = this.negate(expr, rhs)
+        return (this.nullImmediate, neg) 
+      }
+      else if lhs.value.i64 == -1i64 { // -1 - rhs ⟶ -(1 + rhs) ⟶ -(++rhs)
+        const rhs = right.value.node as ssa.Value*
+        const inc = this.increment(expr, rhs)
+        const neg = this.negate(expr, inc)
+        return (this.nullImmediate, neg)
+      }
+    } else if const rhs = right.isanImmediate() {
+      const lhs = left.value.node as ssa.Value*
+      if rhs.value.i64 == 0i64 { // lhs - 0 ⟶ lhs
+        return (this.nullImmediate, lhs)
+      }
+      else if type.isNotIntegral() {
+        // Do nothing.
+      }
+      else if rhs.value.i64 == 1i64 { // lhs - 1 ⟶ --lhs 
+        const dec = this.decrement(expr, lhs)
+        return (this.nullImmediate, dec)
+      } else if rhs.value.i64 == -1i64 { // lhs - -1 ⟶ lhs + 1 ⟶ ++lhs
+        const inc = this.increment(expr, lhs)
+        return (this.nullImmediate, inc)
+      } else if rhs.value.i64 < 0i64 { // lhs - -imm ⟶ lhs + imm
+        rhs.value.i64 = -rhs.value.i64
+        const add = this.add(expr, lhs, rhs)
+        return (this.nullImmediate, add)
+      }
+    }
+
+    return (this.nullImmediate, this.nullValue)
+  }
+
+
+  fn solveSubtractImmediates(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 - rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 - rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 - rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 - rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 - rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 - rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 - rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 - rhs.value.i64
+        return &dst
+      }
+      case Kind.Float {
+        dst.f32 = lhs.value.f32 - rhs.value.f32
+        return &dst
+      }
+      case Kind.Double {
+        dst.f64 = lhs.value.f64 - rhs.value.f64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveAdd(this, dst, expr): (Immediate*, ssa.Value*) {
+    const  left = expr.operands.items[oplhs]
+    const right = expr.operands.items[oprhs]
+    const  type = expr.type
+
+    if const   lhs = left.isanImmediate() {
+      if const rhs = right.isanImmediate() {
+        return (this.solveAddImmediates(dst, lhs, rhs), this.nullValue)
+      }
+      else if type.isNotIntegral() {
+        // Do nothing.
+      }
+      else if lhs.value.i64 == 0i64 { // 0 + rhs ⟶ rhs
+        const rhs = right.value.node as ssa.Value*
+        return (this.nullImmediate, rhs) 
+      }
+      else if lhs.value.i64 == -1i64 { // -1 + rhs ⟶ rhs - 1 ⟶ --rhs
+        const rhs = right.value.node as ssa.Value*
+        const dec = this.decrement(expr, rhs)
+        return (this.nullImmediate, dec)
+      }
+      else if lhs.value.i64 == 1i64 { // 1 + rhs ⟶ ++rhs
+        const rhs = right.value.node as ssa.Value*
+        const inc = this.increment(expr, rhs)
+        return (this.nullImmediate, inc)
+      } else {
+        return this.solveAddWithRhsImmediate(dst, right.value.node as ssa.Value*, lhs)
+      }
+    } else if const rhs = right.isanImmediate() {
+      const lhs = left.value.node as ssa.Value*
+      if rhs.value.i64 == 0i64 { // lhs + 0 ⟶ lhs
+        return (this.nullImmediate, lhs)
+      }
+      else if type.isNotIntegral() {
+        //  Do nothing.
+      }
+      else if rhs.value.i64 == 1i64 { // lhs + 1 ⟶ ++lhs 
+        const inc = this.increment(expr, lhs)
+        return (this.nullImmediate, inc)
+      } else if rhs.value.i64 == -1i64 { // lhs + -1 ⟶ lhs - 1 ⟶ --lhs
+        const dec = this.decrement(expr, lhs)
+        return (this.nullImmediate, dec)
+      } else if rhs.value.i64 < 0i64 { // lhs + -imm ⟶ lhs - imm
+        rhs.value.i64 = -rhs.value.i64
+        const sub = this.subtract(expr, lhs, rhs)
+        return (this.nullImmediate, sub)
+      } else {
+        return this.solveAddWithRhsImmediate(dst, lhs, rhs)
+      }
+    }
+
+    return (this.nullImmediate, this.nullValue)
+  }
+
+
+  fn solveAddWithRhsImmediate(this, dst, value, immediate): (Immediate*, ssa.Value*) {
+    switch value {
+      case ssa.Subtract {
+        const lhs = value.operands.items[oplhs].isanImmediate()
+        const rhs = value.operands.items[oprhs].isanImmediate()
+        if lhs {
+          if rhs { // (imm2 - imm2) + imm
+            // Do nothing because (imm2 - imm2) probably failed to resolve.
+          } else { // (imm2 + rhs) - imm ⟶ rhs + (imm2 - imm)
+            if const  result = this.solveSubtractImmediates(dst, lhs, immediate) {
+              const constant = ssa.Constant{ value = *result, type = value.type }
+              const    right = value.operands.items[oprhs].value.node as ssa.Value*
+              value.operands.set(oplhs, right)
+              value.operands.imm(oprhs, constant)
+              return (this.nullImmediate, value)
+            }
+          }
+        } else if rhs { // (lhs + imm2) - imm ⟶ lhs + (imm2 - imm)
+          if const  result = this.solveSubtractImmediates(dst, rhs, immediate) {
+            const constant = ssa.Constant{ value = *result, type = value.type }
+            value.operands.imm(oprhs, constant)
+            return (this.nullImmediate, value)
+          }
+        }
+      }
+    }
+    return (this.nullImmediate, this.nullValue)
+  }
+
+
+  fn solveAddImmediates(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 + rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 + rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 + rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 + rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 + rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 + rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 + rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 + rhs.value.i64
+        return &dst
+      }
+      case Kind.Float {
+        dst.f32 = lhs.value.f32 + rhs.value.f32
+        return &dst
+      }
+      case Kind.Double {
+        dst.f64 = lhs.value.f64 + rhs.value.f64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveRemainder(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 % rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 % rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 % rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 % rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 % rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 % rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 % rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 % rhs.value.i64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveDivide(this, dst, expr): (Immediate*, ssa.Value*) {
+    const  left = expr.operands.items[oplhs]
+    const right = expr.operands.items[oprhs]
+    const  type = expr.type
+
+    if const   lhs = left.isanImmediate() {
+      if const rhs = right.isanImmediate() {
+        return (this.solveDivideImmediates(dst, lhs, rhs), this.nullValue)
+      }
+      else if lhs.value.i64 == 0i64 { // 0 ÷ rhs ⟶ 0
+        return (&dst, this.nullValue) 
+      }
+    } else if const rhs = right.isanImmediate() {
+      if type.isIntegral() {
+        if rhs.value.i64 == 1i64 { // lhs ÷ 1 ⟶ lhs
+          const lhs = left.value.node as ssa.Value*
+          return (this.nullImmediate, lhs)
+        }
+        else if rhs.value.i64 == -1i64 { // lhs ÷ -1 ⟶ -lhs
+          const lhs = left.value.node as ssa.Value*
+          const neg = this.negate(expr, lhs)
+          return (this.nullImmediate, neg)
+        }
+      }
+      else if type.kind == ssa.Kind.Float {
+        if rhs.value.f32 == 1.0f { // lhs ÷ 1.0 ⟶ lhs
+          const lhs = left.value.node as ssa.Value*
+          return (this.nullImmediate, lhs)
+        }
+      }
+      else if type.kind == ssa.Kind.Double {
+        if rhs.value.f64 == 1.0 { // lhs ÷ 1.0 ⟶ lhs
+          const lhs = left.value.node as ssa.Value*
+          return (this.nullImmediate, lhs)
+        }
+      }
+    }
+
+    return (this.nullImmediate, this.nullValue)
+  }
+
+
+  fn solveDivideImmediates(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 / rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 / rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 / rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 / rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 / rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 / rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 / rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 / rhs.value.i64
+        return &dst
+      }
+      case Kind.Float {
+        dst.f32 = lhs.value.f32 / rhs.value.f32
+        return &dst
+      }
+      case Kind.Double {
+        dst.f64 = lhs.value.f64 / rhs.value.f64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveMultiply(this, dst, expr): (Immediate*, ssa.Value*) {
+    const  left = expr.operands.items[oplhs]
+    const right = expr.operands.items[oprhs]
+    const  type = expr.type
+
+    if const   lhs = left.isanImmediate() {
+      if const rhs = right.isanImmediate() {
+        return (this.solveMultiplyImmediates(dst, lhs, rhs), this.nullValue)
+      }
+      else if lhs.value.i64 == 0i64 { // 0 × rhs ⟶ 0
+        return (&dst, this.nullValue) 
+      }
+      else if type.isIntegral() {
+        const rhs = right.value.node as ssa.Value*
+        if lhs.value.i64 == 1i64 { // 1 × rhs ⟶ rhs
+          return (this.nullImmediate, rhs)
+        } else if (lhs.value.i64 & (lhs.value.i64 - 1i64)) == 0i64 { // lhs is a power of 2
+          //return (this.nullImmediate, this.solveMultiplyWithPowerOf2(expr, rhs, lhs))
+        }
+      }
+      else if type.kind == ssa.Kind.Float {
+        if lhs.value.f32 == 1.0f { // 1.0 × rhs ⟶ rhs
+          const rhs = right.value.node as ssa.Value*
+          return (this.nullImmediate, rhs)
+        }
+      }
+      else if type.kind == ssa.Kind.Double {
+        if lhs.value.f64 == 1.0 { // 1.0 × rhs ⟶ rh
+          const rhs = right.value.node as ssa.Value*
+          return (this.nullImmediate, rhs)
+        }
+      }
+    } else if const rhs = right.isanImmediate() {
+      if rhs.value.i64 == 0i64 { // lhs × 0 ⟶ 0
+        const lhs = left.value.node as ssa.Value*
+        return (this.nullImmediate, lhs)
+      }
+      else if type.isIntegral() {
+        const lhs = left.value.node as ssa.Value*
+        if rhs.value.i64 == 1i64 { // lhs × 1 ⟶ lhs
+          return (this.nullImmediate, lhs)
+        } else if (rhs.value.i64 & (rhs.value.i64 - 1i64)) == 0i64 { // rhs is a power of 2
+          //return (this.nullImmediate, this.solveMultiplyWithPowerOf2(expr, lhs, rhs))
+        }
+      }
+      else if type.kind == ssa.Kind.Float {
+        if rhs.value.f32 == 1.0f { // lhs × 1.0 ⟶ lhs
+          const lhs = left.value.node as ssa.Value*
+          return (this.nullImmediate, lhs)
+        }
+      }
+      else if type.kind == ssa.Kind.Double {
+        if rhs.value.f64 == 1.0 { // lhs × 1.0 ⟶ lhs
+          const lhs = left.value.node as ssa.Value*
+          return (this.nullImmediate, lhs)
+        }
+      }
+    }
+
+    return (this.nullImmediate, this.nullValue)
+  }
+
+
+  fn solveMultiplyImmediates(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = lhs.value.u8 * rhs.value.u8
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = lhs.value.u16 * rhs.value.u16
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = lhs.value.u32 * rhs.value.u32
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = lhs.value.u64 * rhs.value.u64
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = lhs.value.i8 * rhs.value.i8
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = lhs.value.i16 * rhs.value.i16
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = lhs.value.i32 * rhs.value.i32
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = lhs.value.i64 * rhs.value.i64
+        return &dst
+      }
+      case Kind.Float {
+        dst.f32 = lhs.value.f32 * rhs.value.f32
+        return &dst
+      }
+      case Kind.Double {
+        dst.f64 = lhs.value.f64 * rhs.value.f64
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveMultiplyWithPowerOf2(this, expr, lhs, rhs) {
+    switch rhs.type.kind {
+      case ssa.Kind.UInt8, ssa.Kind.Int8 {
+        var      n = rhs.value.u8 - 1u8
+        var result = 0u8
+        for n {
+          ++result
+          n >>= 1u8
+        }
+        return this.shiftLeft(expr, lhs, result)
+      }
+      case ssa.Kind.UInt16, ssa.Kind.Int16 {
+        var      n = rhs.value.u16 - 1u16
+        var result = 0u16
+        for n {
+          ++result
+          n >>= 1u16
+        }
+        assert result   
+        return this.shiftLeft(expr, lhs, result)
+      }
+      case ssa.Kind.UInt32, ssa.Kind.Int32 {
+        var      n = rhs.value.u32 - 1u32
+        var result = 0u32
+        for n {
+          ++result
+          n >>= 1u32
+        }
+        return this.shiftLeft(expr, lhs, result)
+      }
+      case ssa.Kind.UInt64, ssa.Kind.Int64 {
+        var      n = rhs.value.u64 - 1u64
+        var result = 0u64
+        for n {
+          ++result
+          n >>= 1u64
+        }
+        return this.shiftLeft(expr, lhs, result)
+      }
+    }
+    return this.nullValue
+  }
+
+
+  fn shiftLeft(this, expr, lhs, rhs): ssa.Value* {
+    const block = expr.parent
+    const shift = new ssa.LeftShift{ pos = expr.pos, parent = block, type = expr.type }
+    shift.initialize(operands = ssa.2ops)
+    shift.operands.set(ssa.op1, lhs)
+    shift.operands.imm(ssa.op2, ssa.Constant{ type = expr.type, value = Immediate{ u64 = rhs }})
+    block.body.insertBefore(shift, expr)
+    ++this.added
+    println("@@#{this.function.name} bb.#{block.index}")
+    return shift
+  }
+
+
+  fn solveMin(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = (lhs.value.u8 if lhs.value.u8 < rhs.value.u8 else rhs.value.u8)
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = (lhs.value.u16 if lhs.value.u16 < rhs.value.u16 else rhs.value.u16)
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = (lhs.value.u32 if lhs.value.u32 < rhs.value.u32 else rhs.value.u32)
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = (lhs.value.u64 if lhs.value.u64 < rhs.value.u64 else rhs.value.u64)
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = (lhs.value.i8 if lhs.value.i8 < rhs.value.i8 else rhs.value.i8)
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = (lhs.value.i16 if lhs.value.i16 < rhs.value.i16 else rhs.value.i16)
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = (lhs.value.i32 if lhs.value.i32 < rhs.value.i32 else rhs.value.i32)
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = (lhs.value.i64 if lhs.value.i64 < rhs.value.i64 else rhs.value.i64)
+        return &dst
+      }
+      case Kind.Float {
+        dst.f32 = (lhs.value.f32 if lhs.value.f32 < rhs.value.f32 else rhs.value.f32)
+        return &dst
+      }
+      case Kind.Double {
+        dst.f64 = (lhs.value.f64 if lhs.value.f64 < rhs.value.f64 else rhs.value.f64)
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveMax(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    switch lhs.type.kind {
+      case Kind.UInt8 {
+        dst.u64 = (lhs.value.u8 if lhs.value.u8 > rhs.value.u8 else rhs.value.u8)
+        return &dst
+      }
+      case Kind.UInt16 {
+        dst.u64 = (lhs.value.u16 if lhs.value.u16 > rhs.value.u16 else rhs.value.u16)
+        return &dst
+      }
+      case Kind.UInt32 {
+        dst.u64 = (lhs.value.u32 if lhs.value.u32 > rhs.value.u32 else rhs.value.u32)
+        return &dst
+      }
+      case Kind.UInt64 {
+        dst.u64 = (lhs.value.u64 if lhs.value.u64 > rhs.value.u64 else rhs.value.u64)
+        return &dst
+      }
+      case Kind.Int8 {
+        dst.i64 = (lhs.value.i8 if lhs.value.i8 > rhs.value.i8 else rhs.value.i8)
+        return &dst
+      }
+      case Kind.Int16 {
+        dst.i64 = (lhs.value.i16 if lhs.value.i16 > rhs.value.i16 else rhs.value.i16)
+        return &dst
+      }
+      case Kind.Int32 {
+        dst.i64 = (lhs.value.i32 if lhs.value.i32 > rhs.value.i32 else rhs.value.i32)
+        return &dst
+      }
+      case Kind.Int64 {
+        dst.i64 = (lhs.value.i64 if lhs.value.i64 > rhs.value.i64 else rhs.value.i64)
+        return &dst
+      }
+      case Kind.Float {
+        dst.f32 = (lhs.value.f32 if lhs.value.f32 > rhs.value.f32 else rhs.value.f32)
+        return &dst
+      }
+      case Kind.Double {
+        dst.f64 = (lhs.value.f64 if lhs.value.f64 > rhs.value.f64 else rhs.value.f64)
+        return &dst
+      }
+    }
+    return null
+  }
+
+
+  fn solveRotateLeft(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    if 0 {
+      return &dst
+    }
+    return null
+  }
+
+
+  fn solveRotateRight(this, dst, lhs, rhs) {
+    assert lhs.type.kind == rhs.type.kind
+    if 0 {
+      return &dst
+    }
+    return null
+  }
+
+
+  fn solvePhi(this, dst, phi): (Immediate*, ssa.Value*) {
+    assert phi.operands.length == phi.parent.uses.length
+    // Don't propagate the operand of a 1-operand phi in a loop header. Unless it is pathological.
+    if phi.parent.isaLoopHeader() && phi.operands.length == 1 {
+      const operand = phi.operands.items[0]
+      if const node = operand.isaNode() {
+        if node != phi {
+          return (null, null)
+        }
+      }
+    }
+
+    var      nodes = 0
+    var immediates = 0
+    var      index = 0
+    var     unique = ssa.Operand*{}
+    for operand in phi.operands {      
+      if const node = operand.isaNode() as ssa.Value* {
+        break if immediates
+        if !unique {
+          unique = &operand
+        } else {
+          break if unique.value.node != operand.value.node
+        }
+        ++nodes
+      } else {
+        break if nodes
+        if !unique {
+          unique = &operand
+        } else {
+          break if unique.value.immediate.value.u64 != operand.value.immediate.value.u64
+        }
+        ++immediates
+      }
+
+      ++index
+    }
+
+    if unique && index == phi.operands.length {
+      if nodes {
+        assert !immediates && nodes == phi.operands.length
+        return (null, unique.value.node as ssa.Value*)
+      }
+      assert immediates == phi.operands.length
+      dst.u64 = unique.value.immediate.value.u64
+      return (&dst, null)
+    }
+
+    return (null, null)
+  }
+
+
+  fn loadAndReplace(this, expr, solution) {
+    const constant = ssa.Constant{ type = expr.type, value = *solution }
+    const    block = expr.parent
+    const     load = new ssa.Load{ pos = expr.pos, parent = block, type = expr.type }
+    load.initialize(operands = ssa.1ops)
+    load.operands.imm(ssa.op1, constant)
+    block.body.insertBefore(load, expr)
+    this.replace(expr, load)
+    ++this.added
+  }
+
+
+  fn decrement(this, pos, value) {
+    const block = pos.parent
+    const   dec = new ssa.Decrement{ pos = pos.pos, parent = block, type = value.type }
+    dec.initialize(operands = ssa.1ops)
+    dec.operands.set(ssa.op1, value)
+    block.body.insertBefore(dec, pos)
+    ++this.added
+    return dec
+  }
+
+
+  fn replaceWithDecrement(this, pos, value) {
+    const dec = this.decrement(pos, value)
+    this.replace(pos, dec)
+    println("@@replaceWithDecrement")
+  }
+
+
+  fn increment(this, pos, value) {
+    const block = pos.parent
+    const   inc = new ssa.Increment{ pos = pos.pos, parent = block, type = value.type }
+    inc.initialize(operands = ssa.1ops)
+    inc.operands.set(ssa.op1, value)
+    block.body.insertBefore(inc, pos)
+    ++this.added
+    return inc
+  }
+
+
+  fn negate(this, pos, value) {    
+    const block = pos.parent
+    const   neg = new ssa.Negate{ pos = pos.pos, parent = block, type = value.type }
+    neg.initialize(operands = ssa.1ops)
+    neg.operands.set(ssa.op1, value)
+    block.body.insertBefore(neg, pos)
+    ++this.added
+    return neg
+  }
+
+
+  fn add(this, pos, lhs, rhs) {
+    const block = pos.parent
+    const   add = new ssa.Add{ pos = pos.pos, parent = block, type = lhs.type }
+    add.initialize(operands = ssa.2ops)
+    add.operands.set(ssa.op1, lhs)
+    add.operands.imm(ssa.op2, rhs)
+    block.body.insertBefore(add, pos)
+    ++this.added
+    return add
+  }
+
+
+  fn subtract(this, pos, lhs, rhs) {
+    const block = pos.parent
+    const   add = new ssa.Subtract{ pos = pos.pos, parent = block, type = lhs.type }
+    add.initialize(operands = ssa.2ops)
+    add.operands.set(ssa.op1, lhs)
+    add.operands.imm(ssa.op2, rhs)
+    block.body.insertBefore(add, pos)
+    ++this.added
+    return add
+  }
+
+
+  fn propagate(this, expr, solution) {
+    for use in expr.uses {
+      if use.operand().isaWrite() {
+        return false if expr is ssa.Load
+          else this.loadAndReplace(expr, solution)
+      }
+    }
+
+    expr.propagate(solution)
+    expr.parent.body.remove(expr)
+    delete expr
+    ++this.removed
+    return true
+  }
+
+
+  fn replace(this, expr, replacer) {
+    /*for use in expr.uses {
+      return false if use.operand().isaWrite()
+    }*/
+
+    expr.replace(replacer)
+    expr.parent.body.remove(expr)
+    delete expr
+    ++this.removed
+    return true
+  }
+}
+

@@ -1,0 +1,57 @@
+enum ErrorFunction {
+  MeanSquaredError
+}
+
+enum ActivationFunction {
+  RectifiedLinearUnit,
+  SoftPlus,
+  TanH
+}
+
+struct Layer {
+  readonly nodes   = Vector(Double){}
+  readonly weights = Matrix(Double){}
+  readonly delta   = Vector(Double){}
+  readonly activationFunction = ActivationFunction.MeanSquaredError
+
+
+  fn dispose(this) {
+    delete this.nodes
+    delete this.weights
+  }
+}
+
+
+struct ArtificialNN {
+  readonly input = Matrix(Double){}  // n ✕ m
+  readonly output = Matrix(Double){} // n2 ✕ m
+  readonly layers = List(Layer){}
+  readonly maxIterations = 200
+  readonly learningRate = 0.15
+
+
+  fn dispose(this) {
+    delete this.input
+    delete this.output
+    delete this.layers with fn(x) = delete x
+  }
+
+  fn run() {
+    for var iteration = 0; iteration < this.maxIterations; ++iteration {
+
+    }
+  }
+
+  fn feedForward() {
+
+  }
+
+  fn backPropagate() {
+
+  }
+
+
+  fn update() {
+
+  }
+}

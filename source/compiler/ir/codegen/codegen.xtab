@@ -1,0 +1,310 @@
+export Register from ssa
+export  RegKind from ssa
+export    Scale from ssa
+
+export Emitter from emit
+export Encoder from encoder
+export  Buffer from buffer
+export gen
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn run(ctx) {
+  gprs.initialize()
+  xmms.initialize()
+  const    fns = generate(ctx)
+  const binary = link(ctx, fns)
+  delete fns with fn(x) = x.dispose()
+  return binary
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+define rax 0x0
+define rcx 0x1
+define rdx 0x2
+define rbx 0x3
+define rsp 0x4
+define rbp 0x5
+define rsi 0x6
+define rdi 0x7
+define  r8 0x8
+define  r9 0x9
+define r10 0xA
+define r11 0xB
+define r12 0xC
+define r13 0xD
+define r14 0xE
+define r15 0xF
+
+define  xmm0 0x0
+define  xmm1 0x1
+define  xmm2 0x2
+define  xmm3 0x3
+define  xmm4 0x4
+define  xmm5 0x5
+define  xmm6 0x6
+define  xmm7 0x7
+define  xmm8 0x8
+define  xmm9 0x9
+define xmm10 0xA
+define xmm11 0xB
+define xmm12 0xC
+define xmm13 0xD
+define xmm14 0xE
+define xmm15 0xF
+
+define INVALID_REGISTER 0xFF
+define   INVALID_OPCODE 0xFFFF_FFFF
+
+define OPERAND_SIZE_OVERRIDE 0x66
+
+define  HI_MASK 0b1000  //  Mask of the 4th bit of a register.
+define  LO_MASK 0b0111  //  Mask of the low 3 bits of a register.
+define REG_MASK 0b1111  // Mask of the 4 bits of a register name.
+
+
+define    MODRM_NODISP 0b00
+define     MODRM_DISP8 0b01
+define    MODRM_DISP32 0b10
+define MODRM_REGISTERS 0b11
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Gprs {
+  const rax = Register{}
+  const rcx = Register{}
+  const rdx = Register{}
+  const rbx = Register{}
+  const rsp = Register{}
+  const rbp = Register{}
+  const rsi = Register{}
+  const rdi = Register{}
+  const  r8 = Register{}
+  const  r9 = Register{}
+  const r10 = Register{}
+  const r11 = Register{}
+  const r12 = Register{}
+  const r13 = Register{}
+  const r14 = Register{}
+  const r15 = Register{}
+
+  fn initialize(this) {
+    var list = &this.rax
+    for var i = 0; i < ssa.MAX_GPRS; ++i {
+      list[i].setGpr(i, 0, false)
+    }
+  }
+}
+
+  
+struct Xmms {
+  const  xmm0 = Register{}
+  const  xmm1 = Register{}
+  const  xmm2 = Register{}
+  const  xmm3 = Register{}
+  const  xmm4 = Register{}
+  const  xmm5 = Register{}
+  const  xmm6 = Register{}
+  const  xmm7 = Register{}
+  const  xmm8 = Register{}
+  const  xmm9 = Register{}
+  const xmm10 = Register{}
+  const xmm11 = Register{}
+  const xmm12 = Register{}
+  const xmm13 = Register{}
+  const xmm14 = Register{}
+  const xmm15 = Register{}
+
+  fn initialize(this) {
+    var list = &this.xmm0
+    for var i = 0; i < ssa.MAX_XMMS; ++i {
+      list[i].setXmm(i, 0, false)
+    }
+  }
+}
+
+const gprs = Gprs{}
+const xmms = Xmms{}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Reg {
+  const      type = ssa.Type&{}
+  const      node = ssa.Node*{}
+  const immediate = Immediate*{}
+  const       reg = Register{}
+
+  fn ofValue(value) {
+    return Reg{
+      type = value.type,
+       reg = value.reg,
+      node = value
+    }
+  }
+
+  fn ofOperand(operand) {
+    if const node = operand.isaNode() {
+      return Reg{
+        type = node.type,
+         reg = operand.reg,
+        node = node
+      }
+    }
+    if const immediate = operand.isanImmediate() {
+      return Reg{
+        type = immediate.type,
+         reg = operand.reg,
+        immediate = immediate.value
+      }
+    }
+    assert 0
+    return Reg{}
+  }
+
+  fn ofReg(type, reg) = Reg{ type = type, reg = reg }
+  fn ofGpr(type, name) {
+    const reg = Register{}
+    reg.setGpr(name, 0, 0)
+    return Reg{ type = type, reg = reg }
+  }
+  fn ofXmm(type, name) {
+    const reg = Register{}
+    reg.setXmm(name, 0, 0)
+    return Reg{ type = type, reg = reg }
+  }
+  fn ofZero(type) = ofImmediate(type, 0)
+  fn ofImmediate(type, value) {
+    const reg = Register{}
+    reg.setImmediate(value)
+    return Reg{ type = type, reg = reg }
+  }
+  fn ofRsp(type, displacement) {
+    const reg = Register{}
+    reg.setLocal(displacement)
+    return Reg{ type = type, reg = reg }
+  }
+
+  fn isaHugeImmediate(this) {
+    return this.immediate if !this.node && this.reg.isNotValid()
+  }
+
+  fn isMemory(this)    = this.node is ssa.ElementAt
+  fn isaRegister(this) = this.reg.isaRegister()
+  fn name(this)        = this.reg.name()
+  
+  fn indexIsAFunction(this) {
+    if const elem = this.isMemory() {
+      return elem.indexIsAFunction()
+    }
+    return null
+  }
+
+  fn indexIsABlock(this) {
+    if const elem = this.isMemory() {
+      return elem.indexIsABlock()
+    }
+    return null
+  }
+  
+  fn indexIsAFunctionOrBlock(this) {
+    if const elem = this.isMemory() {
+      if elem.indexIsAFunctionOrBlock() {
+        return elem.operands.firstIndex().value.node
+      }
+    }
+    return null
+  }
+
+  fn format(this, stream, fmt = "") {
+    if this.node {
+      stream.append("node-reg = ")
+      this.reg.format(stream)
+      stream.append(", node = ")
+      stream.append(nameof(this.node))
+    } else if this.immediate {
+      if this.reg.isValid() {
+        stream.append("immediate-reg = ")
+        this.reg.format(stream)
+      } else {
+        stream.append("huge-immediate-reg = ")
+        this.immediate.u64.format(stream, "%0x")
+      }
+    } else {
+      stream.append("unknown-reg = ")
+      this.reg.format(stream)
+    }
+    stream.append(", type = ")
+    this.type.format(stream)
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Site {
+  var    offset = 0
+  readonly size = 0
+
+  fn set(this, offset, size) {
+    assert this.isNotValid()
+    this.offset = offset
+    this.size = size
+  }
+
+  fn isValid(this)    = this.size > 0
+  fn isNotValid(this) = this.size == 0
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+struct Patch {
+  const site = Site{}
+  const node = ssa.Node*{}
+  var    rip = 0
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn generate(ctx) {
+  import worker
+
+  const    start = time.clock()
+  const      fns = List(gen.Function){}
+  const provider = worker.BatchProvider{ program = ctx.ssa }
+  auto generator = provider.functions()
+  const  context = {
+             srw = atomic.ExclusiveLock{}, 
+       generator = generator,
+             ids = ctx.ids,
+             fns = &fns,
+    singleThread = false
+  }
+  threads.run(context) with {
+    auto batch = List(ssa.Function*){}
+    for it.generator.fill(batch) {
+      for function in batch {
+        import Gen from gen
+        auto pass = Gen{ function = function }
+        const   f = pass.run(it)
+        synchronize(it)
+        it.fns.append(f)
+      }
+    }
+  }
+
+  const elapsed = time.elapsed(start)
+  println("#{'codegen'}#[%<darkblue|cyan>]: {\r\n\
+    #{'purpose'}#[%wl12]: #{'generates per-function machine code'}#[%<darkyellow>],\r\n\
+    #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+    #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+    #{'memory'}#[%wl12]: #{memory.mformat()} }")
+
+  return fns
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+fn link(ctx, fns) {
+  import Linker from linker
+  const   start = time.clock()
+  auto     pass = Linker{ fns = fns }
+  const  binary = pass.run(ctx)
+  const elapsed = time.elapsed(start)
+  println("#{'linker'}#[%<darkblue|cyan>]: {\r\n\
+    #{'purpose'}#[%wl12]: #{'generates the binary file'}#[%<darkyellow>],\r\n\
+    #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+    #{'memory'}#[%wl12]: #{memory.mformat()} }")
+  return binary
+}

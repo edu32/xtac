@@ -1,0 +1,227 @@
+  store [dst]:T, [src]:T
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| sizeof(T)    | ops                              |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 1            | mov r11, byte [src]              |
+|              | mov byte [dst], r11              |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 2            | mov r11, word [src]              |
+|              | mov word [dst], r11              |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 4            | mov r11, dword [src]             |
+|              | mov dword [dst], r11             |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 8            | mov r11, qword [src]             |
+|              | mov qword [dst], r11             |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 16           | mov xmm5, xmmword [src]          |
+|              | mov xmmword [dst], xmm5          |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 32           | mov ymm5, ymmword [src]          |
+|              | mov ymmword [dst], ymm5          |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| < 32         ; if size >= 16                    ;
+|              | mov xmm5, xmmword [src]          |
+|              | mov xmmword [dst], xmm5          |
+|              ; offset = 16                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, qword [src + offset]    |
+|              | mov qword [dst + offset], r11    |
+|              ; offset += 8                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, dword [src + offset]    |
+|              | mov dword [dst + offset], r11    |
+|              ; offset += 4                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, word [src + offset]     |
+|              | mov word [dst + offset], r11     |
+|              ; offset += 2                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, word [src + offset]     |
+|              | mov word [dst + offset], r11     |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| <= 256 and   ; 32 <= size <= 256                ; size in multiples of 32 upto 256 B
+| × 32         +――――――――――――――――――――――――――――――――――+
+|              ; times = size / 32                ; 1 <= times <= 8
+|              ; imm = 0                          ;
+|              | mov ymm5, ymmword [src + imm]    |
+|              | mov ymmword [dst + imm], ymm5    |
+|              ; imm += 32                        ;
+|              ; repeat ymm copy upto {times}     ;
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| <= 256 and   ; 32 <= size <= 256                ; size not in multiples of 32 upto 256 B
+| not × 32     +――――――――――――――――――――――――――――――――――+
+|              ; times = size / 32                ; 1 <= times < 8
+|              ; imm = 0                          ;
+|              | mov ymm5, ymmword [src + imm]    |
+|              | mov ymmword [dst + imm], ymm5    |
+|              ; imm += 32                        ;
+|              ; repeat ymm copy upto 7 times     ;
+|              ; remainder = size % 32            ; 0 < remainder <= 31
+|              ;    offset = size - remainder     ; 32 <= offset <= 224
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov xmm5, xmmword [src + offset] |
+|              | mov xmmword [dst + offset], xmm5 |
+|              ; offset += 16                     ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, qword [src + offset]    |
+|              | mov qword [dst + offset], r11    |
+|              ; offset += 8                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, dword [src + offset]    |
+|              | mov dword [dst + offset], r11    |
+|              ; offset += 4                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, word [src + offset]     |
+|              | mov word [dst + offset], r11     |
+|              ; offset += 2                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov r11, byte [src + offset]     |
+|              | mov byte [dst + offset], r11     |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| > 256        | lea rdi, [dst]                   |
+|              | lea rsi, [src]                   |
+|              +――――――――――――――――――――――――――――――――――+
+|              ;     times = size / 8             ;
+|              | mov ecx, times                   |
+|              | rep movsq rdi, rsi               |
+|              ; remainder = size % 8             ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if remainder >= 4                ;
+|              | mov ecx, 1                       |
+|              | rep movsd rdi, rsi               |
+|              ; remainder = size % 4             ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if remainder >= 2                ;
+|              | mov ecx, 1                       |
+|              | rep movsw rdi, rsi               |
+|              ; remainder = size % 2             ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if remainder >= 2                ;
+|              | mov ecx, 1                       |
+|              | rep movsb rdi, rsi               |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+
+  store [dst]:T, 0
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| sizeof(T)    | ops                              |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 1            | mov byte [dst], 0                |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 2            | mov word [dst], 0                |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 4            | mov dword [dst], 0               |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 8            | mov qword [dst], 0               |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 16           | xor xmm5, xmm5                   |
+|              | mov xmmword [dst], xmm5          |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 32           | xor ymm5, ymm5                   |
+|              | mov ymmword [dst], ymm5          |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| < 32         ; if size >= 16                    ;
+|              | xor xmm5, xmm5                   |
+|              | mov xmmword [dst], xmm5          |
+|              ; offset = 16                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov qword [dst + offset], 0      |
+|              ; offset += 8                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov dword [dst + offset], 0      |
+|              ; offset += 4                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov word [dst + offset], 0       |
+|              ; offset += 2                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov word [dst + offset], 0       |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| × 32         ; 32 <= size <= 256                ; size in multiples of 32 upto 256 B
+|              +――――――――――――――――――――――――――――――――――+
+|              ; times = size / 32                ; 1 <= times <= 8
+|              ; imm = 0                          ;
+|              | xor ymm5, ymm5                   |
+|              | mov ymmword [dst + imm], ymm5    |
+|              ; imm += 32                        ;
+|              ; repeat ymm copy upto {times}     ;
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| < 256        ; 32 <= size <= 256                ; size not in multiples of 32 upto 256 B
+|              +――――――――――――――――――――――――――――――――――+
+|              ; times = size / 32                ; 1 <= times < 8
+|              ; imm = 0                          ;
+|              | xor ymm5, ymm5                   |
+|              | mov ymmword [dst + imm], ymm5    |
+|              ; imm += 32                        ;
+|              ; repeat ymm copy upto {times}     ;
+|              ; remainder = size % 32            ; 0 < remainder <= 31
+|              ;    offset = size - remainder     ; 32 <= offset <= 224
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | xor xmm5, xmm5                   |
+|              | mov xmmword [dst + offset], xmm5 |
+|              ; offset += 16                     ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov qword [dst + offset], 0      |
+|              ; offset += 8                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov dword [dst + offset], 0      |
+|              ; offset += 4                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov word [dst + offset], 0       |
+|              ; offset += 2                      ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if offset < size                 ;
+|              | mov byte [dst + offset], 0       |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| > 256        | lea rdi, [dst]                   |
+|              +――――――――――――――――――――――――――――――――――+
+|              ;     times = size / 8             ;
+|              | mov rax, 0                       |
+|              | mov ecx, times                   |
+|              | rep stosq rdi, rsi               |
+|              ; remainder = size % 8             ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if remainder >= 4                ;
+|              | mov ecx, 1                       |
+|              | rep movsd rdi, rsi               |
+|              ; remainder = size % 4             ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if remainder >= 2                ;
+|              | mov ecx, 1                       |
+|              | rep movsw rdi, rsi               |
+|              ; remainder = size % 2             ;
+|              +――――――――――――――――――――――――――――――――――+
+|              ; if remainder >= 2                ;
+|              | mov ecx, 1                       |
+|              | rep movsb rdi, rsi               |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+
+  store [dst]:T, imm
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| sizeof(T)    | ops                              |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 1            | mov byte [dst], imm8             |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 2            | mov word [dst], imm16            |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 4            | mov dword [dst], imm32           |
++――――――――――――――+――――――――――――――――――――――――――――――――――+
+| 8            | movabs r11, imm64                |
+|              | mov qword [dst], r11             |
++――――――――――――――+――――――――――――――――――――――――――――――――――+

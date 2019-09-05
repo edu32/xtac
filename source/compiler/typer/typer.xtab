@@ -1,0 +1,198 @@
+import TemplateCollector from collector
+import Binder from binder
+
+
+fn run(ctx) {
+  import time, memory from std
+
+  const    start = time.clock()
+  auto     typer = Typer{ ids = ctx.ids, sources = ctx.sources, emptyid = ctx.ids.emptyid(), types = ctx.types }
+  auto collector = TemplateCollector{ typer = typer }
+  auto    binder = Binder{ ids = ctx.ids, typer = typer }
+  typer.binder = &binder
+  typer.collector = &collector
+
+  import make
+  make.xxxx = 100
+
+  typer.initialize(ctx)
+  ctx.ast = collector.visitFolderStatements(ctx.src, null as ast.Folder*)
+          
+  if !typer.errors {
+    typer.initializeBuiltins()
+    ctx.ast.scope.beginBinding()
+    binder.visitMain()
+    ctx.ast.scope.finishBinding()
+  }
+  const elapsed = time.elapsed(start)
+  println("#{'typer'}#[%<darkblue|cyan>]: {\r\n\
+    #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+    #{'memory'}#[%wl12]: #{memory.mformat()},\r\n\
+    #{'errors'}#[%wl12]: #{typer.errors}#[%,%<red>],\r\n\
+    #{'lspeed'}#[%wl12]: #{ctx.compilationInfo.lines/elapsed}#[%,%d0%<gray>] lines/s,\r\n\
+    #{'tspeed'}#[%wl12]: #{ctx.compilationInfo.tokens/elapsed}#[%,%d0%<gray>] tokens/s,\r\n\
+    #{'bspeed'}#[%wl12]: #{ctx.compilationInfo.size/elapsed}#[%,%d0%<gray>] B/s,\r\n\
+    #{'ids'}#[%wl12]: #{ctx.ids.values.length}#[%,%<gray>] }")
+
+  if !typer.errors {
+    import transform
+    transform.run(typer, ctx)
+  }
+  return typer.errors
+}
+
+
+struct Typer {
+  var     collector = TemplateCollector*{}
+  var         binder = Binder*{}
+  var           main = ast.Symbol*{}
+  const      sources = List(Source)*{}
+  const          ids = Identifiers&{}
+  const      emptyid = Identifier*{}
+  const nullTemplate = src.Node*{}
+  const        types = ast.Types&{}
+  var         errors = 0
+  readonly    tyNull = ast.Type{}
+
+  fn dispose(this) {
+  }
+
+  fn initialize(this, ctx) {
+    this.types.initialize()
+    this.tyNull = this.types.pointerOf(ast.tyVoid)
+  }
+
+  fn initializeBuiltins(this) {
+    assert this.main
+    const root = this.main.scope
+    assert root && !root.parent
+    root.appendBuiltin(ast.tyVoid,      this.ids.get("Void"))
+    root.appendBuiltin(ast.tyBool,      this.ids.get("Bool"))
+    root.appendBuiltin(ast.tyWChar,     this.ids.get("WChar"))
+    root.appendBuiltin(ast.tyByte,      this.ids.get("Byte"))
+    root.appendBuiltin(ast.tyUInt8,     this.ids.get("UInt8"))
+    root.appendBuiltin(ast.tyUInt16,    this.ids.get("UInt16"))
+    root.appendBuiltin(ast.tyUInt32,    this.ids.get("UInt32"))
+    root.appendBuiltin(ast.tyUInt64,    this.ids.get("UInt64"))
+    root.appendBuiltin(ast.tyChar,      this.ids.get("Char"))
+    root.appendBuiltin(ast.tyInt8,      this.ids.get("Int8"))
+    root.appendBuiltin(ast.tyInt16,     this.ids.get("Int16"))
+    root.appendBuiltin(ast.tyInt32,     this.ids.get("Int32"))
+    root.appendBuiltin(ast.tyInt64,     this.ids.get("Int64"))
+    root.appendBuiltin(ast.tyFloat,     this.ids.get("Float"))
+    root.appendBuiltin(ast.tyDouble,    this.ids.get("Double"))
+    root.appendBuiltin(ast.tyFloatx4,   this.ids.get("Floatx4"))
+    root.appendBuiltin(ast.tyDoublex2,  this.ids.get("Doublex2"))
+    root.appendBuiltin(ast.tyUInt8x16,  this.ids.get("UInt8x16"))
+    root.appendBuiltin(ast.tyUInt16x8,  this.ids.get("UInt16x8"))
+    root.appendBuiltin(ast.tyUInt32x4,  this.ids.get("UInt32x4"))
+    root.appendBuiltin(ast.tyUInt64x2,  this.ids.get("UInt64x2"))
+    root.appendBuiltin(ast.tyInt8x16,   this.ids.get("Int8x16"))
+    root.appendBuiltin(ast.tyInt16x8,   this.ids.get("Int16x8"))
+    root.appendBuiltin(ast.tyInt32x4,   this.ids.get("Int32x4"))
+    root.appendBuiltin(ast.tyInt64x2,   this.ids.get("Int64x2"))
+    root.appendBuiltin(ast.tyFloatx8,   this.ids.get("Floatx8"))
+    root.appendBuiltin(ast.tyDoublex4,  this.ids.get("Doublex4"))
+    root.appendBuiltin(ast.tyUInt8x32,  this.ids.get("UInt8x32"))
+    root.appendBuiltin(ast.tyUInt16x16, this.ids.get("UInt16x16"))
+    root.appendBuiltin(ast.tyUInt32x8,  this.ids.get("UInt32x8"))
+    root.appendBuiltin(ast.tyUInt64x4,  this.ids.get("UInt64x4"))
+    root.appendBuiltin(ast.tyInt8x32,   this.ids.get("Int8x32"))
+    root.appendBuiltin(ast.tyInt16x16,  this.ids.get("Int16x16"))
+    root.appendBuiltin(ast.tyInt32x8,   this.ids.get("Int32x8"))
+    root.appendBuiltin(ast.tyInt64x4,   this.ids.get("Int64x4"))
+  }
+
+
+  fn random(this, infix) {
+    return this.ids.random(infix)
+  }
+
+  fn sourceAt(this, pos) {
+    assert pos.file >= 0 with "#{pos.file}"
+    const source = this.sources.items[pos.file]
+    assert pos.range.start.pos >= 0 && pos.range.start.pos <= source.value.length
+    assert pos.range.end.pos >= 0 && pos.range.end.pos <= source.value.length
+    assert pos.range.start.pos <= pos.range.end.pos
+    return string.fromRange(source.value.text + pos.range.start.pos, source.value.text + pos.range.end.pos)
+  }
+
+
+  fn info(this, pos, msg) {
+    assert pos.file >= 0 with "#{pos.file}; #{msg}"
+    const source = this.sources.items[pos.file]
+    diagnostics.info(source, pos.range, "typer", msg)
+  }
+
+
+  fn cbinfo(this, pos, ctx, cb) {
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.infoWithCallBack(source, pos.range, "typer", ctx, cb)
+    //this.printCallSite()
+  }
+
+
+  fn err(this, pos, msg) {
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.error(source, pos.range, "typer", msg)
+    ++this.errors
+    this.printCallSite()
+  }
+
+
+  fn cberr(this, pos, ctx, cb) {
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.errorWithCallBack(source, pos.range, "typer", ctx, cb)
+    ++this.errors
+    this.printCallSite()
+  }
+
+
+  fn e_exists(this, pos, name, found) {
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.errorWithCallBack(source, pos.range, "typer", { name = name, found = found }) with {
+      if it.name {
+        println("#{it.name}#[%<yellow>] already declared in scope")
+      } else {
+        println("#{'anonymous'}#[%<yellow>] somehow already declared in scope")
+      }
+    }
+    ++this.errors
+    this.printCallSite()
+  }
+
+  fn printCallSite(this) {
+    if this.binder.site {
+      println("#{'Graph to error'}#[%<darkyellow>]:")
+    }
+    var i = 0
+    for var site = this.binder.site; site; site = site.parent {
+      assert site.pos.file >= 0
+      const source = this.sources.items[site.pos.file]
+      diagnostics.highlightCallSite(source, site.pos.range, index = i++)
+    }
+  }
+
+  fn printLayoutSite(this, symbols) {
+    var index = 0
+    for var i = symbols.length; --i >= 0; {
+      const symbol = symbols.items[i]
+      var pos = Pos{}
+      if symbol.instance {
+        pos = symbol.instance.pos
+      } else if symbol.template {
+        pos = this.binder.mkPos(symbol.template)
+      } else {
+        println("no pos for #{symbol.type()}; wtf?")
+        continue
+      }
+      assert pos.file >= 0
+      const source = this.sources.items[pos.file]
+      diagnostics.highlightCallSite(source, pos.range, index = index++)
+    }
+  }
+}

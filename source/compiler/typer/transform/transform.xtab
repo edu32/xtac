@@ -1,0 +1,267 @@
+
+fn run(typer, ctx) {
+  import memory from std
+  import worker, threads
+
+  const provider = worker.BatchProvider{ root = ctx.ast.scope }
+  
+  //--------------------------------------------------------------------------------------------------------
+  // coalescer
+  if !typer.errors {
+    const    start = time.clock()
+    auto generator = provider.overloads()
+    const context  = {
+               srw = atomic.ExclusiveLock{},
+             typer = typer,
+         generator = generator,
+        eliminated = 0,
+              seen = 0,
+      singleThread = false,
+      appendSeen = synchronized fn (self, symbols) {
+        self.seen += symbols.length
+      },
+      eliminate = synchronized fn (self, eliminated) {
+        self.eliminated += eliminated
+      }
+    }
+
+    threads.run(context) with {      
+      auto batch = List(ast.OverloadSet*){}
+      for it.generator.fill(batch) {
+        //println("#{'coalescer thread'}#[%<darkblue|cyan>]: #{os.GetCurrentThreadId()}")
+        for overloaded in batch {
+          const template = overloaded.template.template is src.Function
+          continue if !template
+          it.appendSeen(overloaded.symbols)
+          if overloaded.symbols.length > 1 {
+            assert template.keyword != Tok.Extern
+            import coalescer
+            coalescer.run(it, overloaded)
+          }
+        }
+      }
+    }
+
+    if context.seen {
+      const elapsed = time.elapsed(start)
+      println("#{'coalescer'}#[%<darkblue|cyan>]: {\r\n\
+        #{'purpose'}#[%wl12]: #{'eliminates related instances of function templates'}#[%<darkyellow>],\r\n\
+        #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+        #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+        #{'visited'}#[%wl12]: #{context.seen}#[%,%<gray>] functions,\r\n\
+        #{'eliminated'}#[%wl12]: #{context.eliminated}#[%,%<gray>],\r\n\
+        #{'attrition'}#[%wl12]: #{100.0f * Float(context.eliminated) / context.seen}#[%d2%<gray>]%,\r\n\
+        #{'memory'}#[%wl12]: #{memory.mformat()} }")
+    }
+  }
+
+  //--------------------------------------------------------------------------------------------------------
+  // checker
+  if !typer.errors {
+    const    start = time.clock()
+    auto generator = provider.filesAndFunctions()
+    const context  = {
+               srw = atomic.ExclusiveLock{},
+             typer = typer,
+         generator = generator,
+             files = 0,
+         functions = 0,
+           removed = 0,
+             added = 0,
+           visited = 0,
+        retargeted = 0,
+      singleThread = false,
+      update = synchronized fn (self, context) {
+           self.removed += context.removed
+             self.added += context.added
+           self.visited += context.visited
+        self.retargeted += context.retargeted
+      }
+    }
+
+    threads.run(context) with {      
+      auto batch = List(ast.Symbol*){}
+      for it.generator.fill(batch) {
+        for symbol in batch {  
+          switch symbol.instance {
+            case     file: ast.File     atomic.increment(&it.files)
+            case function: ast.Function atomic.increment(&it.functions)
+            default assert 0
+          }
+          import checker      
+          checker.run(it, symbol.instance)
+        }
+      }
+    }
+
+    if context.files + context.functions {
+      const elapsed = time.elapsed(start)
+      println("#{'checker'}#[%<darkblue|cyan>]: {\r\n\
+        #{'purpose'}#[%wl12]: #{'checks expressions for type and value correctness'}#[%<darkyellow>],\r\n\
+        #{'errors'}#[%wl12]: #{typer.errors}#[%<red>]\r\n\
+        #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+        #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+        #{'functions'}#[%wl12]: #{context.functions}#[%,%<gray>],\r\n\
+        #{'files'}#[%wl12]: #{context.files}#[%,%<gray>],\r\n\
+        #{'nodes'}#[%wl12]: { visited: #{context.visited}#[%,%<gray>], \
+                              removed: #{context.removed}#[%,%<gray>], \
+                                added: #{context.added}#[%,%<gray>], \
+                           retargeted: #{context.retargeted}#[%,%<gray>] },\r\n\
+        #{'lspeed'}#[%wl12]: #{ctx.compilationInfo.lines/elapsed}#[%,%d0%<gray>] lines/s,\r\n\
+        #{'tspeed'}#[%wl12]: #{ctx.compilationInfo.tokens/elapsed}#[%,%d0%<gray>] tokens/s,\r\n\
+        #{'bspeed'}#[%wl12]: #{ctx.compilationInfo.size/elapsed}#[%,%d0%<gray>] B/s,\r\n\
+        #{'nspeed'}#[%wl12]: #{context.visited/elapsed}#[%,%d0%<gray>] nodes/s,\r\n\
+        #{'memory'}#[%wl12]: #{memory.mformat()} }")
+    }
+  }
+
+  //--------------------------------------------------------------------------------------------------------
+  // lifter
+  if !typer.errors {
+    const    start = time.clock()
+    auto generator = provider.functions()
+    const context  = {
+               srw = atomic.ExclusiveLock{},
+             typer = typer,
+         generator = generator,
+         functions = 0,
+             total = 0, // Number of locals in all generator-functions that were converted to fields.
+            shared = 0, // Number of all created generator-fields that share an offset.
+      singleThread = false,
+      update = synchronized fn (self, context) {
+         self.total += context.total
+        self.shared += context.shared
+      }
+    }
+
+    threads.run(context) with {
+      auto batch = List(ast.Symbol*){}
+      for it.generator.fill(batch) {
+        for symbol in batch {
+          const function = symbol.instance as ast.Function*
+          continue if !function.generator
+          atomic.increment(&it.functions)
+          import lifter
+          lifter.run(it, symbol)
+        }
+      }
+    }
+
+    if context.functions {
+      const elapsed = time.elapsed(start)
+      println("#{'lifter'}#[%<darkblue|cyan>]: {\r\n\
+        #{'purpose'}#[%wl12]: #{'converts generator locals to generator object fields'}#[%<darkyellow>],\r\n\
+        #{'errors'}#[%wl12]: #{typer.errors}#[%<red>]\r\n\
+        #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+        #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+        #{'generators'}#[%wl12]: #{context.functions}#[%,%<gray>],\r\n\
+        #{'fields'}#[%wl12]: { created: #{context.total}#[%,%<gray>], \
+                                shared: #{100.0 * context.shared / context.total}#[%d2%<gray>]% },\r\n\
+        #{'memory'}#[%wl12]: #{memory.mformat()} }")
+    }
+  }
+
+  //--------------------------------------------------------------------------------------------------------
+  // layout
+  if !typer.errors {
+    const    start = time.clock()
+    auto generator = provider.symbols()
+    const context  = {
+               srw = atomic.ExclusiveLock{},
+             typer = typer,
+         generator = generator,
+             total = 0, // Number of symbols visited.
+           structs = 0,
+            unions = 0,
+             enums = 0,
+         functions = 0,
+            arrays = 0,
+           objects = 0,
+       fixedArrays = 0,
+      singleThread = true,
+      update = synchronized fn (self, context) {
+            self.structs += context.structs
+             self.unions += context.unions
+              self.enums += context.enums
+          self.functions += context.functions
+             self.arrays += context.arrays
+            self.objects += context.objects
+        self.fixedArrays += context.fixedArrays
+        ++self.total
+      }
+    }
+
+    threads.run(context) with {      
+      auto batch = List(ast.Symbol*){}
+      for it.generator.fill(batch) {
+        for symbol in batch {
+          import layout
+          layout.run(it, symbol)
+        }
+      }
+    }
+
+    if context.total {
+      const elapsed = time.elapsed(start)
+      println("#{'layout'}#[%<darkblue|cyan>]: {\r\n\
+        #{'purpose'}#[%wl12]: #{'computes the sizes of types'}#[%<darkyellow>],\r\n\
+        #{'errors'}#[%wl12]: #{typer.errors}#[%<red>]\r\n\
+        #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+        #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+        #{'types'}#[%wl12]: { structs: #{context.structs}#[%,%<gray>], \
+          unions: #{context.unions}#[%,%<gray>], enums: #{context.enums}#[%,%<gray>], \
+          functions: #{context.functions}#[%,%<gray>], arrays: #{context.arrays}#[%,%<gray>], \
+          objects: #{context.objects}#[%,%<gray>], \
+          fixedArrays: #{context.fixedArrays}#[%,%<gray>] },\r\n\
+        #{'memory'}#[%wl12]: #{memory.mformat()} }")
+    }
+  }
+
+  //--------------------------------------------------------------------------------------------------------
+  // shaper
+  if !typer.errors {
+    import shaper
+    auto   structs = shaper.MergeList{}
+    auto    unions = shaper.MergeList{}
+    auto    arrays = shaper.MergeList{}
+    const    start = time.clock()
+    auto generator = provider.symbols()
+    const context  = {
+               srw = atomic.ExclusiveLock{},
+             typer = typer,
+         generator = generator,
+      singleThread = true,
+           structs = &structs,
+            unions = &unions,
+            arrays = &arrays
+    }
+
+    threads.run(context) with {
+      auto batch = List(ast.Symbol*){}
+      for it.generator.fill(batch) {
+        for symbol in batch {
+          shaper.run(it, symbol)
+        }
+      }
+    }
+
+    if context.structs.total || context.unions.total || context.arrays.total {
+      const elapsed = time.elapsed(start)
+      println("#{'shaper'}#[%<darkblue|cyan>]: {\r\n\
+        #{'purpose'}#[%wl12]: #{'merges structs, tuples, objects and arrays by shape'}#[%<darkyellow>],\r\n\
+        #{'errors'}#[%wl12]: #{typer.errors}#[%<red>]\r\n\
+        #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+        #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+        #{'structs'}#[%wl12]: { visited: #{context.structs.total}#[%,%<gray>], \
+                                 merged: #{100.0 * (context.structs.total - context.structs.list.length) / context.structs.total}#[%,%d2%<gray>]%, \
+                              remaining: #{context.structs.list.length}#[%,%<gray>] },\r\n\
+        #{'unions'}#[%wl12]: { visited: #{context.unions.total}#[%,%<gray>], \
+                                merged: #{100.0 * (context.unions.total - context.unions.list.length) / context.unions.total}#[%,%d2%<gray>]%, \
+                             remaining: #{context.unions.list.length}#[%,%<gray>] },\r\n\
+        #{'arrays'}#[%wl12]: { visited: #{context.arrays.total}#[%,%<gray>], \
+                                merged: #{100.0 * (context.arrays.total - context.arrays.list.length) / context.arrays.total}#[%,%d2%<gray>]%, \
+                             remaining: #{context.arrays.list.length}#[%,%<gray>] },\r\n\
+        #{'memory'}#[%wl12]: #{memory.mformat()} }")
+    }
+  }
+}

@@ -1,0 +1,202 @@
+enum Kind {
+  None,
+  SameDst, // {move} and {other} write to the same register.
+  SameSrc, // {move} and {other} read from the same register.
+  Follows, // {move} writes to the register read from by {other}.
+  Leads,   // {move} reads from the register written to by {other}.
+  Exchange,// {move} writes to the source of {other} which writes to the source of {move}.
+  Same,    // {move} is the same as {other}.
+}
+
+
+fn compute(moves, move) {
+    const it = {
+       sameDst = -1,
+       sameSrc = -1,
+       follows = -1,
+         leads = -1,
+      exchange = -1,
+          same = -1
+    }
+    for i, other in moves {
+      switch compare(move, other) {
+        case Kind.None {}
+        case Kind.SameDst {
+          assert it.sameDst < 0
+          it.sameDst = i
+        }
+        case Kind.SameSrc {
+          if it.sameSrc < 0 {
+            it.sameSrc = i
+          }
+        }
+        case Kind.Follows {
+          it.follows = i
+        }
+        case Kind.Leads {
+          assert it.leads < 0
+          it.leads = i
+        }
+        case Kind.Exchange {
+          assert it.exchange < 0
+          it.exchange = i
+        }
+        case Kind.Same {
+          assert it.same < 0
+          it.same = i
+        }
+      }
+    }
+    return it
+}
+
+fn compare(move, other) {
+  switch move {
+    case Transfer {
+      switch other {
+        case Transfer {
+          if move.dst.slot.reg == other.dst.slot.reg {
+            return Kind.Same if move.src.slot.reg == other.src.slot.reg
+              else Kind.SameDst
+          }
+          if move.dst.slot.reg == other.src.slot.reg {
+              return Kind.Exchange if move.src.slot.reg == other.dst.slot.reg
+                else Kind.Follows
+          }
+          return Kind.Leads   if move.src.slot.reg == other.dst.slot.reg
+          return Kind.SameSrc if move.src.slot.reg == other.src.slot.reg
+        }
+        case Exchange {
+          if move.dst.slot.reg == other.dst.slot.reg || move.dst.slot.reg == other.src.slot.reg ||
+             move.src.slot.reg == other.dst.slot.reg || move.src.slot.reg == other.src.slot.reg {
+            return Kind.SameDst
+          }
+        }
+        case Fill {
+          return Kind.SameDst if move.dst.slot.reg == other.dst.slot.reg
+          return Kind.Leads   if move.src.slot.reg == other.dst.slot.reg
+        }
+        case Spill {
+          return Kind.Follows if move.dst.slot.reg == other.src.slot.reg
+          return Kind.SameSrc if move.src.slot.reg == other.src.slot.reg
+        }
+      }
+    }
+    case Exchange {
+      switch other {
+        case Transfer {
+          if move.dst.slot.reg == other.dst.slot.reg || move.dst.slot.reg == other.src.slot.reg ||
+             move.src.slot.reg == other.dst.slot.reg || move.src.slot.reg == other.src.slot.reg {
+            return Kind.SameDst
+          }
+        }
+        case Exchange {
+          if move.dst.slot.reg == other.dst.slot.reg && move.src.slot.reg == other.src.slot.reg {
+            return Kind.Same
+          }
+          if move.src.slot.reg == other.dst.slot.reg && move.dst.slot.reg == other.src.slot.reg {
+            return Kind.Same
+          }
+          if move.dst.slot.reg == other.dst.slot.reg || move.dst.slot.reg == other.src.slot.reg ||
+             move.src.slot.reg == other.dst.slot.reg || move.src.slot.reg == other.src.slot.reg {
+            return Kind.SameDst
+          }
+        }
+        case Fill {
+          if move.dst.slot.reg == other.dst.slot.reg || move.src.slot.reg == other.dst.slot.reg {
+            return Kind.SameDst
+          }
+        }
+        case Spill {
+          if move.dst.slot.reg == other.src.slot.reg || move.src.slot.reg == other.src.slot.reg {
+            return Kind.SameDst
+          }
+        }
+      }
+    }
+    case Fill {
+      switch other {
+        case Transfer {
+          return Kind.SameDst if move.dst.slot.reg == other.dst.slot.reg
+          return Kind.Follows if move.dst.slot.reg == other.src.slot.reg
+        }
+        case Exchange {
+          if move.dst.slot.reg == other.dst.slot.reg || move.dst.slot.reg == other.src.slot.reg {
+            return Kind.SameDst
+          }
+        }
+        case Fill {
+          return Kind.SameDst if move.dst.slot.reg == other.dst.slot.reg
+        }
+        case Spill {
+          return Kind.Follows if move.dst.slot.reg == other.src.slot.reg
+        }
+      }
+    }
+    case Spill {
+      switch other {
+        case Transfer {
+          return Kind.Leads   if move.src.slot.reg == other.dst.slot.reg
+          return Kind.SameSrc if move.src.slot.reg == other.src.slot.reg
+        }
+        case Exchange {
+          if move.src.slot.reg == other.dst.slot.reg || move.src.slot.reg == other.src.slot.reg {
+            return Kind.SameDst
+          }
+        }
+        case Fill {    
+          return Kind.Leads   if move.src.slot.reg == other.dst.slot.reg
+        }
+        case Spill {
+          return Kind.SameSrc if move.src.slot.reg == other.src.slot.reg
+        }
+      }
+    }
+  }
+  return Kind.None
+}
+
+
+
+fn isSameOwner(move, other) {
+  switch move {
+    case Transfer {
+      switch other {
+        case Transfer return move.dst.owner == other.dst.owner
+        case Exchange return move.dst.owner == other.dst.owner || move.dst.owner == other.src.owner
+        case Fill     return move.dst.owner == other.dst.owner
+        case Spill    return move.dst.owner == other.src.owner
+        default assert with nameof(other)
+      }
+    }
+    case Exchange {
+      switch other {
+        case Transfer return move.dst.owner == other.dst.owner || move.src.owner == other.dst.owner
+        case Exchange return move.dst.owner == other.dst.owner || move.src.owner == other.src.owner ||
+                             move.dst.owner == other.src.owner || move.src.owner == other.dst.owner
+        case Fill     return move.dst.owner == other.dst.owner || move.src.owner == other.dst.owner
+        case Spill    return move.dst.owner == other.src.owner || move.src.owner == other.src.owner
+        default assert with nameof(other)
+      }
+    }
+    case Fill {
+      switch other {
+        case Transfer return move.dst.owner == other.dst.owner
+        case Exchange return move.dst.owner == other.dst.owner || move.dst.owner == other.src.owner
+        case Fill     return move.dst.owner == other.dst.owner
+        case Spill    return move.dst.owner == other.src.owner
+        default assert with nameof(other)
+      }
+    }
+    case Spill {
+      switch other {
+        case Transfer return move.src.owner == other.dst.owner
+        case Exchange return move.src.owner == other.dst.owner || move.src.owner == other.src.owner
+        case Fill     return move.src.owner == other.dst.owner
+        case Spill    return move.src.owner == other.src.owner
+        default assert with nameof(other)
+      }
+    }
+  }
+  return false
+}

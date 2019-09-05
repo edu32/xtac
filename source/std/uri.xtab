@@ -1,0 +1,351 @@
+struct Query {
+  readonly name = String{}
+  readonly value = String{}
+
+  fn dispose(this) {
+    delete this.name
+    delete this.value
+  }
+
+
+  fn format(this, stream, fmt = "") {
+    stream.append(this.name).append("=").append(this.value)
+  }
+}
+
+
+struct Url {
+  readonly raw = String{}
+  readonly scheme = String{}
+  readonly user = String{}
+  readonly password = String{}
+  readonly host = String{}
+  readonly port = String{}
+  readonly path = List(String){}
+  readonly query = List(Query){}
+  readonly fragment = String{}
+
+
+  fn dispose(this) {
+    delete this.raw
+    delete this.scheme
+    delete this.user
+    delete this.password
+    delete this.host
+    delete this.port
+    delete this.path with fn(x) = delete x
+    delete this.query with fn(x) = delete x
+    delete this.fragment
+  }
+
+
+  fn format(this, stream, fmt = "") {
+    if this.scheme.length {
+      stream.append(this.scheme).append("://")
+    }
+    if this.user.length {
+      stream.append(this.user)
+      if this.password.length {
+        stream.append(":").append(this.password)
+      }
+      stream.append("@")
+    } else if this.password.length {
+      stream.append(this.password).append("@")
+    }
+    if this.path.length {
+      each path in this.path.iterator() {
+        stream.append("/").append(path)
+      }
+    } else {
+      stream.append("/")
+    }
+    if this.query.length {
+      stream.append("?")
+      for var i = 0; i < this.query.length; ++i {
+        stream.append("&") if i
+        this.query[i].format(stream)
+      }
+    }
+  }
+
+
+  fn isaFilePath(this) {
+    return false if this.path.isEmpty()
+    const last = this.path.last()
+    const end = last.end()
+    const start = last.text
+    var dot = end
+    for --dot; dot > start; --dot {
+      if *dot == '.' {
+        return dot + 1 < end && *(dot - 1) != '.'
+      }
+    }
+    return false
+  }
+
+
+  fn makePath(this, base) {
+    fn removeLastFolder(s) {
+      const i = s.lastIndexOfChar('\\')
+      return false if i <= 0 || i == s.length - 1
+      s.setLength(i)
+      return true
+    }
+
+    const lengthOfBase = base.length
+    const slash = "\\", dot = ".", ddot = ".."
+    const s = String{}
+    s.append(base)
+    for part in this.path {
+      continue if part == dot
+      if part == ddot {
+        continue if removeLastFolder(s)
+        s.clear()
+        return s
+      }
+      if !s.endsWithChar('\\') {
+        s.append(slash)
+      }
+      s.append(part)
+    }
+    return s
+  }
+}
+
+
+fn parseUrl(buffer, isUrlEncoded = true) {
+  /* url            → [scheme] [authority] [path] [query] [fragment]
+     scheme         → TEXT ':'
+     authority      → '//' [user [':' password] '@'] host [':' port]
+     user           → TEXT
+     password       → TEXT
+     host           → TEXT
+                    | '[' ANY ']'
+     port           → TEXT
+     path           →  '/' TEXT ['/' [TEXT]]+
+     query-list     → '?' query ['&' query]+
+     query          → [TEXT] ['=' [TEXT]]]
+     fragmentt      → '#' [TEXT]
+  */
+  const url = Url{
+    raw = String.fromBuffer(buffer)
+  }
+  var ok = true
+  return (url, ok) if url.raw.isEmpty()
+  url.raw.toLowerCase()
+  const tokens = urlTokens(url.raw.text, url.raw.end())
+  const (token, value, _) = tokens.next() 
+  if token == TOK_TEXT {
+    const (lookAhead, lookAheadValue, _) = tokens.next()
+    if lookAhead == TOK_COLON ||      // TEXT ':' ...
+       lookAhead == TOK_SLASH_SLASH { // TEXT '//' ...
+      ok = beginAsScheme(url, value, lookAhead, tokens)
+    } 
+    else if lookAhead == TOK_SLASH    || // TEXT '/'
+            lookAhead == TOK_QUESTION || // TEXT '?'
+            lookAhead == TOK_HASH {      // TEXT '#'
+      ok = beginAsHost(url, value, lookAhead, tokens)
+    }
+     else if lookAhead == TOK_AT {  // TEXT '@'
+      ok = beginAsUser(url, value, lookAhead, tokens)
+    } 
+    else if lookAhead == TOK_AND ||   // TEXT '&'
+            lookAhead == TOK_ASSIGN { // TEXT '='
+      ok = beginAsQuery(url, value, lookAhead, tokens)
+    } 
+    else {
+      assert with "#{url.raw}\r\n#{buffer}\r\n#{value}"
+    }
+  }
+  else if token == TOK_COLON ||      // ':' ...
+          token == TOK_SLASH_SLASH { // '//' ...
+    ok = beginAsScheme(url, "", token, tokens)
+  }
+  else if token == TOK_SLASH    || // '/' ...
+          token == TOK_QUESTION || // '?' ...
+          token == TOK_HASH {      // '#' ...
+    ok = beginAsHost(url, "", token, tokens)
+  } else if token == TOK_AND || token == TOK_ASSIGN {
+    ok = beginAsQuery(url, "", token, tokens)
+  } else {
+    assert token == TOK_EOF
+  }
+  return (url, ok)
+}
+
+
+fn beginAsScheme(url, value, lookAhead, tokens) {
+  assert 0
+  return true
+}
+
+
+fn beginAsUser(url, value, lookAhead, tokens) {
+  assert 0
+  return true
+}
+
+
+fn beginAsHost(url, value, lookAhead, tokens) {
+  var ok = false
+  (url.host, ok) = String.fromPercentEncoded(value.text, value.length)
+  return false if !ok
+  return true if lookAhead == TOK_EOF
+  if lookAhead == TOK_SLASH { // host ':' port '/' ...
+    return doPath(url, tokens)
+  } 
+  if lookAhead == TOK_QUESTION { // host ':' port '?' ...
+    assert 0
+  } 
+  if lookAhead == TOK_HASH { // host ':' port '#' ...
+    assert 0
+  } 
+  assert 0
+  return true
+}
+
+
+fn beginAsQuery(url, value, lookAhead, tokens) {
+  assert 0
+  return true
+}
+
+
+fn doPath(url, tokens) {
+  auto part = String{}
+  each token, value in tokens {
+    if token == TOK_SLASH || token == TOK_SLASH_SLASH {
+      take(url, part)
+      continue
+    }
+    continue if token == TOK_SLASH || token == TOK_SLASH_SLASH
+    if token == TOK_QUESTION {
+      take(url, part)
+      return doQuery(url, tokens)
+    } 
+     if token == TOK_HASH {
+      take(url, part)
+      assert 0
+    }
+    return false if !append(url, part, value)
+  }
+  take(url, part)
+  return true
+
+  fn append(url, part, value) {
+    if value.length {
+      return part.decodePercentEncoded(value.text, value.length) 
+    }
+    return true
+  }
+  
+
+  fn take(url, part) {
+    if part.length {
+      url.path.append(part)
+      part = String{}
+    }
+  }
+}
+
+fn doQuery(url, tokens) {
+  define NAME  1
+  define VALUE 2
+  var state = NAME
+  auto query = Query{}
+  each token, value in tokens {
+    if token == TOK_AND {
+      take(url, query)
+      state = NAME
+    } else if token == TOK_ASSIGN {
+      state = VALUE
+    } else if token == TOK_HASH {
+      take(url, query)
+      assert 0 with "uri.doQuery with token == #"
+    } else if state == NAME {
+      if !query.name.decodePercentEncoded(value.text, value.length) {
+        return false
+      }
+    } else if !query.value.decodePercentEncoded(value.text, value.length) {
+      return false
+    }
+  }
+  take(url, query)
+  return true
+  
+  fn take(url, query) {
+    if query.name.text || query.value.text {
+      url.query.append(query)
+    }
+    query = Query{}
+  }
+}
+
+define TOK_EOF            0
+define TOK_TEXT           1
+define TOK_COLON          2
+define TOK_SLASH          3
+define TOK_SLASH_SLASH    4
+define TOK_AT             5
+define TOK_QUESTION       6
+define TOK_AND            7
+define TOK_ASSIGN         8
+define TOK_HASH           9
+
+fn urlTokens(pos, end) {
+  return {
+    pos = pos,
+    end = end,
+    next = fn(self) {
+      var pos = self.pos
+      const end = self.end
+      return (TOK_EOF, "", true) if pos == end
+      assert pos < end
+      if *pos == ':' {
+        ++self.pos
+        return (TOK_COLON, ":", false)
+      }
+      if *pos == '/' {
+        if pos + 1 < end && pos[1] == '/' {
+          self.pos += 2
+          return (TOK_SLASH_SLASH, "//", false)
+        }
+        ++self.pos
+        return (TOK_SLASH, "/", false)
+      }
+      if *pos == '@' {
+        ++self.pos
+        return (TOK_AT, "@", false)
+      }
+      if *pos == '?' {
+        ++self.pos
+        return (TOK_QUESTION, "?", false)
+      }
+      if *pos == '&' {
+        ++self.pos
+        return (TOK_AND, "&", false)
+      }
+      if *pos == '=' {
+        ++self.pos
+        return (TOK_ASSIGN, "=", false)
+      }
+      if *pos == '#' {
+        ++self.pos
+        return (TOK_HASH, "#", false)
+      }
+      const mark = pos
+      for ; pos < end; ++pos {
+        break if *pos == ':'
+              || *pos == '/'
+              || *pos == '@'
+              || *pos == '?'
+              || *pos == '&'
+              || *pos == '='
+              || *pos == '#'
+      }
+      self.pos = pos
+      const s = string.fromRange(mark, pos)
+      return (TOK_TEXT, s, false)
+    }
+  }
+}

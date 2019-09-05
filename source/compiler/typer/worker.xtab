@@ -1,0 +1,382 @@
+define MAX_FUNCTIONS_PER_RUN 24
+
+struct BatchProvider {
+  const root = ast.Scope*{}
+
+  fn overloads(this) {
+    fn list(scope) {
+      for item in scope.types {
+        const overloaded = item.value
+        yield item.value
+        if const upperBound = overloaded.upperBound {
+          const node = upperBound.instance as ast.Function*
+          yield from auto list(node.scope)
+        } else for symbol in overloaded.symbols {
+          const node = symbol.instance as ast.TypeNode*
+          yield from auto list(node.scope)
+        }
+      }
+      for item in scope.compilerGenerated {
+        const function = item.instance as ast.Function*
+        yield from auto list(function.scope)
+      }
+      for statement in scope.statements {
+        switch statement {
+          case ast.Scope  yield from auto list(statement)
+          case ast.If     yield from auto list(statement)
+          case ast.Loop   yield from auto list(statement)
+        }
+      }
+      switch scope.owner {
+        case ast.Folder {
+          for item in scope.symbols {
+            const symbol = item.value
+            continue if !symbol.instance
+            switch symbol.instance {
+              case folder: ast.Folder {
+                if folder.scope.bindingStatus.isDone() {
+                  yield from auto list(folder.scope)
+                }
+              }
+              case file: ast.File {
+                if file.scope.bindingStatus.isDone() {
+                  yield from auto list(file.scope)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.root),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        var i = 0
+        batch.clear()
+        each symbol in self.list {
+          batch.append(symbol)
+          break if i >= MAX_FUNCTIONS_PER_RUN
+          ++i
+        }
+        return i
+      }
+    }
+  }
+
+
+  fn files(this) {
+    fn list(scope): ast.Symbol* {
+      switch scope.owner {
+        case ast.Folder {
+          for item in scope.symbols {
+            const symbol = item.value
+            continue if !symbol.instance
+            switch symbol.instance {
+              case folder: ast.Folder {
+                if folder.scope.bindingStatus.isDone() {
+                  yield from auto list(folder.scope)
+                }
+              }
+              case file: ast.File {
+                if file.scope.bindingStatus.isDone() {
+                  yield symbol
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.root),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        var i = 0
+        batch.clear()
+        each symbol in self.list {
+          batch.append(symbol)
+          break if i >= MAX_FUNCTIONS_PER_RUN
+          ++i
+        }
+        return i
+      }
+    }
+  }
+
+
+  fn functions(this) {
+    fn list(scope) {
+      for item in scope.types {
+        const overloaded = item.value
+        if const  symbol = overloaded.upperBound {
+          yield symbol
+          const node = symbol.instance as ast.Function*
+          yield from auto list(node.scope)
+        } else for symbol in overloaded.symbols {
+          const node = symbol.instance as ast.TypeNode*
+          switch node {
+            case ast.Function yield symbol
+          }
+          yield from auto list(node.scope)
+        }
+      }
+      for symbol in scope.compilerGenerated {
+        const node = symbol.instance as ast.Function*
+        yield symbol
+        yield from auto list(node.scope)
+      }
+      for statement in scope.statements {
+        switch statement {
+          case ast.Scope  yield from auto list(statement)
+          case ast.If     yield from auto list(statement)
+          case ast.Loop   yield from auto list(statement)
+        }
+      }
+      switch scope.owner {
+        case ast.Folder {
+          for item in scope.symbols {
+            const symbol = item.value
+            continue if !symbol.instance
+            switch symbol.instance {
+              case folder: ast.Folder {
+                if folder.scope.bindingStatus.isDone() {
+                  yield from auto list(folder.scope)
+                }
+              }
+              case file: ast.File {
+                if file.scope.bindingStatus.isDone() {
+                  yield from auto list(file.scope)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.root),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        var i = 0
+        batch.clear()
+        each symbol in self.list {
+          batch.append(symbol)
+          break if i >= MAX_FUNCTIONS_PER_RUN
+          ++i
+        }
+        return i
+      }
+    }
+  }
+
+
+  fn filesAndFunctions(this) {
+    fn list(scope): ast.Symbol* {
+      for item in scope.types {
+        const overloaded = item.value
+        if const  symbol = overloaded.upperBound {
+          const     node = symbol.instance as ast.Function*
+          yield from auto list(node.scope)
+          yield symbol
+        }
+        else for symbol in overloaded.symbols {
+          const node = symbol.instance as ast.TypeNode*
+          yield from auto list(node.scope)
+          switch node {
+            case ast.Function yield symbol
+          }
+        }
+      }
+      for symbol in scope.compilerGenerated {
+        const node = symbol.instance as ast.Function*
+        yield from auto list(node.scope)
+        yield symbol
+      }
+      for statement in scope.statements {
+        switch statement {
+          case ast.Scope  yield from auto list(statement)
+          case ast.If     yield from auto list(statement)
+          case ast.Loop   yield from auto list(statement)
+        }
+      }
+      switch scope.owner {
+        case ast.Folder {
+          for item in scope.symbols {
+            const symbol = item.value
+            continue if !symbol.instance
+            switch symbol.instance {
+              case folder: ast.Folder {
+                if folder.scope.bindingStatus.isDone() {
+                  yield from auto list(folder.scope)
+                }
+              }
+              case file: ast.File {
+                if file.scope.bindingStatus.isDone() {
+                  yield from auto list(file.scope)
+                  yield symbol
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.root),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        var i = 0
+        batch.clear()      
+        each symbol in self.list {
+          batch.append(symbol)
+          break if i >= MAX_FUNCTIONS_PER_RUN
+          ++i
+        }
+        return i
+      }
+    }
+  }
+
+
+  fn symbols(this) {
+    fn list(scope) {
+      for item in scope.types {
+        const overloaded = item.value
+        if const symbol = overloaded.upperBound {
+          const node = symbol.instance as ast.Function*
+          yield symbol
+          yield from auto list(node.scope)
+        }
+        else for symbol in overloaded.symbols {
+          const node = symbol.instance as ast.TypeNode*
+          yield symbol
+          yield from auto list(node.scope)
+        }
+      }
+      for symbol in scope.compilerGenerated {
+        const node = symbol.instance as ast.Function*
+        yield symbol
+        yield from auto list(node.scope)
+      }
+      for item in scope.symbols {
+        yield item.value
+      }
+      for statement in scope.statements {
+        switch statement {
+          case ast.Scope  yield from auto list(statement)
+          case ast.If     yield from auto list(statement)
+          case ast.Loop   yield from auto list(statement)
+        }
+      }
+      switch scope.owner {
+        case ast.Folder {
+          for item in scope.symbols {
+            const symbol = item.value
+            continue if !symbol.instance
+            switch symbol.instance {
+              case folder: ast.Folder {
+                if folder.scope.bindingStatus.isDone() {
+                  yield symbol
+                  yield from auto list(folder.scope)
+                }
+              }
+              case file: ast.File {
+                if file.scope.bindingStatus.isDone() {
+                  yield symbol
+                  yield from auto list(file.scope)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.root),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        batch.clear()
+        each symbol in self.list {
+          batch.append(symbol)
+          break if batch.length >= MAX_FUNCTIONS_PER_RUN
+        }
+        return batch.length
+      }
+    }
+  }
+
+
+  fn globals(this) {
+    fn list(scope): ast.Symbol* {
+      for item in scope.symbols {
+        const symbol = item.value
+        continue if !symbol.instance
+        switch symbol.instance {
+          case ast.Global
+            yield symbol
+        }
+      }
+      for item in scope.types {
+        const overloaded = item.value
+        if const symbol = overloaded.upperBound {
+          const node = symbol.instance as ast.Function*
+          yield from auto list(node.scope)
+        }
+        else for symbol in overloaded.symbols {
+          const node = symbol.instance as ast.TypeNode*
+          yield from auto list(node.scope)
+        }
+      }
+      for symbol in scope.compilerGenerated {
+        const node = symbol.instance as ast.Function*
+        yield from auto list(node.scope)
+      }
+      for statement in scope.statements {
+        switch statement {
+          case ast.Scope  yield from auto list(statement)
+          case ast.If     yield from auto list(statement)
+          case ast.Loop   yield from auto list(statement)
+        }
+      }
+      switch scope.owner {
+        case ast.Folder {
+          for item in scope.symbols {
+            const symbol = item.value
+            continue if !symbol.instance
+            switch symbol.instance {
+              case folder: ast.Folder {
+                if folder.scope.bindingStatus.isDone() {
+                  yield from auto list(folder.scope)
+                }
+              }
+              case file: ast.File {
+                if file.scope.bindingStatus.isDone() {
+                  yield from auto list(file.scope)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.root),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        batch.clear()
+        each symbol in self.list {
+          batch.append(symbol)
+          break if batch.length >= MAX_FUNCTIONS_PER_RUN
+        }
+        return batch.length
+      }
+    }
+  }
+}

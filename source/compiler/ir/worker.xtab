@@ -1,0 +1,156 @@
+define MAX_PER_BATCH 32
+
+
+struct BatchProvider {
+  const program = ssa.Program*{}
+
+  fn dump(this) {
+    const files = List(ssa.Function*){}
+    for file in this.program.code.files {
+      files.append(file)
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      files   = files,
+      program = this.program,
+      dispose = fn(self) = delete self.files,
+      fill    = synchronized fn(self, batch) {
+        batch.clear()
+        if self.currentFile < self.files.length {
+          const currentFile = self.files.items[self.currentFile++]
+          batch.append(currentFile)
+          for symbol in self.program.data.structs {
+            batch.append(symbol) if symbol.fileId == currentFile.fileId
+          }
+          for symbol in self.program.data.arrays {
+            batch.append(symbol) if symbol.fileId == currentFile.fileId
+          }
+          for symbol in self.program.data.externs {
+            batch.append(symbol) if symbol.fileId == currentFile.fileId
+          }
+          for symbol in self.program.data.globals {
+            batch.append(symbol) if symbol.fileId == currentFile.fileId
+          }
+          for symbol in self.program.code.functions {
+            batch.append(symbol) if symbol.fileId == currentFile.fileId
+          }
+        }
+        return batch.length
+      },
+      currentFile = 0
+    }
+  }
+
+  fn symbolsUsed(this) {
+    fn list(program): ssa.Symbol* {
+      for symbol in program.data.structs {
+        for field in symbol.fields {
+          if const sym = field.type.symbol {
+            yield sym
+          }
+        }
+      }
+      for symbol in program.data.externs {
+        for parameter in symbol.parameters {
+          if const sym = parameter.symbol {
+            yield sym
+          }
+        }
+        if const sym = symbol.fnreturn.symbol {
+          yield sym
+        }
+      }
+      for symbol in program.data.globals {
+        if const sym = symbol.type.symbol {
+          yield sym
+        }
+      }
+      for symbol in program.code.files {
+        each block in symbol.blocks() {
+          each value in block.values() {
+            if const sym = value.type.symbol {
+              yield sym
+            }
+            for operand in value.operands {
+              if const node = operand.isaNode() {
+                if const sym = node.isaSymbol() {
+                  yield sym
+                  switch sym {
+                    case ssa.Field yield sym.parent
+                  }
+                }
+                if const sym = node.type.symbol {
+                  yield sym
+                }
+              }
+            }
+          }
+        }
+      }
+      for symbol in program.code.functions {
+        each block in symbol.blocks() {
+          each value in block.values() {
+            if const sym = value.type.symbol {
+              yield sym
+            }
+            for operand in value.operands {
+              if const node = operand.isaNode() {
+                if const sym = node.isaSymbol() {
+                  yield sym
+                  switch sym {
+                    case ssa.Field yield sym.parent
+                  }
+                }
+                if const sym = node.type.symbol {
+                  yield sym
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.program),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        var i = 0
+        batch.clear()
+        each symbol in self.list {
+          batch.append(symbol)
+          break if i >= MAX_PER_BATCH
+          ++i
+        }
+        return i
+      },
+      currentFile = 0
+    }
+  }
+
+  fn functions(this) {
+    fn list(code) {
+      for file in code.files {
+        yield file
+      }
+      for function in code.functions {
+        yield function
+      }
+    }
+    return {
+      srw     = atomic.ExclusiveLock{},
+      list    = list(this.program.code),
+      dispose = fn(self) = delete self.list,
+      fill    = synchronized fn(self, batch) {
+        var i = 0
+        batch.clear()
+        each function in self.list {
+          batch.append(function)
+          break if i >= MAX_PER_BATCH
+          ++i
+        }
+        return i
+      }
+    }
+  }
+}

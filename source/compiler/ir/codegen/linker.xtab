@@ -1,0 +1,295 @@
+import Binary from binary
+import pe
+
+import mcopy from memory
+
+import    Coff from debug.coff
+import Imports from imports
+
+struct Linker {
+  const     fns = List(gen.Function)&{}
+  const  binary = Binary{}
+  const    coff = Coff{}
+  const imports = Imports{}
+
+
+  fn run(this, ctx) {
+    const prog = ctx.ssa
+    auto image = pe.Image{}
+    var   size = sizeof(pe.Header)
+    image.initialize()
+    size = this.createSections(image, size, prog)
+    size = this.createSymbolTable(image, size, prog)
+    size = this.createImportsTable(image, size, prog, ctx.ids)
+    this.createBinary(image, size)
+    this.fillImage(image)
+    this.patchBinary(image)
+    this.saveBinary(ctx)
+    delete this.coff
+    delete this.imports
+    return this.binary
+  }
+
+
+  fn createSections(this, image, size, prog) {
+    size = this.createTextSection(image, size, prog)
+    size = this.createDataSection(image, size, prog)
+    assert image.code.entry > 0
+    assert size > 0
+    return size
+  }
+
+
+  fn createTextSection(this, image, offset, prog) {
+    const entry = prog.code.entry
+    offset += computePadding(offset, pe.IMAGE_SECTION_ALIGNMENT)
+    image.code.offset = offset
+    for f in this.fns {
+      this.putFunction(image, f)
+      if f.function == entry {
+        image.code.entry = f.function.offset
+      }
+    }
+    offset += image.code.buffer.length
+    return offset
+  }
+
+
+  fn putFunction(this, image, f) {
+    const  function = f.function
+    function.offset = image.code.alignFunction(function)
+    for var   block = function.body.first; block; block = block.qnext {
+      assert block.offset >= 0
+      block.offset = function.offset + block.offset
+      for var val = block.body.first; val; val = val.qnext {
+        assert val.offset >= 0
+        val.offset = function.offset + val.offset
+      }
+    }
+    for patch in f.patches {
+      patch.site.offset = function.offset + patch.site.offset
+      patch.rip         = function.offset + patch.rip
+    }
+    image.code.buffer.append(f.buffer.bytes, f.buffer.length)
+  }
+
+
+  fn createDataSection(this, image, offset, prog) {
+    offset += computePadding(offset, pe.IMAGE_SECTION_ALIGNMENT)
+    image.data.offset = offset
+    for global in prog.data.globals {
+      this.putGlobal(image, global)
+    }
+    offset += image.data.buffer.length
+    return offset
+  }
+
+
+  fn putGlobal(this, image, global) {
+    const    size = global.type.size()
+    global.offset = image.data.align(global.type.alignment())
+    if const initializer = global.hasInitializer() {
+      image.data.buffer.append(&initializer.value.u64 as Byte*, size)
+    } else {
+      const offset = image.data.buffer.length
+      image.data.buffer.append(Byte*{}, size)
+      if const array = global.type.isanArray() {
+        if array.element == ssa.tyChar {
+          if const utf8 = array.string.utf8 {
+            if utf8.length {
+              mcopy(((image.data.buffer.bytes + offset) as Char*), utf8.text, utf8.length)
+            }
+          }
+        } else if array.element == ssa.tyWChar {
+          if const utf16 = array.string.utf16 {
+            if utf16.length {
+              mcopy(((image.data.buffer.bytes + offset) as WChar*), utf16.text, utf16.length)
+            }
+          }
+        }
+      }
+    }
+    image.data.sizeOfGlobals = image.data.buffer.length
+  }
+
+
+  fn createSymbolTable(this, image, offset, prog) {
+    this.coff = Coff{ code = image.code, data = image.data }
+    this.coff.begin()
+    for i, f in this.fns {
+      this.coff.appendFunction(f.function, f.buffer.length, i + 1 < this.fns.length)
+    }
+    for global in prog.data.globals {
+
+    }
+    return this.coff.finish(offset, image.timeDateStamp)
+  }
+
+
+  fn createImportsTable(this, image, offset, prog, ids) {
+    this.imports = Imports{ data = image.data }
+    return this.imports.build(offset, prog, ids)
+  }
+
+
+  fn createBinary(this, image, size) {
+    //size += computePadding(size, pe.IMAGE_SECTION_ALIGNMENT)
+
+    this.binary.bytes = os.VirtualAlloc(Byte*{}, size, os.MEM_COMMIT, os.PAGE_EXECUTE_READWRITE)
+    this.binary.length = size
+    assert this.binary.bytes    
+
+    assert image.code.buffer.length
+    this.binary.code.bytes  = this.binary.bytes + image.code.offset
+    this.binary.code.length = image.code.buffer.length
+
+    this.binary.data.bytes  = this.binary.bytes + image.data.offset
+    this.binary.data.length = image.data.buffer.length
+  }
+
+
+  fn fillImage(this, image) {
+    image.header.dos.e_magic  = pe.IMAGE_DOS_SIGNATURE
+    image.header.dos.e_lfanew = sizeof(pe.IMAGE_DOS_HEADER) + image.header.message.length
+
+    const message = "!This program cannot run in DOS mode."
+    mcopy(image.header.message.text, message.text, message.length)
+
+    image.header.signature = pe.IMAGE_NT_SIGNATURE
+
+    image.header.file.machine              = pe.IMAGE_FILE_MACHINE_AMD64
+    image.header.file.numberOfSections     = pe.IMAGE_NUMBEROF_SECTIONS
+    image.header.file.timeDateStamp        = image.timeDateStamp
+    image.header.file.pointerToSymbolTable = this.coff.offsetOfSymbolsHeader()
+    image.header.file.numberOfSymbols      = this.coff.symbols
+    image.header.file.sizeOfOptionalHeader = sizeof(pe.IMAGE_OPTIONAL_HEADER)
+    image.header.file.characteristics      = pe.IMAGE_FILE_EXECUTABLE_IMAGE | pe.IMAGE_FILE_LARGE_ADDRESS_AWARE
+
+    image.header.optional.magic                 = pe.IMAGE_NT_OPTIONAL_HDR64_MAGIC
+    image.header.optional.majorLinkerVersion    = 0
+    image.header.optional.minorLinkVersion      = 0
+    image.header.optional.sizeOfCode            = image.code.buffer.length
+    image.header.optional.sizeOfInitializedData = image.data.buffer.length
+    image.header.optional.addressOfEntryPoint   = image.code.entry
+    image.header.optional.baseOfCode            = image.code.offset
+    image.header.optional.imageBase             = pe.IMAGE_BASE_ADDRESS
+    image.header.optional.sectionAlignment      = pe.IMAGE_SECTION_ALIGNMENT
+    image.header.optional.fileAlignment         = pe.IMAGE_FILE_ALIGNMNENT
+    image.header.optional.majorOperatingSystemVersion = 0
+    image.header.optional.minorOperatingSystemVersion = 0
+    image.header.optional.majorImageVersion     = 1
+    image.header.optional.majorSubsystemVersion = 4
+    image.header.optional.minorSubsystemVersion = 0
+    image.header.optional.win32VersionValue     = 0
+    image.header.optional.sizeOfImage           = this.binary.length
+    image.header.optional.sizeOfHeaders         = sizeof(pe.Header)
+    image.header.optional.checkSum              = 0
+    image.header.optional.subsystem             = pe.IMAGE_SUBSYSTEM_WINDOWS_CUI
+    image.header.optional.dllCharacteristics    = pe.IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA |
+                                                  pe.IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE    | 
+                                                  pe.IMAGE_DLLCHARACTERISTICS_NX_COMPAT       |
+                                                  pe.IMAGE_DLLCHARACTERISTICS_NO_SEH          |
+                                                  pe.IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE
+    image.header.optional.sizeOfStackReserve = 0x00100000
+    image.header.optional.sizeOfStackCommit  = 0x00001000
+    image.header.optional.sizeOfHeapReserve  = 0x00100000
+    image.header.optional.sizeOfHeapCommit   = 0x00001000
+    image.header.optional.loaderFlags        = 0
+    image.header.optional.numberOfRvaAndSizes = pe.IMAGE_NUMBEROF_DIRECTORY_ENTRIES
+
+    const          debugDirectory = image.header.optional.directories[pe.IMAGE_DIRECTORY_ENTRY_DEBUG]
+    debugDirectory.virtualAddress = this.coff.offsetOfDebugDirectory()
+    debugDirectory.size           = this.coff.sizeOfDebugDirectory()
+
+    const          importDirectory = image.header.optional.directories[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
+    importDirectory.virtualAddress = this.imports.offsetOfImportDirectory()
+    importDirectory.size           = this.imports.sizeOfImportDirectory()
+
+    const         addressDirectory = image.header.optional.directories[pe.IMAGE_DIRECTORY_ENTRY_IAT]
+    addressDirectory.virtualAddress = this.imports.offsetOfAddressTable()
+    addressDirectory.size           = this.imports.sizeOfAddressTable()
+
+    const stext = ".text"
+    mcopy(image.header.code.name.text, stext.text, stext.length)
+    image.header.code.misc.virtualSize = image.code.buffer.length
+    image.header.code.virtualAddress   = image.code.offset
+    image.header.code.sizeOfRawData    = image.code.buffer.length
+    image.header.code.pointerToRawData = image.code.offset
+    image.header.code.characteristics  = pe.IMAGE_SCN_CNT_CODE | pe.IMAGE_SCN_MEM_EXECUTE | 
+                                         pe.IMAGE_SCN_MEM_READ
+
+    const sdata = ".data"
+    mcopy(image.header.data.name.text, sdata.text, sdata.length)
+    image.header.data.misc.virtualSize = image.data.buffer.length
+    image.header.data.virtualAddress   = image.data.offset
+    image.header.data.sizeOfRawData    = image.data.buffer.length
+    image.header.data.pointerToRawData = image.data.offset
+    image.header.data.characteristics  = pe.IMAGE_SCN_CNT_INITIALIZED_DATA | pe.IMAGE_SCN_MEM_READ |
+                                         pe.IMAGE_SCN_MEM_WRITE
+    
+
+    //  Copy headers to binary.
+    mcopy(this.binary.bytes, &image.header, sizeof(pe.Header))
+
+    //  Copy .text section to binary
+    mcopy(this.binary.code.bytes, image.code.buffer.bytes, image.code.buffer.length)
+    this.binary.entry = this.binary.bytes + image.code.entry
+
+    //  Copy .data section to binary
+    if image.data.buffer.length {
+      mcopy(this.binary.data.bytes, image.data.buffer.bytes, image.data.buffer.length)
+    }
+  }
+
+
+  fn patchBinary(this, image) {
+    for f in this.fns {
+      for patch in f.patches {
+        this.updatePatch(patch, image)
+      }
+    }
+  }
+
+
+  fn updatePatch(this, patch, image) {
+    assert patch.node.offset > 0
+    assert patch.site.size == SIZE_OF_INT && patch.site.offset > 0
+    assert image.code.containsOffset(patch.rip)
+
+    if image.code.containsOffset(patch.node.offset) {
+      switch patch.node {
+        case ssa.Function{}
+        case ssa.Block{}
+        default assert with nameof(patch.node)
+      }
+    } else if image.data.containsOffset(patch.node.offset) {
+      if patch.node.offset < image.data.offset + image.data.sizeOfGlobals {
+        assert patch.node is ssa.Global
+      } else if patch.node.offset >= this.imports.offsetOfAddressTable() {
+        assert patch.node.offset < this.imports.offsetOfAddressTable() + this.imports.sizeOfAddressTable()
+        assert patch.node is ssa.Extern
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+
+    var    site = (this.binary.bytes + patch.site.offset) as Int32*
+    const value = *site
+    const  diff = patch.node.offset - patch.rip
+    *site = value + diff
+  }
+
+
+  fn saveBinary(this, ctx) {
+    if this.binary.bytes {
+      auto folderName = String{}
+      folderName.append(ctx.sourceFolderPath).append("\\.bin")
+      if fs.ensureFolderExists(folderName) {
+        this.binary.saveEXE(folderName, "xtac")
+        //this.binary.saveHEX(folderName, "xtac")
+      }
+    }
+  }
+}

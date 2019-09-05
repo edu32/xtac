@@ -1,0 +1,239 @@
+fn fromInts(items, length) {
+  return Vector(Int64){
+    items    = Int64*{ items },
+    length   = length,
+    capacity = length
+  }
+}
+
+
+fn fromDoubles(items, length) {
+  return Vector(Double){
+    items    = Double*{ items },
+    length   = length,
+    capacity = length
+  }
+}
+
+
+struct Vector(T) {
+  readonly items    = T*{}
+  readonly length   = 0
+  readonly capacity = 0
+
+
+  fn dispose(this) {
+    delete this.items
+    this.length = 0
+    this.capacity = 0
+  }
+
+
+  fn format(this, s, fmt = "") {
+    s.append("[")
+    for var i = 0; i < this.length; ++i {
+      s.append(", ") if i
+      this.items[i].format(s)
+    }
+    s.append("]")
+  }
+
+
+  fn clone(this) {
+    import malloc, mcopy from memory
+    var result = Vector(T){}
+    if this.length {
+      result.items = malloc(result.items, sizeof(T) * this.length)
+      mcopy(result.items, this.items, sizeof(T) * this.length)
+      result.length = this.length
+      result.capacity = this.length
+    }
+    return result
+  }
+
+
+  fn isEmpty(this) = this.length == 0
+  fn has(this)     = this.length > 0
+
+
+  fn mean(this) {
+    var sum  = 0.0  // Sum
+    var mean = 0.0  // Arithmetic Mean
+    var sse  = 0.0  // Sum of Squared Errors
+    var svar = 0.0  // Sample Variance
+    var sd   = 0.0  // Sample Standard Deviation
+    var se   = 0.0  // Sample Standard Error of the Mean
+    var lo   = 0.0  // Lower 95% limit
+    var hi   = 0.0  // Upper 95% limit
+    var rse  = 0.0  // Relative Standard Error
+    var rsd  = 0.0  // Relative Standard Deviation
+    var rv   = 0.0  // Relative Variance
+    if this.length {
+      for var i = 0; i < this.length; ++i {
+        sum += this.items[i]
+      }
+      mean = sum / this.length
+      for var i = 0; i < this.length; ++i {
+        const diff = this.items[i] - mean
+        sse += diff * diff
+      }      
+      if this.length > 1 {
+        svar = sse / (this.length - 1)
+        if svar {
+          rv = svar / mean
+          sd = sqrt(svar)
+          se = sd / sqrt(this.length)
+          if mean != 0.0 {
+            const absmean = abs(mean)
+            rse = se / absmean
+            rsd = sd / absmean
+          }
+          lo = mean - (se * 1.96)
+          hi = mean + (se * 1.96)
+        }        
+      }
+    }
+    return {
+      n     = this.length,
+      sum   = sum,
+      mean  = mean,
+      sse   = sse,
+      svar  = svar,
+      sd    = sd,
+      se    = se,
+      rse   = rse,
+      rsd   = rsd,
+      rv    = rv,
+      ci    = { lo = lo, hi = hi }
+    }
+  }
+
+
+  fn quartiles(this) {
+    var q1  = 0.0
+    var q2  = 0.0
+    var q3  = 0.0
+    var max = 0.0
+    var min = 0.0
+    var iqr = 0.0
+    var iqm = 0.0
+    var niqm = 0
+    var nloOutliers = 0
+    var nhiOutliers = 0
+    var vloOutliers = 0.0
+    var vhiOutliers = 0.0
+    var nloExtreme = 0
+    var nhiExtreme = 0
+    var vloExtreme = 0.0
+    var vhiExtreme = 0.0
+
+    this.sort()
+
+    if this.length > 1 {
+      q2 = median(this, 0, this.length)
+      const isOdd = this.length & 1
+      if isOdd { // length = 2n + 1
+        const n = (this.length - 1) / 2
+        q1 = median(this, 0, n)
+        q3 = median(this, n, n)
+      } else { // length = 2n
+        const n = this.length / 2
+        q1 = median(this, 0, n)
+        q3 = median(this, n, n)
+      }
+      min = this.items[0]
+      max = this.items[this.length - 1]
+      iqr = q3 - q1
+      vloOutliers = q1 - 1.5 * iqr
+      vhiOutliers = q3 + 1.5 * iqr
+      vloExtreme  = q1 - 3.0 * iqr
+      vhiExtreme  = q3 + 3.0 * iqr
+      for var i = 0; i < this.length; ++i {
+        const x = this.items[i]
+        if x < vloExtreme {
+          if x < vloOutliers {
+            ++nloExtreme
+          } else {
+            ++nloOutliers
+          }
+        } else if x > vhiOutliers {
+          if x > vhiExtreme {
+            ++nhiExtreme
+          } else {
+            ++nhiOutliers
+          }
+        } else if x >= q1 && x <= q2 {
+          iqm += x
+          ++niqm
+        }
+      }
+      if niqm {
+        iqm /= niqm
+      }
+    } else if this.length == 1 {
+      q1 = Double(this.items[0])
+      q2 = q1
+      q3 = q1
+      min = q1
+      max = q1
+    }
+
+    return {
+      n   = this.length,
+      min = min,
+      q1  = q1,
+      q2  = q2,
+      q3  = q3,
+      max = max,
+      iqr = iqr,
+      iqm = iqm,
+      outliers = { lo = { value = vloOutliers, n = nloOutliers }, 
+                   hi = { value = vhiOutliers, n = nhiOutliers } },
+      extreme  = { lo = { value = vloExtreme,  n = nloExtreme }, 
+                   hi = { value = vhiExtreme,  n = nhiExtreme } }
+    }
+
+    fn median(list, loIndex, length) {
+      const mid = calculateIndexOfMedian(loIndex, length)
+      var   q   = 0.0
+      if mid.lo == mid.hi {
+        return Double(list.items[mid.lo])
+      }
+      return (list.items[mid.lo] + list.items[mid.hi]) / 2.0
+    }
+
+    fn calculateIndexOfMedian(index, n) {
+      var lo = 0
+      var hi = 0    
+      if n == 1 {
+        // Do nothing.
+      } else if n & 1 { // mid = (n + 1) ÷ 2
+        const mid = (n + 1) / 2
+        lo = mid
+        hi = mid
+      } else { // lo = (n ÷ 2) - 1; hi = n ÷ 2
+        hi = n / 2       
+        lo = hi - 1
+      }
+      return { lo = index + lo, hi = index + hi }
+    }
+  }
+
+
+  fn sort(this): void {
+    this.sortWith(fn(a, b) = 0 if a == b else 1 if a > b else -1)
+  }
+
+
+  fn sortWith(this, sorter): void {
+    return if this.length < 2
+    sorter = sorter{ *this.items, *this.items }
+    const comparer = compare{ sorter, this.items, this.items }
+    os.qsort_s(this.items, this.length, sizeof(T), comparer, sorter)
+    fn compare(sorter, ptra, ptrb) {
+      const a = *ptra
+      const b = *ptrb
+      return sorter(a, b)
+    }
+  }
+}

@@ -1,0 +1,2554 @@
+import Queue from std.collections
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+enum Kind {
+  Unknown = 0u8,
+
+  Symbol,   // Program | DataSection | CodeSection | Struct | Array | Function | StackFrame | Block
+
+  /* Nothing ↓ */
+  Void,
+
+  /* Integers ↓ */
+    /* Unsigned Integers ↓ */
+    UInt8, UInt16, UInt32, UInt64,
+
+    /* Signed Integers ↓ */
+    Int8, Int16, Int32, Int64, 
+
+  /* Floating Point ↓ */
+  Float, Double,
+
+  /* Packed (128 bits; 16 B) ↓ */
+    /* Packed Floating Point (128 bits; 16 B)↓ */
+    Floatx4, Doublex2,
+
+    /* Packed Unsigned Integers (128 bits; 16 B) ↓ */
+    UInt8x16, UInt16x8, UInt32x4, UInt64x2,
+
+    /* Packed Signed Integers (128 bits; 16 B) ↓ */
+    Int8x16, Int16x8, Int32x4, Int64x2,
+
+  /* Packed (256 bits; 32 B) ↓ */
+    /* Packed Floating Point (256 bits; 32 B)↓ */
+    Floatx8, Doublex4,
+
+    /* Packed Unsigned Integers (256 bits; 32 B) ↓ */
+    UInt8x32, UInt16x16, UInt32x8, UInt64x4,
+
+    /* Packed Signed Integers (256 bits; 32 B) ↓ */
+    Int8x32, Int16x16, Int32x8, Int64x4,
+
+}
+
+
+struct Type { // 16 B
+  readonly symbol = TypeSymbol*{}
+  readonly   ptrs = 0
+  readonly   kind = Kind{}
+
+  fn isKnown(this)   = this.kind != Kind.Unknown
+  fn isUnknown(this) = this.kind == Kind.Unknown
+
+  fn ==(this, other) = this.symbol == other.symbol && this.ptrs == other.ptrs && this.kind == other.kind
+  fn !=(this, other) = this.symbol != other.symbol || this.ptrs != other.ptrs || this.kind != other.kind
+
+  fn setSymbol(this, symbol): this {
+    assert !this.symbol && !this.ptrs && !this.kind
+    this.symbol = symbol
+    this.kind = Kind.Symbol
+  }
+
+  fn fromSymbol(symbol) {
+    return Type{ symbol = symbol, kind = Kind.Symbol }
+  }
+
+  fn fromPointer(symbol, ptrs = 1) {
+    return Type{ symbol = symbol, ptrs = ptrs, kind = Kind.Symbol }
+  }
+
+  fn address(this) = Type{ symbol = this.symbol, ptrs = this.ptrs + 1, kind = this.kind }
+
+  fn pointee(this) {
+    if this.ptrs {
+      return Type{ symbol = this.symbol, ptrs = this.ptrs - 1, kind = this.kind }
+    }
+    return tyUnknown
+  }
+
+  fn size(this) {
+    return SIZE_OF_POINTER if this.ptrs
+    switch this.kind {
+      case Kind.Void    return 0
+      case Kind.UInt8,  Kind.Int8    return SIZE_OF_BYTE
+      case Kind.UInt16, Kind.Int16   return SIZE_OF_WORD
+      case Kind.UInt32, Kind.Float,  Kind.Int32 return SIZE_OF_INT
+      case Kind.UInt64, Kind.Double, Kind.Int64 return SIZE_OF_POINTER
+      case Kind.Int8x16, Kind.UInt8x16,
+           Kind.Int16x8, Kind.UInt16x8,
+           Kind.Int32x4, Kind.UInt32x4, Kind.Floatx4,
+           Kind.Int64x2, Kind.UInt64x2, Kind.Doublex2
+           return SIZE_OF_XMM
+      case Kind.Int8x32,  Kind.UInt8x32,
+           Kind.Int16x16, Kind.UInt16x16,
+           Kind.Int32x8,  Kind.UInt32x8, Kind.Floatx8,
+           Kind.Int64x4,  Kind.UInt64x4, Kind.Doublex4
+           return SIZE_OF_YMM
+      case Kind.Symbol return this.symbol.size
+      default assert with nameof(this.kind)
+    }
+    return 0
+  }
+
+  fn alignment(this) {
+    return SIZE_OF_POINTER if this.ptrs
+    switch this.kind {
+      case Kind.Void    return 0
+      case Kind.UInt8,  Kind.Int8    return SIZE_OF_BYTE
+      case Kind.UInt16, Kind.Int16   return SIZE_OF_WORD
+      case Kind.UInt32, Kind.Float,  Kind.Int32 return SIZE_OF_INT
+      case Kind.UInt64, Kind.Double, Kind.Int64 return SIZE_OF_POINTER
+      case Kind.Int8x16, Kind.UInt8x16,
+           Kind.Int16x8, Kind.UInt16x8,
+           Kind.Int32x4, Kind.UInt32x4, Kind.Floatx4,
+           Kind.Int64x2, Kind.UInt64x2, Kind.Doublex2
+           return SIZE_OF_XMM
+      case Kind.Int8x32,  Kind.UInt8x32,
+           Kind.Int16x16, Kind.UInt16x16,
+           Kind.Int32x8,  Kind.UInt32x8, Kind.Floatx8,
+           Kind.Int64x4,  Kind.UInt64x4, Kind.Doublex4
+           return SIZE_OF_YMM
+      case Kind.Symbol return this.symbol.alignment
+      default assert with nameof(this.kind)
+    }
+    return 0
+  }
+
+  fn isLoadable(this)    = this.ptrs || this.kind > Kind.Void || 
+                          (this.kind == Kind.Symbol && (this.symbol is Function || this.symbol is Extern))
+  fn isNotLoadable(this) = !this.isLoadable()
+
+  fn isaBuiltin(this) = !this.ptrs && this.kind >= Kind.Void
+  fn isVoid(this)     = !this.ptrs && this.kind == Kind.Void
+  fn isNotVoid(this)  = this.ptrs || this.kind != Kind.Void
+
+  fn isaPointer(this) = this.ptrs
+
+  fn isIntegral(this)    = !this.ptrs && this.kind >= Kind.UInt8 && this.kind <= Kind.Int64
+  fn isNotIntegral(this) = this.ptrs || this.kind < Kind.UInt8 || this.kind > Kind.Int64
+  fn isSigned(this)      = !this.ptrs && this.kind >= Kind.Int8 && this.kind <= Kind.Int64
+  fn isUnsigned(this)    = !this.ptrs && this.kind >= Kind.UInt8 && this.kind <= Kind.UInt64
+  fn isa64BitInteger(this)=!this.ptrs && (this.kind == Kind.UInt64 || this.kind == Kind.Int64)
+  fn isa32BitInteger(this)=!this.ptrs && (this.kind == Kind.UInt32 || this.kind == Kind.Int32)
+
+  fn isaNumber(this)   = !this.ptrs && this.kind >= Kind.UInt8 && this.kind <= Kind.Double
+  fn isNumeric(this)   = !this.ptrs && this.kind >= Kind.UInt8
+
+  fn isaReal(this)   = !this.ptrs && (this.kind == Kind.Float || this.kind == Kind.Double)
+  fn isaFloat(this)  = !this.ptrs && this.kind == Kind.Float
+  fn isaDouble(this) = !this.ptrs && this.kind == Kind.Double
+
+  fn isPacked(this) = !this.ptrs && this.kind >= Kind.Floatx4
+
+  fn isaPointerOrInteger(this)  = this.ptrs || (this.kind >= Kind.UInt8 && this.kind <= Kind.Int64)
+  fn isaPointerOrSigned(this)   = this.ptrs || (this.kind >= Kind.Int8 && this.kind <= Kind.Int64)
+  fn isaPointerOrUnsigned(this) = this.ptrs || (this.kind >= Kind.UInt8 && this.kind <= Kind.UInt64)
+  fn isaPointerOr64BitInteger(this)=this.ptrs || this.kind == Kind.UInt64 || this.kind == Kind.Int64
+
+  fn isaPointerOrArray(this) = this.ptrs || this.isanArray()
+
+  fn isaRealOrPacked(this) = !this.ptrs && this.kind >= Kind.Float
+
+  fn isaSymbol(this) = this.symbol if !this.ptrs && this.kind == Kind.Symbol
+
+  fn isaStruct(this) {
+    if const symbol = this.isaSymbol() {
+      switch symbol {
+        case Struct return symbol
+      }
+    }
+    return null
+  }
+
+  fn isaUnion(this) {
+    if const symbol = this.isaSymbol() {
+      switch symbol {
+        case Struct return symbol if symbol.isaUnion
+      }
+    }
+    return null
+  }
+
+  fn isanArray(this) {
+    if const symbol = this.isaSymbol() {
+      switch symbol {
+        case Array return symbol
+      }
+    }
+    return null
+  }
+
+  fn isaFile(this) {
+    if const symbol = this.isaSymbol() {
+      switch symbol {
+        case Function return symbol if symbol.isaFile
+      }
+    }
+    return null
+  }
+
+  fn isNotAFile(this) = !this.isaFile()
+
+  fn isaFunction(this) {
+    if const symbol = this.isaSymbol() {
+      switch symbol {
+        case Function return symbol if !symbol.isaFile
+      }
+    }
+    return null
+  }
+
+  fn isanExtern(this) {
+    if const symbol = this.isaSymbol() {
+      switch symbol {
+        case Extern return symbol
+      }
+    }
+    return null
+  }
+
+  fn isCallable(this): Node* {
+    if const symbol = this.isaSymbol() {
+      switch symbol {
+        case Function return symbol
+        case Extern   return symbol
+      }
+    }
+    return null
+  }
+
+  fn format(this, stream, _ = ""): void {
+    const fmt = {
+         error = "%<red>",
+      template = "%<yellow>",
+          kind = "%<cyan>",
+          name = "%<magenta>",
+         param = "%<green>",
+   punctuation = "%<darkcyan>",
+        suffix = "%<gray>"
+    }
+    switch this.kind {
+      case Kind.Unknown "<error>".format(stream, fmt.error)
+      case Kind.Symbol  formatSymbol(stream, fmt, this.symbol)
+      default {
+        if this.kind >= Kind.Void && this.kind <= Kind.Int64x4 {
+          nameof(this.kind).format(stream, fmt.name)
+        } else {
+          nameof(this.kind).format(stream, fmt.error)
+        }
+      }
+    }
+    for var i = 0; i < this.ptrs; ++i {
+      "*".format(stream, fmt.suffix)
+    }
+  }
+
+  fn formatSymbol(stream, fmt, symbol): void {
+    assert symbol
+    switch symbol {
+      case Program {
+        "program".format(stream, fmt.kind)
+      }
+      case DataSection {
+        "data".format(stream, fmt.kind)
+      }
+      case CodeSection {
+        "data".format(stream, fmt.kind)
+      }
+      case Struct {
+        "struct ".format(stream, fmt.kind)
+        symbol.name.format(stream, fmt.name)
+      }
+      case Array {
+        if symbol.string.utf8 {
+          "string".format(stream, fmt.kind)
+        } else if symbol.string.utf16 {
+          "wstring".format(stream, fmt.kind)
+        }
+        "[".format(stream, fmt.punctuation)
+        symbol.length.format(stream, fmt.name)
+        " × ".format(stream, fmt.punctuation)
+        symbol.element.format(stream)
+        "]".format(stream, fmt.punctuation)
+      }
+      case Extern {
+        "extern ".format(stream, fmt.kind)
+        symbol.name.format(stream, fmt.name)
+        "(".format(stream, fmt.punctuation)
+        for i, parameter in symbol.parameters {
+          if i {
+            ", ".format(stream, fmt.punctuation)
+          }
+          parameter.format(stream)
+        }
+        ")".format(stream, fmt.punctuation)
+        " → ".format(stream, fmt.kind)
+        symbol.fnreturn.format(stream)
+      }
+      case Function {
+        if symbol.isaFile {
+          "file ".format(stream, fmt.kind)
+        } else {
+          "fn ".format(stream, fmt.kind)
+        }
+        symbol.name.format(stream, fmt.name)
+        "(".format(stream, fmt.punctuation)
+        for i, parameter in symbol.parameters {
+          if i {
+            ", ".format(stream, fmt.punctuation)
+          }
+          if const name = parameter.name {
+            name.format(stream, fmt.param)
+          } else {
+            "anon".format(stream, fmt.error)
+          }
+          ": ".format(stream, fmt.punctuation)
+          parameter.type.format(stream)
+        }
+        ")".format(stream, fmt.punctuation)
+        " → ".format(stream, fmt.kind)
+        symbol.fnreturn.format(stream)
+      }
+      case StackFrame {
+        "frame ".format(stream, fmt.kind)
+        symbol.name.format(stream, fmt.name)
+      }
+      default {
+        nameof(symbol).format(stream, fmt.error)
+      }
+    }
+  }
+}
+
+
+const tyUnknown    = Type{ kind = Kind.Unknown  }
+const tyVoid       = Type{ kind = Kind.Void     }
+const tyBool       = Type{ kind = Kind.UInt8    }
+const tyWChar      = Type{ kind = Kind.UInt16   }
+const tyUInt8      = Type{ kind = Kind.UInt8    }
+const tyUInt16     = Type{ kind = Kind.UInt16   }
+const tyUInt32     = Type{ kind = Kind.UInt32   }
+const tyUInt64     = Type{ kind = Kind.UInt64   }
+const tyChar       = Type{ kind = Kind.Int8     }
+const tyInt8       = Type{ kind = Kind.Int8     }
+const tyInt16      = Type{ kind = Kind.Int16    }
+const tyInt32      = Type{ kind = Kind.Int32    }
+const tyInt64      = Type{ kind = Kind.Int64    }
+const tyFloat      = Type{ kind = Kind.Float    }
+const tyDouble     = Type{ kind = Kind.Double   }
+const tyFloatx4    = Type{ kind = Kind.Floatx4  }
+const tyDoublex2   = Type{ kind = Kind.Doublex2 }
+const tyUInt8x16   = Type{ kind = Kind.UInt8x16 }
+const tyUInt16x8   = Type{ kind = Kind.UInt16x8 }
+const tyUInt32x4   = Type{ kind = Kind.UInt32x4 }
+const tyUInt64x2   = Type{ kind = Kind.UInt64x2 }
+const tyInt8x16    = Type{ kind = Kind.Int8x16  }
+const tyInt16x8    = Type{ kind = Kind.Int16x8  }
+const tyInt32x4    = Type{ kind = Kind.Int32x4  }
+const tyInt64x2    = Type{ kind = Kind.Int64x2  }
+const tyFloatx8    = Type{ kind = Kind.Floatx8  }
+const tyDoublex4   = Type{ kind = Kind.Doublex4 }
+const tyUInt8x32   = Type{ kind = Kind.UInt8x32 }
+const tyUInt16x16  = Type{ kind = Kind.UInt16x16 }
+const tyUInt32x8   = Type{ kind = Kind.UInt32x8 }
+const tyUInt64x4   = Type{ kind = Kind.UInt64x4 }
+const tyInt8x32    = Type{ kind = Kind.Int8x32  }
+const tyInt16x16   = Type{ kind = Kind.Int16x16 }
+const tyInt32x8    = Type{ kind = Kind.Int32x8  }
+const tyInt64x4    = Type{ kind = Kind.Int64x4  }
+
+
+enum NodeKind {
+  None, TypeSymbol, ValueSymbol, Block, Value
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+abstract struct Node {
+  var   name = Identifier*{}
+  var   type = Type{}
+  var offset = -1
+  var  index = -1
+
+  fn dispose(this) {}
+
+  fn nodeKind(this) {
+    switch this {
+      case Program      return NodeKind.TypeSymbol
+      case DataSection  return NodeKind.TypeSymbol
+      case CodeSection  return NodeKind.TypeSymbol
+      case Struct       return NodeKind.TypeSymbol
+      case Extern       return NodeKind.TypeSymbol
+      case Array        return NodeKind.TypeSymbol
+      case Function     return NodeKind.TypeSymbol
+      case StackFrame   return NodeKind.TypeSymbol
+
+      case Field        return NodeKind.ValueSymbol
+      case Global       return NodeKind.ValueSymbol
+
+      case Block        return NodeKind.Block
+    }
+    return NodeKind.Value
+  }
+
+  fn isaSymbol(this)      = this as Symbol*      if this.isaTypeSymbol() || this.isaValueSymbol()
+  fn isaTypeSymbol(this)  = this as TypeSymbol*  if this.nodeKind() == NodeKind.TypeSymbol
+  fn isaValueSymbol(this) = this as ValueSymbol* if this.nodeKind() == NodeKind.ValueSymbol
+  fn isaBlock(this)       = this as Block*       if this.nodeKind() == NodeKind.Block
+  fn isaValue(this)       = this as Value*       if this.nodeKind() == NodeKind.Value
+
+  fn isMemory(this) {
+    switch this {
+      case ElementAt return this
+    }
+    return null
+  }
+
+  fn isNotMemory(this) {
+    switch this {
+      case ElementAt return false
+    }
+    return true
+  }
+
+  fn isWrittenTo(this) {
+    switch this.nodeKind() {
+      case NodeKind.Block {
+        const block = this as Block*
+        const  uses = UseList{ uses = block.uses, node = block }
+        return uses.hasaWrite()
+      }
+      case NodeKind.Value {
+        const value = this as Value*
+        const  uses = UseList{ uses = value.uses, node = value }
+        return uses.hasaWrite()
+      }
+    }
+    return false
+  }
+
+  fn appendUse(this, user, index) {
+    switch this.nodeKind() {
+      case NodeKind.Block {
+        const block = this as Block*
+        const  uses = UseList{ uses = block.uses, node = block }
+        assert uses.append(user, index)
+      }
+      case NodeKind.Value {
+        const value = this as Value*
+        const  uses = UseList{ uses = value.uses, node = value }
+        assert uses.append(user, index)
+      }
+    }
+  }
+
+  fn removeUse(this, user, index) {
+    switch this.nodeKind() {
+      case NodeKind.Block {
+        const block = this as Block*
+        const  uses = UseList{ uses = block.uses, node = block }
+        assert uses.remove(user, index) with "@@this: #{nameof(this)}, user = #{nameof(user)}"
+      }
+      case NodeKind.Value {
+        const value = this as Value*
+        const  uses = UseList{ uses = value.uses, node = value }
+        assert uses.remove(user, index) with "@@this: #{nameof(this)}, user = #{nameof(user)} index = #{index} user.#{user.index} #{value.parent.parent.name}"
+      }
+    }
+  }
+
+  fn findUse(this, user, index) {
+    switch this.nodeKind() {
+      case NodeKind.Block {
+        const block = this as Block*
+        const  uses = UseList{ uses = block.uses, node = block }
+        return uses.find(user, index)
+      }
+      case NodeKind.Value {
+        const value = this as Value*
+        const  uses = UseList{ uses = value.uses, node = value }
+        return uses.find(user, index)
+      }
+    }
+    return null
+  }
+
+  fn useRange(this) {
+    switch this.nodeKind() {
+      case NodeKind.Block {
+        const block = this as Block*
+        const  uses = UseList{ uses = block.uses, node = block }
+        return uses.range()
+      }
+      case NodeKind.Value {
+        const value = this as Value*
+        const  uses = UseList{ uses = value.uses, node = value }
+        return uses.range()
+      }
+    }
+    return UseRange{}
+  }
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Symbol : Node {
+  var uses = 0
+}
+
+
+struct TypeSymbol : Symbol {
+  const      size = 0
+  const alignment = 0
+  const    fileId = 0
+}
+
+
+//  · Type: Program
+struct Program : TypeSymbol {
+  readonly data = DataSection*{}
+  readonly code = CodeSection*{}
+
+  fn initialize(this) {
+    this.type.setSymbol(this)
+    this.data = new DataSection{ parent = this }
+    this.code = new CodeSection{ parent = this }
+    this.data.type.setSymbol(this.data)
+    this.code.type.setSymbol(this.code)
+  }
+
+  fn dispose(this) {
+    delete this.data
+    delete this.code
+    super.dispose()
+  }
+}
+
+
+struct Section : TypeSymbol {
+  const parent = Program*{}
+}
+
+//  · Type: DataSection
+struct DataSection : Section {
+  const structs = List(Struct*){}
+  const  arrays = List(Array*){}
+  const strings = List(Array*){}
+  const externs = List(Extern*){}
+  const globals = List(Global*){}
+  var   mswsock = Global*{}
+
+  fn dispose(this) {
+    delete this.structs with fn(x) = delete x
+    delete this.arrays  with fn(x) = delete x
+    delete this.strings with fn(x) = delete x
+    delete this.globals with fn(x) = delete x
+    delete this.externs with fn(x) = delete x
+    super.dispose()
+  }
+}
+
+
+//  · Type: CodeSection
+struct CodeSection : Section {
+  const functions = List(Function*){}
+  const     files = List(Function*){}
+  var       entry = Function*{}
+  var     statics = Function*{}
+  var        main = Function*{}
+
+  fn dispose(this) {
+    delete this.functions with fn(x) = delete x
+    delete this.files     with fn(x) = delete x
+    super.dispose()
+  }
+}
+
+
+//  · Type: Struct
+struct Struct : TypeSymbol {
+  var      fields = List(Field*){}
+  const  isaUnion = false
+
+  fn dispose(this) {
+    delete this.fields with fn(x) = delete x
+    super.dispose()
+  }
+
+
+  fn appendField(this, name, type, offset) {
+    const st = new Field{ parent = this, name = name, type = type, offset = offset }
+    this.fields.append(st)
+    return st
+  }
+}
+
+
+//  · Type: Extern
+struct Extern : TypeSymbol {
+  var          pos = Pos{}
+  var     fnreturn = Type{}
+  const parameters = List(Type){}
+  const      cfunc = null
+  const   cdllName = Identifier*{} 
+
+  fn dispose(this) {
+    delete this.parameters
+    super.dispose()
+  }
+}
+
+
+//  · Type: [length × T]
+struct Array : TypeSymbol {
+  const element = Type{}
+  const  string = union { var utf8 = Identifier*{} var utf16 = Utf16*{} }
+  var    length = 0
+}
+
+
+//  · Type: Function
+struct Function : TypeSymbol { 
+  const        pos = Pos{}
+  const      frame = StackFrame*{}
+  const       body = Queue(Block){}
+  const parameters = List(Parameter*){}
+  var     fnreturn = Type{}
+  const    isaFile = false
+
+  fn dispose(this) {
+    delete this.frame
+    delete this.body with fn(x) = delete x
+    delete this.parameters
+    super.dispose()
+  }
+
+  fn blocks(this) {
+    return {
+      curr = this.body.first,
+      next = fn(self) {
+        return (self.curr, /* done = */ true) if !self.curr
+        const curr = self.curr
+         self.curr = self.curr.qnext
+        return (curr, /* done = */ false)
+      }
+    }
+  }
+
+  fn flatten(this) {
+    const block = this.body.first
+    return this.flattenFrom(block.body.first if block)
+  }
+
+  fn flattenFrom(this, start) {
+    var value = start as Value*
+    var block = Block*{}
+    if value {
+      block = value.parent as Block*
+    } else if block = this.body.first {
+      value = block.body.first
+    }
+    return {
+      block = block,
+      value = value,
+      next = fn(self) {
+        return (self.value, /* done = */ true) if !self.value
+        const value = self.value
+        if self.value = value.qnext {
+          // Do nothing.
+        } else if self.block = self.block.qnext {
+          self.value = self.block.body.first
+        }
+        return (value, /* done = */ false)
+      }
+    }
+  }
+}
+
+
+//  · Type: StackFrame
+struct StackFrame : TypeSymbol {
+  struct Cell { var offset = 0, size = 0, alignment = 0, name = 0 }
+  const parameters = List(Cell){}
+  const     nvgprs = List(Cell){}
+  const     nvymms = List(Cell){}
+  const     locals = List(Cell){}
+  const  arguments = List(Cell){}
+  var         size = 0
+
+  fn dispose(this) {
+    delete this.parameters
+    delete this.nvgprs
+    delete this.nvymms
+    delete this.locals
+    delete this.arguments
+    super.dispose()
+  }
+}
+
+
+//  · Type: T
+struct ValueSymbol : Symbol {
+}
+
+
+//  · Type: T
+struct Field : ValueSymbol {
+  const parent = Struct*{}
+}
+
+
+//  · Type: T
+struct Global : ValueSymbol {
+  const       pos = Pos{}
+  var initializer = Constant{}
+  const    fileId = 0
+
+  fn hasInitializer(this) = &this.initializer if this.initializer.type.isKnown()
+}
+
+
+//  · Type: Void*
+struct Block : Symbol {
+  var    qnext = Block*{}, qprev = Block*{}
+  var      pos = Pos{}
+  const parent = Function*{}
+  const   body = Queue(Value){}
+  const   uses = List(Use){}
+
+  fn dispose(this) {
+    delete this.body with fn(x) = ndispose(x)
+    delete this.uses
+    super.dispose()
+  }
+
+  fn term(this): Value* {
+    if const last = this.body.last {
+      switch last {
+        case Yield  return last
+        case Jump   return last
+        case JumpIf return last
+        case Return return last
+      }
+    }
+    return null
+  }
+
+  fn isEmpty(this)         = this.body.isEmpty()
+  fn isNotEmpty(this)      = this.body.isEmpty()
+  fn hasPredecessors(this) = this.uses.length
+  fn doesNotHavePredecessors(this) = this.uses.length == 0
+
+  fn isFirst(this) = this.qprev == null
+  fn isLast(this)  = this.qnext == null
+
+  fn isaLoopHeader(this) {
+    for use in this.uses {
+      const predecessor = use.user.parent
+      return true if predecessor.index >= this.index
+    }
+    return false
+  }
+
+  fn takePredecessorsOf(this, other) {
+    const uses = UseList{ uses = this.uses, node = this }
+    uses.replace(UseList{ uses = other.uses, node = other })
+  }
+
+  fn removePredecessor(this, predecessor) {
+    if const term = predecessor.term() {
+      switch term {
+        case Jump {
+          const target = term.target()
+          if target == this {
+            const uses = UseList{ uses = this.uses, node = this }
+            assert uses.remove(term, op1)
+          }
+        }
+        case JumpIf {
+          if term.iftrue() == this {
+            const uses = UseList{ uses = this.uses, node = this }
+            assert uses.remove(term, op1)
+          } else if term.ifalse() == this {
+            const uses = UseList{ uses = this.uses, node = this }
+            assert uses.remove(term, op3)
+          }
+        }
+        default assert with nameof(term)
+      }
+    }
+  }
+
+  fn predecessors(this) {
+    return {
+      uses = this.uses,
+      next = fn(self) {
+        if self.index < self.uses.length {
+          const use = self.uses[self.index++]
+          return (use.user.parent as Block*, /* done = */ false)
+        }
+        return (null, /* done = */ true)
+      },
+      index = 0
+    }
+  }
+
+  fn indexOfPredecessor(this, predecessor) {
+    for i, use in this.uses {
+      return i if use.user.parent == predecessor
+    }
+    return -1
+  }
+
+  fn successors(this) {
+    return {
+      term = this.body.last,
+      next = fn(self) {
+        if const term = self.term {
+          switch term {
+            case Jump {
+              return (term.operands.target(), /* done = */ false) if self.index++ == 0
+            }
+            case JumpIf {
+              return (term.operands.iftrue(), /* done = */ false) if self.index++ == 0
+              return (term.operands.ifalse(), /* done = */ false) if self.index++ == 1
+            }
+          }
+        }
+        self.term = null
+        return (Block*{}, /* done = */ true)
+      },
+      index = 0
+    }
+  }
+
+  fn countSuccessors(this) {
+    switch this.body.last {
+      case Jump   return 1
+      case JumpIf return 2
+    }
+    return 0
+  }
+
+  fn hasSuccessors(this) = this.countSuccessors() > 0
+
+  fn branches(this) {
+    if const term = this.body.last {
+      switch term {
+        case Jump   return { iftrue = term.target(), ifalse = Block*{}  }
+        case JumpIf return { iftrue = term.iftrue(), ifalse = term.ifalse() }
+      }
+    }
+    return { iftrue = Block*{}, ifalse = Block*{} }
+  }
+
+  fn values(this) {
+    return {
+      curr = this.body.first,
+      next = fn(self) {
+        return (self.curr, /* done = */ true) if !self.curr
+        const curr = self.curr
+         self.curr = self.curr.qnext
+        return (curr, /* done = */ false)
+      }
+    }
+  }
+
+  // Call after 1 predecessor is removed so that for each {Phi} in {this} {Block} the number of operands
+  // is 1 more than the number of {this} {Block}'s predecessors.
+  fn removePhiOperandsAt(this, index) {
+    for var value = this.body.first; value; value = value.qnext {
+      switch value {
+        case Phi value.removeOperandsAt(index)
+        default  break
+      }
+    }
+  }
+
+  // Call after 1 predecessor is removed and the same or another 1 is added so that the number of operands
+  // of each {Phi} in {this} {Block} remains the same as the number of predecessors of {this} {Block}.
+  fn changePhiOperandsIndex(this, oldIndex, newIndex) {
+    for var value = this.body.first; value; value = value.qnext {
+      switch value {
+        case Phi value.changeOperandsIndex(oldIndex, newIndex)
+        default  break
+      }
+    }
+  }
+
+  fn savePhiOperandsAt(this, index) {
+    struct SavedPhiOperand {
+      const   phi = Phi*{}
+      const value = union { var node = Node*{}, immediate = 0u64 }
+      var      op = Op{}
+    }
+    assert index >= 0 && index < this.uses.length
+    const savedOperands = List(SavedPhiOperand){}
+    for var value = this.body.first; value; value = value.qnext {
+      switch value {
+        case Phi {
+          assert value.operands.length == this.uses.length
+          const operand = value.operands.items[index]
+          const   state = savedOperands.append(SavedPhiOperand{ phi = value })
+          if const node = operand.isaNode() {
+            state.op = Op.Node
+            state.value.node = node
+          } else {
+            state.op = Op.Immediate
+            state.value.immediate = operand.value.immediate.value.u64
+          }
+        }
+        default {
+          break
+        }
+      }
+    }
+    return savedOperands
+  }
+
+  fn addPhiOperands(this, savedOperands) {
+    for savedOperand in savedOperands {
+      assert savedOperand.phi.parent == this
+      savedOperand.phi.addPhiOperands(savedOperand)
+    }
+  }
+
+  fn phiRange(this) {
+    var first = Phi*{}
+    var  last = Phi*{}
+    for var value = this.body.first; value; value = value.qnext {
+      switch value {
+        case Value {} // Some blocks have nops inserted before Phis. smh!
+        case Phi {
+          if first {
+            last = value
+          } else {
+            first = value
+            last = value
+          }
+        }
+        default break
+      }
+    }
+    return { first = first, last = last }
+  }
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Use {
+  const  user = Value*{}
+  const index = 0
+
+  fn operand(this) {
+    assert this.index >= 0 && this.index < this.user.operands.length
+    return this.user.operands.items[this.index]
+  }
+}
+
+
+struct UseRange {
+  const first = Value*{}
+  const  last = Value*{}
+}
+
+
+struct UseList {
+  const uses = List(Use)&{}
+  const node = Node*{}
+
+
+  fn range(this) {
+    var first = Value*{}
+    var  last = Value*{}
+    for use in this.uses {
+      const user = use.user
+      if first {
+        if user.index < first.index {
+          first = user
+        } else if user.index > last.index {
+          last = user
+        }
+      } else {
+        first = user
+         last = user
+      }
+    }
+    return UseRange{ first = first, last = last }
+  }
+
+
+  fn find(this, user, index) {
+    for use in this.uses {
+      return &use if use.user == user && use.index == index
+    }
+    return null
+  }
+
+
+  fn indexOf(this, user, index) {
+    for i, use in this.uses {
+      return i if use.user == user && use.index == index
+    }
+    return -1
+  }
+
+
+  fn append(this, user, index) {
+    for use in this.uses {
+      return false if use.user == user && use.index == index
+    }
+    this.uses.append(Use{ user = user, index = index })
+    return true
+  }
+
+
+  fn remove(this, user, index) {
+    for i, use in this.uses {
+      if use.user == user && use.index == index {
+        assert use.user.operands.items[index].value.node == this.node
+        this.uses.removeAt(i)
+        return true
+      }
+    }
+    return false
+  }
+
+
+  fn replace(this, replacer) {
+    return false if this.node == replacer.node
+    for this.uses.length {
+      const     use = this.uses.last()
+      const operand = use.operand()
+      operand.setNode(replacer.node, operand.io)
+      assert replacer.append(use.user, use.index)
+      this.uses.removeLast()
+    }
+    return true
+  }
+
+  fn propagate(this, immediate) {
+    for this.uses.length {
+      const     use = this.uses.last()
+      const operand = use.operand()
+      assert operand.value.node == this.node && operand.isaRead()
+      operand.setImmediate(immediate, this.node.type)
+      this.uses.removeLast()
+    }
+  }
+
+  fn hasaWrite(this) {
+    for use in this.uses {
+      const operand = use.user.operands.items[use.index]
+      return true if operand.isaWrite()
+    }
+    return false
+  }
+}
+
+
+define nops 0
+define 1ops 1
+define 2ops 2
+
+
+define op1 0
+define op2 1
+define op3 2
+
+
+enum MoveReason {
+  None,
+  Transfer,     // Assignment/Exchange due to transferring from register to register.
+  Phi,          // Assignment due to phi operands.
+  Legalizing,   // Load due to legalizing an operation. 
+  Spill,        // Store due to moving a value from a spill local to a register.
+
+  fn isaPhiAssignment(this) = this == Phi,
+  fn isaTransfer(this)      = this == MoveReason.Transfer
+}
+
+
+struct Value : Node { 
+  var         qnext = Value*{}, qprev = Value*{}
+  var           pos = Pos{}
+  var        parent = Block*{}
+  const        uses = List(Use){}
+  readonly operands = OperandList{}
+  var           reg = Register{}
+
+
+  fn dispose(this) {
+    delete this.uses
+    delete this.operands
+  }
+
+
+  fn initialize(this, operands) {
+    this.operands = OperandList{ owner = this }
+    if operands {
+      this.operands.reserve(operands)
+    }
+    return this.operands
+  }
+
+
+  fn isUnused(this) = this.uses.length == 0
+
+
+  fn replace(this, replacer) {
+    this.operands.clear()
+    const  uses = UseList{ uses = this.uses, node = this }
+    const other = UseList{ uses = replacer.uses, node = replacer }
+    return uses.replace(other)
+  }
+
+
+  fn propagate(this, immediate) {
+    this.operands.clear()
+    const uses = UseList{ uses = this.uses, node = this }
+    return uses.propagate(immediate)
+  }
+
+
+  fn isaRegister(this): Value* {
+    return null if this.type.isVoid()
+
+    switch this {
+      case ElementAt  return null
+      case Store      return null
+      case Assign     return null
+      case Fill       return null
+      case Exchange   return null
+      case XAdd       return null
+
+      case Local      return null
+      case Parameter  return this if this.parameterIndex < 4
+
+      case Argument   return this if this.argumentIndex < 4
+      default         return this
+    }
+    return null
+  }
+
+
+  fn syncCheck(this, top = false) {
+    for i, operand in this.operands {
+      const node = operand.isaNode()
+      continue if !node
+      switch node.nodeKind() {
+        case NodeKind.Block {
+          const    block = node as Block*
+          const     uses = UseList{ uses = block.uses, node = block }
+          const useIndex = uses.indexOf(this, i)
+          assert useIndex >= 0
+          const use = block.uses.items[useIndex]
+          assert use.index == i
+        }
+        case NodeKind.Value {
+          const    value = node as Value*
+          const     uses = UseList{ uses = value.uses, node = value }
+          const useIndex = uses.indexOf(this, i)
+          if useIndex < 0 {
+            println("top = #{top} i = #{i}, useIndex = #{useIndex} this.#{this.index} = #{nameof(this)} \
+              node.#{node.index} = #{nameof(value)}")
+            for j, use in value.uses {
+              println("node.use[#{j}].index = #{use.index} user.#{use.user.index}")
+            }
+            assert 0
+          }
+          const use = value.uses.items[useIndex]
+          assert use.index == i
+          for j, joperand in this.operands {
+            continue if i == j
+            const jnode = joperand.isaNode()
+            continue if !jnode
+            switch jnode.nodeKind() {
+              case NodeKind.Block {
+                const    jblock = jnode as Block*
+                const     juses = UseList{ uses = jblock.uses, node = jblock }
+                const juseIndex = juses.indexOf(this, j)
+                if juseIndex >= 0 {
+                  const juse = jblock.uses.items[juseIndex]
+                  assert juse.index == j && juse.index != use.index
+                }
+              }
+              case NodeKind.Value {
+                const    jvalue = jnode as Value*
+                const     juses = UseList{ uses = jvalue.uses, node = jvalue }
+                const juseIndex = juses.indexOf(this, j)
+                if juseIndex >= 0 {
+                  const juse = jvalue.uses.items[juseIndex]
+                  assert juse.index == j && juse.index != use.index
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+
+enum Scale {
+  1Byte = 0u8,
+  2Bytes,
+  4Bytes,
+  8Bytes,
+  Unknown
+}
+
+
+// A memory location.
+//    · [base + (index × sizeof( T )) + displacement]
+//    · +———————————————+—————————————+———————————————+
+//      | Base          | Index       | Register      | e.g.
+//      +———————————————+—————————————+———————————————+
+//      | Program       |             | rip-relative  | [ rip + offsetof( program ) ]
+//      +———————————————+—————————————+———————————————+
+//      | DataSection   | Global      | rip-relative  | [ rip + offsetof( global ) ]
+//      |               +—————————————+———————————————+
+//      |               | Extern      |      "        | [ rip + offsetof( extern ) ]
+//      +–––––––––––––––+—————————————+———————————————+
+//      | CodeSection  | Function    | rip-relative  | [ rip + offsetof( function ) ]
+//      |               +—————————————+———————————————+
+//      |               | Block       |      "        | [ rip + offsetof( block ) ]
+//    · +———————————————+—————————————+———————————————+
+//      | StackFrame   | Parameter   | rsp-relative  | [ rsp + offsetof( parameter ) ]
+//      |               +—————————————+———————————————+
+//      |               | Local       |      "        | [ rsp + offsetof( local ) ]
+//      |               +—————————————+———————————————+
+//      |               | Argument    |      "        |
+//    · +———————————————+—————————————+———————————————+
+//      | reg:T[]       | Immediate   |  address      | array[index]
+//    · +———————————————+—————————————+———————————————+
+//      | reg:T*        | Immediate   |  address      | s[constant]
+//      |               +—————————————+———————————————+
+//      |               | Register    |  address      | s[0][register]
+//      |               +—————————————+———————————————+
+//      |               | Field       |  address      | s[0][field]
+//      +–––––––––––––––+—————————————+———————————————+
+struct ElementAt : Value {
+
+  fn base(this)       = this.operands.items[op1]
+  fn firstIndex(this) = this.operands.items[op2] 
+
+  fn baseNode(this) = this.operands.items[op1].isaNode()
+  fn baseIsCodeSection(this) = this.baseNode() is CodeSection
+
+  fn indexIsAFunction(this) {
+    if this.operands.length == 2 {
+      if const index = this.operands.items[op2].isaNode() {
+        return (index is Function) if this.operands.items[op1].isaNode() is CodeSection
+      }
+    }
+    return null
+  }
+
+  fn indexIsABlock(this) {
+    if this.operands.length == 2 {
+      if const index = this.operands.items[op2].isaNode() {
+        return (index is Block) if this.operands.items[op1].isaNode() is CodeSection
+      }
+    }
+    return null
+  }
+
+  fn indexIsAFunctionOrBlock(this) {
+    if this.operands.length == 2 {
+      if const index = this.operands.items[op2].isaNode() {
+        if this.operands.items[op1].isaNode() is CodeSection {
+          return index if index is Function || index is Block
+        }
+      }
+    }
+    return null
+  }
+
+  fn indexIsAnExtern(this) {
+    if this.operands.length == 2 {
+      if const index = this.operands.items[op2].isaNode() {
+        return (index is Extern) if this.operands.items[op1].isaNode() is DataSection
+      }
+    }
+  }
+}
+
+
+//  [dst] ⟵ src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Store : Value {
+  const reason = MoveReason{}
+}
+
+
+//  dst ⟵ src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Assign : Value {
+  const reason = MoveReason{}
+}
+
+
+//  dst ⟵ src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Fill : Value {
+}
+
+
+//  dst ⟵⟶ src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Exchange : Value {
+  const reason = MoveReason{}
+}
+
+
+struct XAdd : Value {
+
+}
+
+
+struct RetVal : Value {
+}
+
+
+// Defines a local to a function.
+//    · All {Local}s MUST be used with the {ElementAt} value to simplify the {isMemory} check.
+struct Local : Value {
+  const localIndex = 0 // Index of {Local} in parent {Function}'s list of locals.
+  const   isaSpill = false
+}
+
+
+// Defines a register parameter to a function.
+struct Parameter : Value {
+  const parameterIndex = 0     // Index of {Parameter} in parent {Function}'s list of locals.
+  const addressIsTaken = false // If true then {Parameter} is a register parameter on copied to the stack.
+
+  fn isaRegisterParameter(this) = this.parameterIndex < 4 && !this.addressIsTaken
+  fn isaStackParameter(this)    = this.parameterIndex > 3 || this.addressIsTaken
+}
+
+//  · int3
+struct Assert : Value {
+}
+
+//  · pause
+struct Pause : Value {
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+//  · Comparison operations
+//  · No value created
+
+//  Function 🡓
+//    ƒ( lhs, rhs ) ⟶ flags
+//
+//  Assembly 🡓
+//    cmp value, rhs
+//
+//  Semantics 🡓
+//    tmp ⟵ lhs - rhs
+//     ZF ⟵ tmp == 0
+struct Compare : Value {
+  const op = Condition{}
+
+  fn isaConditionForJumpIf(this) = this.uses.length == 1 && this.uses.items[0].user is JumpIf
+}
+
+
+//  Function:
+//    ƒ( value, comparand, exchange ) ⟶ flags
+//    ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+//  Assembly:
+//    mov rax, comparand
+//    lock cmpxchg value, exchange
+//  Semantics:
+//    rax ⟵ comparand
+//    if value == rax {
+//      value ⟵ exchange
+//         ZF ⟵ 1
+//    } else {
+//      comparand ⟵ value
+//             ZF ⟵ 0
+//    }
+struct CompareExchange : Value {
+  const op = Condition{}
+
+  fn isaConditionForJumpIf(this) = this.uses.length == 1 && this.uses.items[0].user is JumpIf
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+// Branch operations.
+
+//  · jmp {epilogue}
+struct Yield : Value {
+}
+
+
+//  goto {target}
+struct Jump : Value {
+  fn target(this) = this.operands.items[op1].value.node as Block*
+
+  fn setTarget(this, block) = this.operands.set(op1, block)
+}
+
+
+//  · goto {iftrue} if {condition} else goto {ifalse}
+struct JumpIf : Value {
+  fn condition(this) = this.operands.items[op2]
+  fn iftrue(this)    = this.operands.items[op1].value.node as Block*
+  fn ifalse(this)    = this.operands.items[op3].value.node as Block*
+
+  fn setIftrue(this, block) = this.operands.set(op1, block)
+  fn setIfalse(this, block) = this.operands.set(op2, block)
+}
+
+
+//  ret {value}
+struct Return : Value {
+
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+// Unary operations:
+//    ƒ( op1:src ) ⟶ dst
+
+//  dst ⟵ mem
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Load : Value {
+  const reason = MoveReason{}
+}
+
+// Loads src to a fixed register for use in a call.
+//  dst ⟵ src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Argument : Load {
+  var argumentIndex = 0
+
+  fn isaRegisterArgument(this) = this.argumentIndex < 4
+  fn isaStackArgument(this)    = this.argumentIndex > 3
+}
+
+
+// Load Effective Address.
+//  dst ⟵ &mem
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Address : Value {
+  
+}
+
+
+//  dst ⟵ --src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Decrement : Value {
+
+}
+
+
+//  dst ⟵ --src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Increment : Value {
+
+}
+
+
+//  dst ⟵ -src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Negate : Value {
+
+}
+
+//  dst ⟵ ~src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct BitwiseNot : Value {
+
+}
+
+
+//  dst ⟵ signext src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct SignExtend : Value {
+
+}
+
+//  dst ⟵ zeroext src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct ZeroExtend : Value {
+
+}
+
+
+// 'casts' an integer from a larger type to a smaller one.
+//  dst ⟵ narrow op1:src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct NarrowingCast : Value {
+
+}
+
+
+// Numeric cast.
+//    · U/Int32/64 to Float/Double,
+//    · Float/Double to U/Int32/64,
+//    · Float to Double or
+//    · Double to Float
+//  dst ⟵ cvt op1:src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct NumericCast : Value {
+
+}
+
+
+// Reinterprets bits.
+//    · T* to U*,
+//    · Pointer to U/Int64,
+//    · U/Int64 to pointer,
+//    · U/Int32/64 to Float/Double or
+//    · Float/Double to U/Int32/64.
+//    · T to U where neither T nor U is a pointer or numeric
+//  dst ⟵ bitcast src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct BitCast : Value {
+
+}
+
+
+// Specifies how rounding is done.
+enum RoundingMode {
+  ToNearestEven,
+  Down,
+  Up,
+  TowardZero
+}
+
+
+//  dst ⟵ round src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Round : Value {
+  var mode = RoundingMode{}
+}
+
+
+//  dst ⟵ sqrt src
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct SquareRoot : Value {
+}
+
+
+//  dst ⟵ abs lhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Abs : Value {
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+
+//  dst ⟵ lhs OP rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Arithmetic : Value {
+  fn lhs(this) = this.operands.items[op1]
+  fn rhs(this) = this.operands.items[op2]
+}
+
+
+//  dst ⟵ lhs | rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Or : Arithmetic {
+}
+
+
+//  dst ⟵ lhs ^ rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct XOr : Arithmetic {
+}
+
+
+//  dst ⟵ lhs & rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct And : Arithmetic {
+}
+
+
+//  dst ⟵ lhs << rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct LeftShift : Arithmetic {
+}
+
+
+//  dst ⟵ lhs >> rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct RightShift : Arithmetic {
+}
+
+
+//  dst ⟵ lhs >>> rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct UnsignedRightShift : Arithmetic {
+}
+
+
+//  dst ⟵ lhs - rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Subtract : Arithmetic {
+}
+
+
+//  dst ⟵ lhs + rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Add : Arithmetic {
+}
+
+
+//  dst:rdx, rax ⟵ op1:lhs % rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Remainder : Arithmetic {
+}
+
+
+//  rdx:remainder, rax:dividend ⟵ lhs % rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct DivRem : Remainder {
+  readonly dividend = Operand{}
+}
+
+
+//  rdx, dst:rax ⟵ lhs ÷ rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Divide : Arithmetic {
+}
+
+
+//  rdx, dst:rax ⟵ lhs × rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Multiply : Arithmetic {
+}
+
+
+//  dst ⟵ min lhs, rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Min : Arithmetic {
+}
+
+
+//  dst ⟵ max lhs, rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct Max : Arithmetic {
+}
+
+
+//  dst ⟵ rol lhs, rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct RotateLeft : Arithmetic {
+}
+
+
+//  dst ⟵ ror lhs, rhs
+//  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+struct RotateRight : Arithmetic {
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+// dst ⟵ call callee with arg1 ... argn, dstrax
+struct Call : Value {
+
+  fn arguments(this) {
+    return {
+      operands = this.operands,
+      pos = 1,
+      end = this.operands.length if this.type.isVoid() || this.type.isLoadable() else this.operands.length - 1,
+      next = fn(self) {
+        if self.pos < self.end {
+          return (self.pos - 1, &self.operands.items[self.pos++], /* done = */ false)
+        }
+        return (self.pos, null, /* done = */ true)
+      }
+    }
+  }
+
+  fn dstrax(this) {
+    if this.type.isNotVoid() && this.type.isNotLoadable() {
+      assert this.operands.length > 1
+      return &this.operands.items[this.operands.length - 1]
+    }
+    return null
+  }
+}
+
+
+struct Phi : Value {
+  fn removeOperandsAt(this, index) {
+    assert this.operands.length == this.parent.uses.length + 1 with "#{this.operands.length}; #{this.parent.uses.length}"
+    assert index >= 0 && index < this.operands.length
+    this.syncCheck()
+    // First, for each operand at or after {index}, remove the use at {this}.
+    for i, operand in this.operands {
+      continue if i < index
+      const node = operand.isaNode() as Value*
+      continue if !node      
+      const uses = UseList{ uses = node.uses, node = node }
+      assert uses.remove(this, i)
+    }
+    //  Then remove the operand at the {index}.
+    this.operands.removeAt(index, updateUses = false)
+    // Now update each operand at or after {index} with their new index.
+    for i, operand in this.operands {
+      continue if i < index
+      const node = operand.isaNode() as Value*
+      continue if !node      
+      const uses = UseList{ uses = node.uses, node = node }
+      assert uses.append(this, i)
+    }
+    this.syncCheck()
+  }
+
+  // Called after a predecessor is removed then
+  fn changeOperandsIndex(this, previousIndex, newIndex) {
+    assert this.operands.length == this.parent.uses.length   // #predecessors did not change.
+    assert previousIndex < this.operands.length // Sanity check
+    assert newIndex < this.operands.length      // Sanity check
+    this.syncCheck()
+    if previousIndex > newIndex {
+      assert 0
+    } else if previousIndex < newIndex {      
+      // First, for each operand after {previousIndex}, remove the use at {this}.
+      for i, operand in this.operands {
+        continue if i < previousIndex
+        if const node = operand.isaNode() as Value* {
+          const  uses = UseList{ uses = node.uses, node = node }
+          assert uses.remove(this, i)
+        }
+      }
+      // Now swap {this} {Phi}'s' operands. Don't {updateUses} because we are doing it manually.
+      this.operands.swap(previousIndex, newIndex, updateUses = false)     
+      // Then for each operand after {previousIndex}, remove the use at {this}.
+      for i, operand in this.operands {
+        continue if i < previousIndex
+        if const node = operand.isaNode() as Value* {
+          const  uses = UseList{ uses = node.uses, node = node }
+          assert uses.append(this, i)
+        }
+      }
+
+    } // Else no change in index of predecessor.
+    this.syncCheck()
+  }
+
+  fn addPhiOperands(this, state) {
+    this.syncCheck(top = true)
+    assert this.operands.length == this.parent.uses.length - 1
+    const index = this.operands.length
+    this.operands.extend()
+    if state.op == Op.Node {
+      const node = state.value.node as Value*
+      this.operands.set(index, state.value.node)
+    } else {
+      const constant = Constant{ type = this.type, value = Immediate{ u64 = state.value.immediate } }
+      this.operands.imm(index, constant)
+    }
+    this.syncCheck()
+  }
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+enum Io {
+  None = 0u8,
+  Read,       // {Operand} is read from.
+  Write       // {Operand} is written to.
+}
+
+enum Op {
+  None = 0u8,
+  Node,
+  Immediate,
+
+  fn isaNode(this)       = this == Node,
+  fn isanImmediate(this) = this == Immediate
+}
+
+
+struct Constant {
+  const value = Immediate{}
+  const  type = Type{}
+
+  fn ==(this, other) = this.value.u64 == other.value.u64 && this.type == other.type
+  fn !=(this, other) = this.value.u64 != other.value.u64 || this.type != other.type
+
+  fn isanUnsignedByte(this) = this.value.hilo32.hi == 0i32 &&
+                              this.value.hilo16.hi == 0i16 &&
+                               this.value.hilo8.hi == 0i8 &&
+                              (this.value.hilo8.lo & (1i8 << 7i8)) == 0
+
+  fn isNotAnUnsignedByte(this) = !this.isanUnsignedByte()
+
+  fn isHuge(this) = (this.value.hilo32.hi == 0  && (this.value.hilo32.lo & (1 << 31)) != 0) ||
+                    (this.value.hilo32.hi == -1 && (this.value.hilo32.lo & (1 << 31)) == 0)
+}
+
+
+struct Operand {
+  const value = union {
+    var      node = Node*{}
+    var immediate = Constant{}
+  }
+  readonly reg = Register{}
+  readonly  io = Io{}
+  readonly  op = Op{}
+
+
+  fn ==(this, other) {
+    return false if this.op != other.op
+    if this.op.isaNode() {
+      return this.value.node == other.value.node
+    }
+    return this.value.immediate == other.value.immediate
+  }
+  fn !=(this, other) {
+    if this.op == other.op {
+      if this.op.isaNode() {
+        return this.value.node != other.value.node
+      }
+      return this.value.immediate != other.value.immediate
+    }
+    return true
+  }
+
+  fn isNotValid(this) = !this.op
+
+  fn type(this) {
+    switch this.op {
+      case Op.Node      return this.value.node.type
+      case Op.Immediate return this.value.immediate.type
+      default assert with nameof(this.op)
+    }
+    return *&ssa.tyUnknown
+  }
+
+  fn isaNode(this)       = this.value.node               if this.op.isaNode()
+  fn isMemory(this)      = this.value.node.isMemory()    if this.op.isaNode()
+  fn isNotMemory(this)   = this.value.node.isNotMemory() if this.op.isaNode() else true
+  fn isaValue(this)      = this.value.node.isaValue()    if this.op.isaNode()
+  fn isaSymbol(this)     = this.value.node.isaSymbol()   if this.op.isaNode()
+  fn isaBlock(this)      = this.value.node.isaBlock()    if this.op.isaNode()
+  fn isanImmediate(this) = &this.value.immediate         if this.op.isanImmediate()
+  fn isaField(this)      = this.value.node is ssa.Field  if this.op.isaNode()
+
+  fn isMemoryOrAnImmediate(this)  = this.op.isanImmediate() || this.isMemory()
+  fn isNotAnImmediate(this)       = !this.op.isanImmediate()
+  fn isNotMemoryOrImmediate(this) = !this.op.isanImmediate() && this.isNotMemory()
+
+  fn isaRegister(this) {
+    if const value = this.isaValue() {
+      return value.isaRegister()
+    }
+    return null
+  }
+
+  fn isaRead(this)  = this.io == Io.Read
+  fn isaWrite(this) = this.io == Io.Write
+
+  fn setNode(this, node, io):this {
+    this.value.node = node
+    this.io = io
+    this.op = Op.Node
+  }
+
+  fn setImmediate(this, value, type):this {
+    this.value.immediate.value = *value
+    this.value.immediate.type = type
+    this.io = Io.Read
+    this.op = Op.Immediate
+  }
+
+  fn reset(this):this {
+    this.value.immediate.value.u64 = 0
+    this.value.immediate.type = ssa.tyUnknown
+    this.io = Io.Read
+    this.op = Op.None
+  }
+}
+
+
+struct OperandList {
+  readonly  items = Operand*{}
+  readonly length = 0
+  readonly  owner = Value*{}
+
+  fn dispose(this) {
+    delete this.items
+  }
+
+  fn [](this, index) {
+    assert index >= 0 && index < this.length
+    return this.items[index]
+  }
+
+  fn ==(this, other) {
+    return false if this.length != other.length
+    for i, lhs in this {
+      return false if lhs != other.items[i]
+    }
+    return true
+  }
+
+  fn !=(this, other) {
+    if this.length == other.length {
+      for i, lhs in this {
+        return true if lhs == other.items[i]
+      }
+      return false
+    }
+    return true
+  }
+
+  fn reserve(this, length): this {
+    import malloc from std.memory
+    assert length >= 0 && !this.items && !this.length && this.owner
+    this.items = malloc(this.items, sizeof(Operand) * length)
+    this.length = length
+  }
+
+  fn extend(this):this {
+    import malloc from std.memory
+    assert this.items && this.length >= 0 && this.owner
+    this.items = malloc(this.items, sizeof(Operand) * (this.length + 1))
+    this.items[this.length++].reset()
+  }
+
+  fn removeAt(this, index, updateUses = true) {
+    assert index >= 0 && index < this.length
+    const operand = this.items[index]
+    if updateUses {
+      if const node = operand.isaNode() {
+        node.removeUse(this.owner, index)
+      }
+    }
+    if this.length {
+      const next = index + 1
+      if next < this.length {
+        import mcopy from std.memory
+        mcopy(
+            destination = this.items + index,
+            source      = this.items + next,
+            sizeInBytes = sizeof(Operand) * (this.length - next)
+          )
+      }
+      this.items[--this.length].reset()
+    } else {
+      import mfree from std.memory
+      this.items = mfree(this.items)
+    }
+  }
+
+  fn clear(this) {
+    for i, operand in this {
+      if const node = operand.isaNode() {
+        node.removeUse(this.owner, i)
+      }
+      operand.reset()
+    }
+  }
+
+  fn set(this, index, node, io = Io.Read): this {
+    assert index >= 0 && index < this.length && this.owner
+    assert node.type.isKnown()
+    switch this.owner {
+      case Phi {}
+      default assert this.owner != node as Node*
+    }
+    
+    var operand = this.items[index]
+
+    if const current = operand.isaNode() {
+      if current == node as Node* {
+        return this
+      }
+      current.removeUse(this.owner, index)
+    }
+
+    operand.setNode(node, io)
+
+    node.appendUse(this.owner, index)
+  }
+
+  fn imm(this, index, immediate): this {
+    assert index >= 0 && index < this.length && this.owner
+    assert immediate.type.isKnown()
+
+    var operand = this.items[index]
+
+    if const current = operand.isaNode() {
+      current.removeUse(this.owner, index)
+    }
+
+    operand.setImmediate(immediate.value, immediate.type)
+  }
+
+  fn setZero(this, index): this {
+    this.setZeroOf(index, tyInt32)
+  }
+
+  fn setZeroOf(this, index, type): this {
+    assert index >= 0 && index < this.length && this.owner
+    assert this.items[index].isNotValid()
+    this.items[index].setImmediate(Immediate{}, type)
+  }
+
+  fn first(this) {
+    assert this.length
+    return this.items[0]
+  }
+
+  fn last(this) {
+    assert this.length
+    return this.items[this.length - 1]
+  }
+
+  fn swap(this, l, r, updateUses = true) {
+    assert l >= 0 && l < this.length
+    assert r >= 0 && r < this.length
+    return if l == r
+    var lhs = this.items[l]
+    var rhs = this.items[r]
+    if !updateUses {
+      const tmp = *lhs
+      lhs = rhs
+      rhs = tmp
+      return
+    }
+    var lhsUse = Use*{}
+    var rhsUse = Use*{}
+    if const node = lhs.isaNode() {
+      lhsUse = node.findUse(this.owner, l)
+    }
+    if const node = rhs.isaNode() {
+      rhsUse = node.findUse(this.owner, r)
+    }
+
+    const tmp = *lhs
+    lhs = rhs
+    rhs = tmp
+
+    if lhsUse {
+      *lhsUse = Use{ user = this.owner, index = r }
+    }
+    if rhsUse {
+      *rhsUse = Use{ user = this.owner, index = l }
+    }
+  }
+
+  fn areAllImmediates(this) {
+    for operand in this {
+      return false if operand.isNotAnImmediate()
+    }
+    return true
+  }
+
+  fn anyIsWrittenTo(this) {
+    for operand in this {
+      if const node = operand.isaNode() {
+        return true if node.isWrittenTo()
+      }
+    }
+    return false
+  }
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+enum Condition {
+    None = 0u8,
+    Overflow,   // OF = 1
+    NoOverflow, // OF = 0
+    Carry,      // CF = 1
+    NoCarry,    // CF = 0
+    Zero,       // ZF = 1
+    NotZero,    // ZF = 0
+    Sign,       // SF = 1
+    NoSign,     // SF = 0
+    Parity,     // PF = 1
+    NoParity,   // PF = 0
+
+    BelowOrEqual,     // CF = 1 or ZF = 1
+    NotBelowOrEqual,  // CF = 0 and ZF = 0
+
+    Less,
+    NotLess,
+
+    LessOrEqual,
+    NotLessOrEqual,
+    
+    Equal    = Zero,
+    NotEqual = NotZero,
+
+    Below    = Carry,   // CF = 1
+    NotBelow = NoCarry, // CF = 0
+
+    Above           = NotBelowOrEqual,  // CF = 0 and ZF = 0
+    NotAbove        = BelowOrEqual,     // CF = 1 or ZF = 1
+    AboveOrEqual    = NotBelow,         // CF = 0
+    NotAboveOrEqual = Below,            // CF = 1
+
+    Greater           = NotLessOrEqual, // ZF = 0 and SF = 0F
+    NotGreater        = LessOrEqual,
+    GreaterOrEqual    = NotLess,
+    NotGreaterOrEqual = Less,
+
+    ParityEven = Parity,
+    ParityOdd  = NoParity
+}
+
+
+/*---------------------------------------------------------------------------------------------------------
+            3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1
+  63 ... 32 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+  ^       ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^
+  |       | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+  +---+---+ | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+      |     | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+    32 bit  | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+displacement| | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+     or     | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+  immediate | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+            | | | | | | | | | ^                   ^ | ^       ^ | ^       ^
+            | | | | | | | | | |                   | | |       | | |       |
+            | | | | | | | | | +-----------+-------+ | +---+---+ | +---+---+
+            | | | | | | | | |             |         |     |     |     |
+            | | | | | | | | |        Preference     |   Index   |   Base
+            | | | | | | | | |          11 bits      |  (max 31) |  (max 31)
+            | | | | | | | | |       (max 2,047      |           |
+            | | | | | | | | |                      Has         Has
+            | | | | | | | | |                     Index        Base
+            | | | | | | | | |
+            | | | | | | | 0 0 → SIB scale → 1 B
+            | | | | | | | 0 1 → SIB scale → 2 B
+            | | | | | | | 1 0 → SIB scale → 4 B
+            | | | | | | | 1 1 → SIB scale → 8 B
+            | | | | | | |
+            | | | | | | 0 → Not volatile
+            | | | | | | 1 → Volatile
+            | | | | | |
+            | | | 0 0 0 → Not a stack slot
+            | | | 0 0 1 → Local
+            | | | 0 1 0 → Parameter
+            | | | 1 0 0 → Argument
+            | | | 1 0 1 → Spill
+            | | | 1 1 0 → Unused
+            | | | 1 1 1 → Unused
+            | | | 
+            0 0 0 → Not valid
+            0 0 1 → gpr
+            0 1 0 → xmm
+            1 0 0 → imm
+            0 1 1 → rip-relative address (rip + displacement)
+            1 0 1 → rsp-relative address (rsp + displacement)
+            1 1 1 → heap address (base + index × scale + displacement)
+*/
+define kBaseShift 0u64
+define  kBaseMask 0b1111u64
+
+define kHasBaseShift 5u64
+define  kHasBaseMask 1u64
+
+define kIndexShift 6u64
+define  kIndexMask 0b1111u64
+
+define kHasIndexShift 11u64
+define  kHasIndexMask 1u64
+
+define kPrefShift 12u64
+define  kPrefMask 0x7ffu64
+
+define kSIBShift 23u64
+define  kSIBMask 0b11u64
+
+define kVolatileShift 25u64
+define  kVolatileMask 0b1u64
+
+define kStackShift 26u64
+define kStackMask  0b111u64
+define  kLocalMask 0b001u64
+define  kParamMask 0b010u64
+define    kArgMask 0b100u64
+define  kSpillMask 0b101u64
+
+define kKindShift 29u64
+define  kKindMask 0b111u64
+define   kGprMask 0b001u64
+define   kXmmMask 0b010u64
+define   kImmMask 0b100u64
+define   kRipMask 0b011u64
+define   kRspMask 0b101u64
+define  kHeapMask 0b111u64
+
+define kDisplacementShift 32u64
+define  kDisplacementMask 0xffff_ffffu64
+
+define MAX_GPRS 16
+define MAX_XMMS 16
+
+const gpr64Names = [ "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",  "r8",  "r9",  "r10",  "r11",  "r12",  "r13",  "r14",  "r15" ]
+const gpr32Names = [ "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d" ]
+const gpr16Names = [  "ax",  "cx",  "dx",  "bx",  "sp",  "bp",  "si",  "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w" ]
+const  gpr8Names = [  "al",  "cl",  "dl",  "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b" ]
+
+const  xmmNames = [ "xmm0",  "xmm1",  "xmm2",  "xmm3",  "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15" ]
+const  ymmNames = [ "ymm0",  "ymm1",  "ymm2",  "ymm3",  "ymm4", "ymm5", "ymm6", "ymm7", "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15" ]
+const  zmmNames = [ "zmm0",  "zmm1",  "zmm2",  "zmm3",  "zmm4", "zmm5", "zmm6", "zmm7", "zmm8", "zmm9", "zmm10", "zmm11", "zmm12", "zmm13", "zmm14", "zmm15" ]
+
+enum RegKind { None, Gpr, Xmm, Immediate, RipRelative, RspRelative, HeapAddress }
+
+struct Register {
+  readonly value = 0u64
+
+  fn ==(this, other) = this.value == other.value
+  fn !=(this, other) = this.value != other.value
+
+  fn isValid(this)    = ((this.value >> kKindShift) & kKindMask) != 0
+  fn isNotValid(this) = ((this.value >> kKindShift) & kKindMask) == 0
+
+  fn name(this)         = Int32((this.value >> kBaseShift)     & kBaseMask)
+  fn base(this)         = Int32((this.value >> kBaseShift)     & kBaseMask)
+  fn index(this)        = Int32((this.value >> kIndexShift)    & kIndexMask)
+  fn preference(this)   = Int32((this.value >> kPrefShift)     & kPrefMask)
+  fn scale(this)        = Int32((this.value >> kSIBShift)      & kSIBMask)
+  fn isVolatile(this)   =      ((this.value >> kVolatileShift) & kVolatileMask) != 0u64
+  fn isNotVolatile(this)=      ((this.value >> kVolatileShift) & kVolatileMask) == 0u64
+  fn stack(this)        = Int32((this.value >> kStackShift)    & kStackMask)
+  fn kind(this)         = Int32((this.value >> kKindShift)     & kKindMask)
+  fn displacement(this) = ((this.value >> kDisplacementShift) & kDisplacementMask) as Int32
+  fn immediate(this)    = ((this.value >> kDisplacementShift) & kDisplacementMask) as Int32
+
+  fn hasBase(this)  = Int32((this.value >> kHasBaseShift)  & kHasBaseMask)
+  fn hasIndex(this) = Int32((this.value >> kHasIndexShift) & kHasIndexMask)
+
+  fn isaGpr(this)        = ((this.value >> kKindShift) & kKindMask) == kGprMask
+  fn isanXmm(this)       = ((this.value >> kKindShift) & kKindMask) == kXmmMask
+  fn isanImmediate(this) = ((this.value >> kKindShift) & kKindMask) == kImmMask
+  fn isRipRelative(this) = ((this.value >> kKindShift) & kKindMask) == kRipMask
+  fn isRspRelative(this) = ((this.value >> kKindShift) & kKindMask) == kRspMask
+  fn isHeapAddress(this) = ((this.value >> kKindShift) & kKindMask) == kHeapMask
+  fn isanAddress(this) {
+    switch ((this.value >> kKindShift) & kKindMask) {
+      case kRipMask, kRspMask, kHeapMask return true
+    }
+    return false
+  }
+  fn isaRegister(this) {
+    switch ((this.value >> kKindShift) & kKindMask) {
+      case kGprMask, kXmmMask return true
+    }
+    return false
+  }
+  fn isMemory(this) {
+    switch ((this.value >> kKindShift) & kKindMask) {
+      case kRipMask, kRspMask, kHeapMask return true
+    }
+    return false
+  }
+  fn regKind(this) {
+    switch ((this.value >> kKindShift) & kKindMask) {
+      case 0         return RegKind.None
+      case kGprMask  return RegKind.Gpr
+      case kXmmMask  return RegKind.Xmm
+      case kImmMask  return RegKind.Immediate
+      case kRipMask  return RegKind.RipRelative
+      case kRspMask  return RegKind.RspRelative
+      case kHeapMask return RegKind.HeapAddress
+    }
+    assert 0
+    return RegKind.None
+  }
+
+  fn setGpr(this, name, preference, isVolatile): this {
+    this.value = ((UInt64(name)         & kBaseMask)     << kBaseShift)     |
+                 ((UInt64(preference)   & kPrefMask)     << kPrefShift)     |
+                 ((UInt64(isVolatile)   & kVolatileMask) << kVolatileShift) |
+                 (kGprMask                               << kKindShift)
+  }
+
+  fn setXmm(this, name, preference, isVolatile): this {
+    this.value = ((UInt64(name)         & kBaseMask)     << kBaseShift)     |
+                 ((UInt64(preference)   & kPrefMask)     << kPrefShift)     |
+                 ((UInt64(isVolatile)   & kVolatileMask) << kVolatileShift) |
+                 (kXmmMask                               << kKindShift)
+  }
+
+  fn setLocal(this, displacement): this {
+    this.value = (kLocalMask << kStackShift) |
+                 (kRspMask   << kKindShift)  |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setParameter(this, displacement): this {
+    this.value = (kParamMask << kStackShift) |
+                 (kRspMask   << kKindShift)  |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setArgument(this, displacement): this {
+    this.value = (kArgMask << kStackShift) |
+                 (kRspMask << kKindShift)  |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setSpill(this, displacement): this {
+    this.value = (kSpillMask << kStackShift) |
+                 (kRspMask   << kKindShift)  |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setRip(this, displacement): this {
+    this.value = (kRipMask << kKindShift)  |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setBaseAndIndex(this, base, index, scale, displacement): this {
+    this.value = ((UInt64(base)  & kBaseMask)  << kBaseShift)     |
+                 (kHasBaseMask                 << kHasBaseShift)  |
+                 ((UInt64(index) & kIndexMask) << kIndexShift)    |
+                 (kHasIndexMask                << kHasIndexShift) |
+                 ((UInt64(scale) & kSIBMask)   << kSIBShift)      |
+                 (kHeapMask                    << kKindShift)     |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setBaseOnly(this, base, displacement): this {
+    this.value = ((UInt64(base)  & kBaseMask)  << kBaseShift)     |
+                 (kHasBaseMask                 << kHasBaseShift)  |
+                 (kHeapMask                    << kKindShift)     |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setIndexOnly(this, base, scale, displacement): this {
+    this.value = ((UInt64(index) & kIndexMask) << kIndexShift)    |
+                 (kHasIndexMask                << kHasIndexShift) |
+                 ((UInt64(scale) & kSIBMask)   << kSIBShift)      |
+                 (kHeapMask                    << kKindShift)     |
+                 ((UInt64(displacement) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setImmediate(this, immediate): this {
+    this.value = (kImmMask << kKindShift) |
+                 ((UInt64(immediate) & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn setDisplacement(this, displacement): this {
+    const value = this.value & kDisplacementMask // Mask out the current displacement.
+    this.value = value | ((displacement & kDisplacementMask) << kDisplacementShift)
+  }
+
+  fn addDisplacement(this, value): this {
+    const displacement = this.displacement()
+    this.setDisplacement(displacement + value)
+  }
+
+  fn format(this, stream, fmt = "") {
+    const gprs = *&gpr64Names
+    const xmms = *&xmmNames
+    switch const kind = ((this.value >> kKindShift) & kKindMask) {
+      case 0 {
+        stream.append("<reg-error>")
+      }
+      case kGprMask {
+        const name = this.base()
+        if name >= 0 && name < gprs.length {
+          stream.append(gprs[name])
+        } else {
+          stream.append("<bad-gpr-name: ")
+          name.format(stream)
+          stream.append(">")
+        }
+      }
+      case kXmmMask {
+        const name = this.base()
+        if name >= 0 && name < xmms.length {
+          stream.append(xmms[name])
+        } else {
+          stream.append("<bad-xmm-name: ")
+          name.format(stream)
+          stream.append(">")
+        }
+      }
+      case kImmMask {
+        this.immediate().format(stream, "%0x")
+      }
+      case kRipMask {
+        stream.append("[rip + ")
+        this.immediate().format(stream, "%0x")
+        stream.append("]")
+      }
+      case kRspMask {
+        stream.append("[rsp + ")
+        this.immediate().format(stream, "%0x")
+        stream.append("]")
+      }
+      case kHeapMask {
+        const         base = this.base()  if this.hasBase()  else kBaseMask
+        const        index = this.index() if this.hasIndex() else kIndexMask
+        const        scale = this.scale()
+        const displacement = this.displacement()
+        if base == kBaseMask {
+          if index == kIndexMask { // [ displacement ]
+            this.displacement().format(stream, "%0x")
+          } else {
+            if index >= 0 && index  < gprs.length {
+              stream.append("[")
+              stream.append(gprs[index])
+            } else {                
+              stream.append("[bad-index-name: ")
+              index.format(stream, "%0x")
+            }
+            switch scale {
+              case 0b00 {}                    // [ index     + displacement ]
+              case 0b01 stream.append(" × 2") // [ index × 2 + displacement ]                
+              case 0b10 stream.append(" × 4") // [ index × 4 + displacement ]
+              case 0b11 stream.append(" × 8") // [ index × 8 + displacement ]
+              default assert with "#{scale}"
+            }
+            if displacement {
+              if displacement < 0 {
+                stream.append(" - ")
+              } else {
+                stream.append(" + ")
+              }
+              displacement.format(stream, "%0x")
+            }
+            stream.append("]")
+          }
+        } else if index == kIndexMask { // [ base + displacement ]
+          if base >= 0 && base  < gprs.length {
+            stream.append("[")
+            stream.append(gprs[base])
+          } else {                
+            stream.append("[bad-base-name: ")
+            base.format(stream, "%0x")
+          }
+          if displacement {
+            stream.append(" + ")
+            displacement.format(stream, "%0x")
+          }
+          stream.append("]")
+        } else {
+          if base >= 0 && base  < gprs.length {
+            stream.append("[")
+            stream.append(gprs[base])
+          } else {                
+            stream.append("[bad-base-name: ")
+            base.format(stream, "%0x")
+          }
+          if index >= 0 && index  < gprs.length {
+            stream.append(" + ")
+            stream.append(gprs[index])
+          } else {                
+            stream.append(" + bad-index-name: ")
+            index.format(stream, "%0x")
+          }
+          switch scale {
+            case 0b00 {}                    // [ base + index     + displacement ]
+            case 0b01 stream.append(" × 2") // [ base + index × 2 + displacement ]                
+            case 0b10 stream.append(" × 4") // [ base + index × 4 + displacement ]
+            case 0b11 stream.append(" × 8") // [ base + index × 8 + displacement ]
+            default assert with "#{scale}"
+          }
+          if displacement {
+            if displacement < 0 {
+              stream.append(" - ")
+            } else {
+              stream.append(" + ")
+            }
+            displacement.format(stream, "%0x")
+          }
+          stream.append("]")
+        }
+      }
+      default assert with "#{kind}"
+    }
+  }
+}
+
+
+//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+fn ndispose(node): typeof(node) {
+  return node if !node
+  switch node {
+    case Value                node.dispose()
+    case ElementAt            node.dispose()
+    case Store                node.dispose()
+    case Assign               node.dispose()
+    case Fill                 node.dispose()
+    case Exchange             node.dispose()
+    case XAdd                 node.dispose()
+
+    case RetVal               node.dispose()
+    case Local                node.dispose()
+    case Parameter            node.dispose()
+
+    case Compare              node.dispose()
+    case CompareExchange      node.dispose()
+
+    case Assert               node.dispose()
+    case Pause                node.dispose()
+
+    case Yield                node.dispose()
+    case Jump                 node.dispose()
+    case JumpIf               node.dispose()
+    case Return               node.dispose()
+
+    case Load                 node.dispose()
+    case Argument             node.dispose()
+    case Address              node.dispose()
+    case Decrement            node.dispose()
+    case Increment            node.dispose()
+    case Negate               node.dispose()
+    case BitwiseNot           node.dispose()
+    case SignExtend           node.dispose()
+    case ZeroExtend           node.dispose()
+    case NarrowingCast        node.dispose()
+    case NumericCast          node.dispose()
+    case BitCast              node.dispose()
+    case Round                node.dispose()
+    case SquareRoot           node.dispose()
+    case Abs                  node.dispose()
+
+    case Arithmetic           node.dispose()
+    case Or                   node.dispose()
+    case XOr                  node.dispose()
+    case And                  node.dispose()
+    case LeftShift            node.dispose()
+    case RightShift           node.dispose()
+    case UnsignedRightShift   node.dispose()
+    case Subtract             node.dispose()
+    case Add                  node.dispose()
+    case Remainder            node.dispose()
+    case DivRem               node.dispose()
+    case Divide               node.dispose()
+    case Multiply             node.dispose()
+    case Min                  node.dispose()
+    case Max                  node.dispose()
+    case RotateLeft           node.dispose()
+    case RotateRight          node.dispose()
+
+    case Call                 node.dispose()
+    case Phi                  node.dispose()
+
+    default assert with nameof(node)
+  }
+  import mfree from memory
+  mfree(node)
+  return null
+}

@@ -1,0 +1,197 @@
+enum Num {
+  None, u8, i8, u16, i16, u32, i32, u64, i64, f32, f64,
+
+  fn isIntegral(this)    = this >= u8 && this <= i64,
+  fn isNotIntegral(this) = this > i64
+}
+
+enum Kind {
+  Unknown,  
+  EndOfFile,
+
+  Space,
+  NewLine,
+
+  Comment,
+
+  At,
+  BackSlash,
+  Hash,
+
+  SingleQuote,
+  DoubleQuote,
+  BackTick,
+
+  // Enclosed ↓
+    OpenParen, CloseParen,
+    OpenBracket, CloseBracket, OpenCloseBracket,
+    OpenCurly, CloseCurly,
+    HashOpenCurly, HashCloseCurly,
+    HashOpenBracket,
+
+  // Binary operators by precedence ↓
+    // Assignment ↓
+      Assign,
+      TildeAssign,
+      OrAssign,
+      XOrAssign,
+      AndAssign,
+      LeftShiftAssign,
+      RightShiftAssign,
+      UnsignedRightShiftAssign,
+      PlusAssign,
+      MinusAssign,
+      RemainderAssign,
+      DivideAssign,
+      MultiplyAssign,
+    // Logical ↓
+      OrOr,
+      AndAnd,
+    // Bitwise ↓
+      Or,
+      XOr,
+      And,
+    // Comparison ↓
+      Equal,
+      NotEqual,
+      Equivalent,
+      NotEquivalent,
+      Less,
+      LessOrEqual,
+      Greater,
+      GreaterOrEqual,
+    // Shift ↓
+      LeftShift,
+      RightShift,
+      UnsignedRightShift,
+    // Additive ↓
+      Plus,
+      Minus,
+    // Multiplicative ↓
+      Remainder,
+      Divide,
+      Multiply,
+
+
+  Dot,
+  DotDot,
+  Ellipsis,
+
+  OpenSingleLineComment,
+  OpenMultiLineComment,
+  CloseMultiLineComment,
+
+  XOrXOr,
+
+  Star,           // *
+  StarAmpersand,  // *&
+  Ampersand,      // &
+  AmpersandStar,  // &*
+
+  MinusMinus,
+  PlusPlus,
+  Tilde,
+  TildeTilde,
+  LogicalNot,
+  LogicalIs,
+
+  MultiplyMultiply,
+
+  PercentPercent,
+
+  Question,
+  QuestionQuestion, // lhs '??' rhs :⟶ lhs if lhs else rhs
+
+  Comma,
+  SemiColon,
+  Colon,
+
+  Number,
+  Text,
+  Identifier,
+  // Block Statement keywords
+    If, Else, For, Each, Switch, Case, Default,
+  // Statement keywords
+    Defer,
+  // Flow control keywords
+    Return, Yield, YieldFrom, Await, Break, Continue, 
+  // Modifier keywords
+    Static, Const, ReadOnly, Auto, Var, Synchronized, Async, Abstract,
+  // Type keywords
+    Struct, Union, Enum,
+    Fn, UrlHandler, Extern, Html, Css, Json, Sql, Blob, 
+  // Other keywords ↓
+    False, True, Null, Void, 
+    Import, Export, Define, Assert, From,
+    TypeOf, SizeOf, NameOf,
+    New, Delete, With,
+  // Binary operator keywords
+    NotIn, In, To, As, IsNot, Is,
+    
+  // Hash keywords ↓
+    HashAssert, HashIf, HashElif, HashElse,
+
+    fn isanAssignmentOperator(this)   = this >= Assign && this <= MultiplyAssign,
+    fn isaTypeSuffixOperator(this)    = this >= Star && this <= AmpersandStar,
+    fn isaLogicalBinaryOperator(this) = this >= OrOr && this <= AndAnd,
+
+    fn value(this) {
+      switch this {
+        case OpenCloseBracket           return "[]"
+        // Assignment ↓
+        case Assign                     return "="
+        case TildeAssign                return "~="
+        case OrAssign                   return "|="
+        case XOrAssign                  return "^="
+        case AndAssign                  return "&="
+        case LeftShiftAssign            return "<<="
+        case RightShiftAssign           return ">>="
+        case UnsignedRightShiftAssign   return ">>>="
+        case MinusAssign                return "-="
+        case PlusAssign                 return "+="
+        case RemainderAssign            return "%="
+        case DivideAssign               return "/="
+        case MultiplyAssign             return "*="
+        // Logical ↓
+        case OrOr                       return "||"
+        case AndAnd                     return "&&"
+        // Bitwise ↓
+        case Or                         return "|"
+        case XOr                        return "^"
+        case And                        return "&"
+        // Comparison ↓
+        case Equal                      return "=="
+        case NotEqual                   return "!="
+        case Equivalent                 return "==="
+        case NotEquivalent              return "!==="
+        case Less                       return "<"
+        case LessOrEqual                return "<="
+        case Greater                    return ">"
+        case GreaterOrEqual             return ">="
+        // Shift ↓
+        case LeftShift                  return "<<"
+        case RightShift                 return ">>"
+        case UnsignedRightShift         return ">>>"
+        // Additive ↓
+        case Plus                       return "+"
+        case Minus                      return "-"
+        // Multiplicative ↓
+        case Remainder                  return "%"
+        case Divide                     return "/"
+        case Multiply                   return "*"
+        // Unary ↓
+        case MinusMinus                 return "--"
+        case PlusPlus                   return "++"
+        case Tilde                      return "~"
+        case TildeTilde                 return "~~"
+        case LogicalNot                 return "!"
+        case LogicalIs                  return "!!"
+
+        case As                         return "as"
+        case To                         return "to"
+        case IsNot                      return "!is"
+        case Is                         return "is"
+      }
+      return nameof(this)
+    }
+}

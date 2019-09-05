@@ -1,0 +1,522 @@
+
+struct DeadCodeElimination {
+  const      function = ssa.Function*{}
+  readonly    removed = { blocks = 0, values = 0 }
+  readonly retargeted = 0
+
+  fn run(this, ctx) {
+    var changes = 0
+    var  passes = 0
+    for {
+      ++passes
+      each block in this.function.blocks() {
+        for var value = block.body.first; value; {
+          const qnext = value.qnext
+          this.tryRemoveValue(value)
+          value = qnext
+        }
+      }
+      for var block = this.function.body.first; block; {
+        block = this.tryRemoveBlock(block)
+      }
+      break if changes == this.removed.blocks + this.removed.values + this.retargeted
+      changes = this.removed.blocks + this.removed.values + this.retargeted
+    }
+    synchronize(ctx)
+    ctx.dce.removed.values += this.removed.values
+    ctx.dce.removed.blocks += this.removed.blocks
+    ctx.dce.passes += passes
+    ctx.dce.retargeted += this.retargeted
+  }
+
+
+  fn tryRemoveValue(this, value) {
+    return if value.uses.length
+    switch value {
+      case ssa.Value         this.removeValue(value)
+      case ssa.ElementAt     this.removeValue(value)
+
+      case ssa.RetVal        this.removeValue(value)
+      
+      case ssa.Compare         this.removeValue(value)
+      //case ssa.CompareExchange this.removeValue(value)
+
+      case ssa.Load          this.removeValue(value)
+      case ssa.Address       this.removeValue(value)
+      case ssa.Negate        this.removeValue(value)
+      case ssa.BitwiseNot    this.removeValue(value)
+      case ssa.SignExtend    this.removeValue(value)
+      case ssa.ZeroExtend    this.removeValue(value)
+      case ssa.NarrowingCast this.removeValue(value)
+      case ssa.NumericCast   this.removeValue(value)
+      case ssa.BitCast       this.removeValue(value)
+      case ssa.Round         this.removeValue(value)
+      case ssa.Abs           this.removeValue(value)
+
+      case ssa.Or                 this.removeValue(value)
+      case ssa.XOr                this.removeValue(value)
+      case ssa.And                this.removeValue(value)
+      case ssa.LeftShift          this.removeValue(value)
+      case ssa.RightShift         this.removeValue(value)
+      case ssa.UnsignedRightShift this.removeValue(value)
+      case ssa.Subtract           this.removeValue(value)
+      case ssa.Add                this.removeValue(value)
+      case ssa.Remainder          this.removeValue(value)
+      case ssa.DivRem             this.removeValue(value)
+      case ssa.Divide             this.removeValue(value)
+      case ssa.Multiply           this.removeValue(value)
+      case ssa.Min                this.removeValue(value)
+      case ssa.Max                this.removeValue(value)
+      case ssa.RotateLeft         this.removeValue(value)
+      case ssa.RotateRight        this.removeValue(value)
+
+      case ssa.Phi                this.removeValue(value)
+    }
+  }
+
+
+  fn removeValue(this, value) {
+    assert value.isUnused()
+    value.operands.clear()
+    value.parent.body.remove(value)
+    ssa.ndispose(value)
+    //delete value
+    ++this.removed.values
+  }
+
+
+  fn tryRemoveBlock(this, block) {
+    const qnext = block.qnext
+    if block.uses.isEmpty() {
+      if this.tryRemoveDeadBlock(block) {
+        return qnext
+      }
+    } else if block.uses.length == 1 {
+      if this.tryRemoveFallThroughOrTrampoline(block) {
+        return qnext
+      }
+    }
+
+    switch block.body.last {
+      case ssa.Yield  return this.visitBlockWithYieldJumpOrReturn(block)
+      case ssa.Jump   return this.visitBlockWithYieldJumpOrReturn(block)
+      case ssa.JumpIf return this.visitBlockWithJumpIf(block)
+      case ssa.Return return this.visitBlockWithYieldJumpOrReturn(block)
+    }
+
+    return block.qnext
+  }
+
+
+  fn tryRemoveDeadBlock(this, block) {
+    if block.body.first == block.body.last {
+      switch block.body.last {
+        case ssa.Jump {
+          this.removeBlockWithJumpTerm(block)
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+
+  fn tryRemoveFallThroughOrTrampoline(this, block) {  
+    const predecessorTerm = block.uses.items[0].user
+    const     predecessor = predecessorTerm.parent
+    switch predecessorTerm {
+      case ssa.Jump {
+        if predecessor.qnext == block {            
+          /*  "the fallthrough"
+              predecessor:  ...
+                            goto block
+                    block:  ...
+                            --term--
+          */
+          this.merge(predecessor, block)
+          return true
+        }
+        if block.body.first == block.body.last {
+          /*  "the trampoline"
+              predecessor:  ...
+                            goto block
+                    .
+                    .
+                    .
+                    block:  --term--
+          */
+          this.merge(predecessor, block)
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+
+  fn visitBlockWithYieldJumpOrReturn(this, block) {
+    const qnext = block.qnext
+    if block.uses.length == 1 {
+      const predecessorTerm = block.uses.items[0].user
+      const     predecessor = predecessorTerm.parent
+      switch predecessorTerm {
+        case ssa.Jump {
+          if predecessor.qnext == block {            
+            /*  "the fallthrough"
+                predecessor:  ...
+                              goto block
+                      block:  ...
+                              goto target
+            */
+            this.merge(predecessor, block)
+          } else if block.body.first == block.body.last {
+            /*  "the trampoline"
+                predecessor:  ...
+                              goto block
+                      .
+                      .
+                      .
+                      block:  goto target
+            */
+            this.merge(predecessor, block)
+          }
+        }
+      }
+    }
+    return qnext
+  }
+
+
+  fn visitBlockWithJumpIf(this, block) {
+    const   term = block.body.last as ssa.JumpIf*
+    const iftrue = term.iftrue()
+    const ifalse = term.ifalse()
+
+    assert block.qnext == ifalse
+
+    if canEliminateOrRetargetJumpIf(block, iftrue, ifalse) {
+      this.tryEliminateOrRetargetJumpIf(block, iftrue, ifalse)
+    }
+
+    return block.qnext
+  }
+
+
+  fn canEliminateOrRetargetJumpIf(block, iftrue, ifalse) {
+    switch ifalse.body.last {
+      case ifalseTerm: ssa.Jump {
+        const ifalseTarget = ifalseTerm.target()
+        if ifalseTarget == iftrue {
+          /*    block:  t1 ⟵ x
+                        goto iftrue if condition else goto ifalse
+                ifalse: t2 ⟵ y
+                        goto iftrue
+                iftrue: t3 ⟵ phi( t1, t2 )
+              {ifalse} cannot be removed unless x == y
+          */
+          return phiOperandsAreTheSame(block, ifalse, target = iftrue)
+        }
+        else switch iftrue.body.last {
+          case iftrueTerm: ssa.Jump {
+            const iftrueTarget = iftrueTerm.target()
+            if ifalseTarget == iftrueTarget {
+              /*    ifalse: t1 ⟵ x
+                            goto target
+                    iftrue: t2 ⟵ y
+                            goto target
+                    target: t3 ⟵ phi( t1, t2 )
+                  Neither {ifalse} nor {iftrue} can be removed unless x == y
+              */
+              return phiOperandsAreTheSame(iftrue, ifalse, ifalseTarget)
+            }
+            return true
+          }
+        }
+      }
+      default {
+        return false
+      }
+    }
+    return true
+
+    fn phiOperandsAreTheSame(iftrue, ifalse, target) {
+      const ifalseIndex = target.indexOfPredecessor(ifalse)
+      const iftrueIndex = target.indexOfPredecessor(iftrue)
+
+      assert ifalseIndex >= 0 && iftrueIndex >= 0
+
+      for var value = target.body.first; value; value = value.qnext {
+        switch value {
+          case ssa.Phi {
+            const ifalseOperand = value.operands.items[ifalseIndex]
+            const iftrueOperand = value.operands.items[iftrueIndex]
+            return false if ifalseOperand != iftrueOperand
+          }
+          default break
+        }
+      }
+      return true
+    }
+  }
+
+
+  fn tryEliminateOrRetargetJumpIf(this, block, iftrue, ifalse) {
+    const ifalseIsEmpty = ifalse.body.first == ifalse.body.last
+    const iftrueIsEmpty = iftrue.body.first == iftrue.body.last
+    const    nullTarget = ssa.Block*{}
+
+    switch ifalse.body.last {
+      case ifalseTerm: ssa.Jump {
+        const ifalseTarget = ifalseTerm.target()
+        switch iftrue.body.last {
+          case ssa.Yield {
+            this.eliminateOrRetargetJumpIf(block,
+                ifalse = { block = ifalse, target = ifalseTarget, isEmpty = ifalseIsEmpty },
+                iftrue = { block = iftrue, target = nullTarget,   isEmpty = iftrueIsEmpty }
+              )
+          }
+          case ssa.Return {
+            this.eliminateOrRetargetJumpIf(block,
+                ifalse = { block = ifalse, target = ifalseTarget, isEmpty = ifalseIsEmpty },
+                iftrue = { block = iftrue, target = nullTarget,   isEmpty = iftrueIsEmpty }
+              )
+          }
+          case iftrueTerm: ssa.Jump {
+            const iftrueTarget = iftrueTerm.target()
+            this.eliminateOrRetargetJumpIf(block,
+                ifalse = { block = ifalse, target = ifalseTarget, isEmpty = ifalseIsEmpty },
+                iftrue = { block = iftrue, target = iftrueTarget, isEmpty = iftrueIsEmpty }
+              )
+          }
+          case ssa.JumpIf {
+            this.eliminateOrRetargetJumpIf(block,
+                ifalse = { block = ifalse, target = ifalseTarget, isEmpty = ifalseIsEmpty },
+                iftrue = { block = iftrue, target = nullTarget,   isEmpty = iftrueIsEmpty }
+              )
+          }
+        }
+      }
+    }
+    return block.qnext
+  }
+
+
+  fn eliminateOrRetargetJumpIf(this, block, iftrue, ifalse) {
+    const isFallThrough = ifalse.target == iftrue.block
+
+    if isFallThrough {
+      if ifalse.isEmpty {
+        //   block: goto iftrue if condition else goto ifalse     ❤ "goto iftrue"
+        //  ifalse: goto iftrue
+        //  iftrue: ...
+        //          --term--
+        this.replaceJumpIfWithJumpToIftrueBlock(block, iftrue, ifalse)
+      } else if iftrue.isEmpty {
+        if iftrue.target {
+          //   block: goto iftrue if condition else goto ifalse     ❤ "goto target if condition else goto ifalse"
+          //  ifalse: ...
+          //          goto iftrue
+          //  iftrue: goto target
+          this.retargetJumpIf(block, iftrue)
+        }
+      }
+      return 
+    }
+
+    const isSameTarget = ifalse.target == iftrue.target
+
+    if isSameTarget {
+      if ifalse.isEmpty {
+        if iftrue.isEmpty {
+          //   block: goto iftrue if condition else goto ifalse   ❤ "goto target"
+          //  ifalse: goto target
+          //  iftrue: goto target
+          this.replaceJumpIfWithJumpToIftrueTarget(block, iftrue, ifalse)
+        }
+      } else if iftrue.isEmpty {
+        //   block: goto iftrue if condition else goto ifalse     ❤ "goto target if condition else goto ifalse"
+        //  ifalse: ...
+        //          goto target
+        //  iftrue: goto target
+        this.retargetJumpIf(block, iftrue)
+      }
+      return
+    }
+
+    if iftrue.target {
+      if iftrue.isEmpty {
+        //   block: goto iftrue if condition else goto ifalse     ❤ "goto target if condition else goto ifalse"
+        //  ifalse: ...
+        //          goto target-x
+        //  iftrue: goto target-y
+        this.retargetJumpIf(block, iftrue)
+      }
+      return
+    }
+  }
+
+
+  fn replaceJumpIfWithJumpToIftrueBlock(this, block, iftrue, ifalse) {
+    //  Remember the index of the phi operands flowing from {block} to {iftrue.block}.
+    const iftrueIndex = this.saveIndex(predecessor = block, block = iftrue.block)
+
+    //  Make a shallow copy of the pos of {block}'s term since {removeValue} below frees memory.
+    const pos = *block.body.last.pos
+
+    //  Remove the term of {block}.
+    //    · Reduces #predecessors of both {iftrue.block} and {ifalse.block} by 1.
+    //    · {ifalse.block} is empty so there is no need to update phis.
+    this.removeValue(block.body.last)
+
+    //  Now create and append "goto iftrue" to {block}.
+    //    · Increases #predecessors of {iftrue.target} by 1 returning it to what it was before {removeValue}.
+    this.createJump(block, pos, iftrue.block)
+
+    //  Then change the order of the phis flowing from {block} to {iftrue.block}.
+    this.restoreIndex(iftrue.block, iftrueIndex)
+
+    //  Finally, retarget {ifalse.block} if {iftrue.block} is empty and terminates with "goto target".
+    const retargetIfalse = iftrue.target && iftrue.isEmpty
+
+    if retargetIfalse {
+      const targetIndex = iftrue.target.indexOfPredecessor(iftrue.block)
+      auto        state = iftrue.target.savePhiOperandsAt(targetIndex)
+      const        jump = ifalse.block.body.last as ssa.Jump*
+      jump.operands.set(0, iftrue.target)
+      iftrue.target.addPhiOperands(state)
+    }
+  }
+
+
+  fn replaceJumpIfWithJumpToIftrueTarget(this, block, iftrue, ifalse) {
+    //  Remember the phi operands flowing from {iftrue.block} to {iftrue.target}.
+    auto state = this.saveState(predecessor = iftrue.block, block = iftrue.target)
+
+    //  Make a shallow copy of the pos of {block}'s term since {removeValue} below frees the memory.
+    const pos = *block.body.last.pos
+
+    //  Remove the term of {block}.
+    //    · Reduces #predecessors of both {iftrue.block} and {ifalse.block} by 1.
+    //    · {ifalse.block} is empty so there is no need to update phis.
+    this.removeValue(block.body.last)
+
+    //  Now create and append "goto target" to {block}.
+    //    · Increases #predecessors of {iftrue.target} by 1.
+    this.createJump(block, pos, iftrue.target)
+
+    //  Append the saved phi operands of {iftrue.target} due to {iftrue.block}.
+    this.restoreState(iftrue.target, state)
+  }
+
+
+  fn retargetJumpIf(this, block, iftrue) {
+    //  Remember the phi operands flowing from {iftrue.block} to {iftrue.target}.
+    auto state = this.saveState(predecessor = iftrue.block, block = iftrue.target)
+
+    //  Change the target of {block}'s term.
+    //    · Reduces the #predecessors of {iftrue.block} by 1.
+    //    · {iftrue.block} is empty so there is no need to update phis.
+    const term = block.body.last as ssa.JumpIf*
+    term.operands.set(0, iftrue.target)
+
+    //  Append the saved phi operands of {iftrue.target} due to {iftrue.block}.
+    this.restoreState(iftrue.target, state)
+
+    ++this.retargeted
+  }
+
+/*
+solver: {
+                 purpose: solves expressions and propagates constants,
+                  solved: { loads: 31,346, jumps: 4,023, phis: 1,002, expressions: 5,103 },
+                 removed: 37,449,
+                  passes: 11,966 },
+         dce: {
+                 purpose: dead code elimination,
+                 removed: { blocks: 12,495, values: 41,222 },
+*/
+  fn createJump(this, block, pos, target) {
+    const jump = new ssa.Jump{ pos = pos, parent = block, type = ssa.tyVoid }
+    jump.initialize(operands = 1)
+    jump.operands.set(0, target)
+    block.body.append(jump)
+  }
+
+
+  fn saveState(this, predecessor, block) {
+    const index = block.indexOfPredecessor(predecessor)
+    return block.savePhiOperandsAt(index)
+  }
+
+
+  fn restoreState(this, block, state) {
+    block.addPhiOperands(state)
+  }
+
+
+  fn saveIndex(this, predecessor, block) {
+    return block.indexOfPredecessor(predecessor)
+  }
+
+
+  fn restoreIndex(this, block, index) {
+    if block.uses.length > 1 {
+      block.changePhiOperandsIndex(oldIndex = index, newIndex = block.uses.length - 1)
+    }
+  }
+
+
+  fn merge(this, predecessor, block) {
+    // Kill the term of {predecessor}.
+    switch predecessor.body.last {
+      case term: ssa.Yield  this.removeValue(term)
+      case term: ssa.Jump   this.removeValue(term)
+      case term: ssa.JumpIf this.removeValue(term)
+      case ssa.Return       assert 0
+      //  Else term has already been removed.
+    }
+
+    // Move the body of {block} to the body of {predecessor}.
+    for const expr = block.body.removeFirst() {
+      switch expr {
+        case ssa.Phi {
+          assert expr.operands.length == 1
+          const     operand = expr.operands.items[0]
+          if const replacer = operand.isaNode() as ssa.Value* {
+            expr.replace(replacer)
+          } else if const immediate = operand.isanImmediate() {
+            expr.propagate(immediate.value)
+          } else {
+            assert 0
+          }          
+          delete expr
+          ++this.removed.values
+          continue
+        }
+      }
+      expr.parent = predecessor
+      predecessor.body.append(expr)
+    }
+
+    // Kill {block}.
+    this.removeBlock(block)
+  }
+
+
+  fn removeBlockWithJumpTerm(this, block) {
+    const   term = block.body.last as ssa.Jump*
+    const target = term.target()
+    const  index = target.indexOfPredecessor(block)
+    this.removeValue(term)
+    this.removeBlock(block)
+    target.removePhiOperandsAt(index)
+  }
+
+
+  fn removeBlock(this, block) {
+    assert block.uses.isEmpty() && block.body.isEmpty()
+    this.function.body.remove(block)
+    delete block
+    ++this.removed.blocks
+  }
+}

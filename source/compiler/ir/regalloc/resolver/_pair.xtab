@@ -1,0 +1,359 @@
+
+import EdgeBundle from _edge
+
+struct InPrededecessor {
+  const  bundle = Bundle&{}
+  const liveout = UseRange*{}
+  const   moves = { transfers = 0, fills = 0, spills = 0 }
+
+  fn hasMoves(this) = this.moves.transfers + this.moves.fills + this.moves.spills
+
+  fn isSpilled(this) = !this.liveout.slot || this.moves.spills
+
+  fn initialize(this) {
+    const def = this.liveout.owner
+    for move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move.dst.owner == def {
+            assert !this.moves.spills
+            ++this.moves.transfers
+          }
+        }
+        case Fill {
+          if move.dst.owner == def {
+            assert !this.moves.spills
+            ++this.moves.fills
+          }
+        }
+        case Spill {
+          if move.src.owner == def {
+            assert !this.hasMoves() && move.src == this.liveout
+            ++this.moves.spills
+          }
+        }
+      }
+    }
+  }
+
+
+  fn hasTransferTo(this, dst) {
+    const def = this.liveout.owner
+    assert this.liveout.slot
+    for move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move.dst.owner == def {
+            assert move.src == this.liveout
+            return move if move.dst.slot == dst
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  fn deleteMoves(this) = this.bundle.deleteMovesOf(this.livein.owner)
+
+  fn spill(this) {
+    const edge = EdgeBundle{ bundle = this.bundle }
+    edge.spill(this.liveout)
+  }
+}
+
+
+struct InSuccessor {
+  const  bundle = Bundle&{}
+  const  livein = UseRange*{}
+  readonly move = Move*{}
+
+  fn isSpilled(this) = !this.livein.slot
+
+  fn initialize(this) {
+    const def = this.livein.owner
+    for move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move.dst.owner == def {
+            assert !this.move && move.dst == this.livein
+            this.move = move
+          }
+        }
+        case Fill {
+          if move.dst.owner == def {
+            assert !this.move && move.dst == this.livein
+            this.move = move
+          }
+        }
+        case Spill {
+          if move.src.owner == def {
+            assert !this.move
+            this.move = move
+          }
+        }
+      }
+    }
+  }
+
+  fn replaceWithFill(this) {
+    for i, move in this.bundle.moves {
+      switch move {
+        case Transfer {
+          if move == this.move {
+            delete move
+            this.bundle.moves.items[i] = new Fill{ dst = this.livein }
+            return
+          }
+        }
+      }
+    }
+    assert 0
+  }
+
+
+  fn transfer(this, src) {
+    const edge = EdgeBundle{ bundle = this.bundle }
+    edge.transfer(this.livein, src)
+  }
+
+
+  fn fill(this) {
+    const edge = EdgeBundle{ bundle = this.bundle }
+    edge.fill(this.livein)
+  }
+
+  fn spill(this, src) {
+    const edge = EdgeBundle{ bundle = this.bundle }
+    edge.spill(src)
+  }
+
+
+  fn deleteMoves(this) = this.bundle.deleteMovesOf(this.livein.owner)
+
+
+  fn pickSafeDestinationFromPredecessorMoves(this, inpred) {
+    const   def = this.livein.owner
+    const moves = inpred.bundle.moves
+    for var i = moves.length; --i >= 0; {
+      const move = moves.items[i]
+      switch move {
+        case Transfer {
+          if move.dst.owner == def {
+            return move.dst if !this.slotIsUsedByAnotherLiveInOrMove(move.dst.slot)
+          }
+        }
+        case Fill {
+          if move.dst.owner == def {
+            return move.dst if !this.slotIsUsedByAnotherLiveInOrMove(move.dst.slot)
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  fn slotIsUsedByAnotherLiveInOrMove(this, slot) {
+    for move in this.bundle.moves {
+      switch move {
+        case Transfer return true if move.dst.slot == slot || move.src.slot == slot
+        case Fill     return true if move.dst.slot == slot
+        case Spill    return true if move.src.slot == slot
+        default assert 0
+      }
+    }
+    const block = this.bundle.parent
+    for livein in block.liveins {
+      if livein != this.livein {
+        return true if livein.slot == slot
+      }
+    }
+    return false
+  }
+}
+
+
+struct PairedBundles {
+  const bottomOfPredecessor = Bundle&{}
+  const      topOfSuccessor = Bundle&{}
+
+  fn ensure(this, def) {
+    const predecessor = this.bottomOfPredecessor.parent
+    const   successor = this.topOfSuccessor.parent
+    const   lifetimes = predecessor.resolver.variables.items[def.value.index].lifetimes
+    const     liveout = lifetimes.items[predecessor.block.index].end
+    const      livein = lifetimes.items[successor.block.index].start
+
+    assert liveout && livein
+
+    const inpred = InPrededecessor {
+      bundle  = this.bottomOfPredecessor,
+      liveout = liveout
+    }
+
+    const insucc = InSuccessor {
+      bundle = this.topOfSuccessor,
+      livein = livein
+    }
+
+    inpred.initialize()
+    insucc.initialize()
+
+    if inpred.isSpilled() {
+      return this.handleLiveOutSpilled(inpred, insucc)
+    }
+
+    return this.handleLiveOutInRegisters(inpred, insucc)
+  }
+
+
+  fn handleLiveOutSpilled(this, inpred, insucc) {
+    //  Either there's a (* ⟵ liveout) spill move at bottom of predecessor or {liveout} is already in a
+    //  spill slot.
+
+    //  We don't expect any (xxx ⟵ liveout) transfers at bottom of predecessor. 
+    assert !inpred.moves.transfers
+
+    if inpred.liveout.slot {
+      //  We don't expect any (xxx ⟵ *) fills at bottom of predecessor if there's a (* ⟵ liveout) spill
+      //  at bottom of predecessor.
+      assert inpred.moves.spills == 1
+      assert !inpred.moves.fills
+    } // Else we may have one or more (xxx ⟵ *) fills at bottom of predecessor.
+
+    if insucc.isSpilled() {
+      //  Both {livein} and {liveout} are in spill slots. We expect exactly zero moves at top of successor.
+
+      if const move = insucc.move {
+        //  Remove the one and only (* ⟵ xxx) spill move at top of successor.
+        assert move is Spill
+        insucc.deleteMoves()
+      }
+      return false // Did not change {inpred}.
+    }
+
+    //  {livein} is in a register and {liveout} is in a spill slot. Expect exactly one (livein ⟵ *) fill
+    //  move at top of successor.
+
+    if const move = insucc.move {
+      switch move {
+        case Transfer {
+          //  There's a (livein ⟵ xxx) transfer at top of successor. Replace it with a fill.
+          insucc.replaceWithFill()
+          return false // Did not change {inpred}.
+        }
+        case Fill {
+          //  There's a (livein ⟵ *) fill at top of successor for a spilled {liveout}. Keep it.
+          return false // Did not change {inpred}.
+        }
+        default assert 0
+      }
+      insucc.deleteMoves()
+    }
+
+    //  Otherwise insert the (livein ⟵ *) fill move.
+    insucc.fill()
+
+    return false // Did not change {inpred}.
+  }
+
+
+  fn handleLiveOutInRegisters(this, inpred, insucc) {
+
+    //  {liveout} is in a register slot.
+    assert inpred.liveout.slot
+
+    //  We don't expect any (* ⟵ liveout) spills or (xxx ⟵ *) fills at bottom of predecessor. 
+    assert !inpred.moves.spills && !inpred.moves.fills
+
+    if insucc.isSpilled() {
+      //  {livein} is in a spill slot but {liveout} is in a register slot.
+
+      //  Expect at most one (* ⟵ xxx) spill at top of successor where {xxx} is either {liveout} or a
+      //  destination of an (xxx ⟵ liveout) transfer.
+
+      if const move = insucc.move {
+        switch move {
+          case Spill {
+            if inpred.liveout.slot == move.src.slot {
+              //  {liveout} is the xxxx of the (* ⟵ xxx) spill move.
+              return false // Did not change {inpred}.
+            }
+            if inpred.hasTransferTo(move.src.slot) {
+              //  {liveout} is not the xxx of the (* ⟵ xxx) spill move but there's an (xxx ⟵ liveout) 
+              //  transfer at bottom of predecessor.
+              return false // Did not change {inpred}.
+            }
+            //  {liveout} is not the xxx of the (* ⟵ xxx) spill move and there's no (xxx ⟵ liveout) 
+            //  transfer at bottom of predecessor.
+          }
+          default assert 0
+        }
+        insucc.deleteMoves()
+      }
+
+      //  We either:
+      //    (1) · spill at top of successor or
+      //    (2) · spill at bottom of predecessor
+      if const found = insucc.pickSafeDestinationFromPredecessorMoves(inpred) {
+        insucc.spill(found) // (1)
+        return false // Did not change {inpred}.
+      }
+
+      //  Cannot spill in successor. Spill in predecessor.
+      inpred.spill() // (2)
+
+      return true // Changed {inpred}.
+    }
+
+    //  Both {livein} and {liveout} are in registers.
+
+    //  Expect at most one 
+    //    (1) · (livein ⟵ xxx) transfer at the top of successor where {xxx} is either
+    //          {liveout} or a destination of an (xxx ⟵ liveout) transfer or
+    //    (2) · (livein ⟵ *) fill at the top of successor in which case we have to spill in predecessor
+    if const move = insucc.move {
+      switch move {
+        case Transfer {
+          if inpred.liveout.slot == move.src.slot {
+            //  {liveout} is the xxxx of the (livein ⟵ xxx) transfer move at top of successor.
+            return false // Did not change {inpred}.
+          }
+          if inpred.hasTransferTo(move.src.slot) {
+            //  There's an (xxx ⟵ liveout) transfer at bottom of predecessor where the xxx is the xxx
+            //  of the (livein ⟵ xxx) transfer move.
+            return false // Did not change {inpred}.
+          }
+        }
+        case Fill {
+          // Replace all (xxx ⟵ liveout) transfers at bottom of predecessor with a (* ⟵ liveout) spill.
+          inpred.spill()
+          return true // Changed {inpred}.
+        }
+        default assert with nameof(move)
+      }
+      insucc.deleteMoves()
+    }
+
+    //  If there are no (livein ⟵ xxx) transfers and both {livein} and {liveout} are in the same register,
+    //  do nothing.
+    if inpred.liveout.slot == insucc.livein.slot {
+      return false // Did not change {inpred}.
+    }
+
+    //  We either:
+    //    (1) · find an xxx from the (xxx ⟵ liveout) transfers at bottom of predecessor and create a
+    //          (livein ⟵ xxx) transfer at top of successor or
+    //    (2) · create a (livein ⟵ *) fill at top of successor and a (* ⟵ liveout) spill at bottom of
+    //          predecessor.
+    if const found = insucc.pickSafeDestinationFromPredecessorMoves(inpred) {
+      insucc.transfer(found) // (1)
+      return false // Did not change {inpred}.
+    }
+
+    //  Cannot spill in successor. Spill in predecessor.
+    insucc.fill()  // (2)
+    inpred.spill() // (2)
+
+    return true // Changed {inpred}.
+  }
+}

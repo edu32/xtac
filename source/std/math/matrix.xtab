@@ -1,0 +1,982 @@
+
+struct Matrix(T) {
+  readonly items = T**{}
+  readonly rows = 0
+  readonly cols = 0
+  readonly capacity = 0
+
+
+  fn dispose(this) {
+    import mfree from memory
+    if this.items {
+      mfree(this.items[0])
+    }
+    this.items = mfree(this.items)
+    this.rows = 0
+    this.cols = 0
+    this.capacity = 0
+  }
+
+
+  fn disposeWith(this, disposer) {
+    if !disposer {
+      disposer = disposer{ T&{} }
+    }
+    for var row = 0; row < this.rows; ++row {
+      for var col = 0; col < this.cols; ++col {
+        disposer(this.items[row][col])
+      }
+    }
+    this.dispose()
+  }
+
+
+  fn format(this, s, fmt="") {
+    for var i = 0; i < this.rows; ++i {
+      s.append("\r\n") if i
+      for var j = 0; j < this.cols; ++j {
+        s.append("  ")
+        this.items[i][j].format(s)
+      }
+    }
+  }
+
+
+  fn isEmpty(this) = this.rows == 0 || this.cols == 0
+  fn isNotEmpty(this) = this.rows > 0 && this.cols > 0
+  fn isSquare(this) = this.rows == this.cols
+  fn isRectangular(this) = this.rows != this.cols
+  fn isTall(this) = this.rows > this.cols
+  fn isFat(this) = this.rows < this.cols
+  fn isOverdetermined(this) = this.rows > this.cols
+  fn isUnderDetermined(this) = this.rows < this.cols
+
+
+  fn initialize(this, rows, cols) {
+    import malloc from memory
+    assert rows > 0 && cols > 0 && !this.items && !this.rows && !this.cols
+    this.capacity = rows * cols
+    this.rows = rows
+    this.cols = cols
+    const slab = malloc(T*{}, sizeof(T) * this.capacity)
+    this.items = malloc(null, sizeof(T*) * rows)
+    for var i = 0; i < rows; ++i {
+      this.items[i] = slab + (i * cols)
+    }
+  }
+
+
+  fn resize(this, rows, cols): this {
+    import malloc, mfree from memory
+    assert rows >= 0 && cols >= 0
+    const cap = rows * cols
+    var slab = T*{}
+    if cap > this.capacity {
+      if this.items {
+        slab = malloc(this.items[0], sizeof(T) * cap)
+      } else {
+        slab = malloc(T*{}, sizeof(T) * cap)
+      }
+      this.items = malloc(this.items, sizeof(T*) * rows)
+    } else if this.items {
+      if rows != this.rows || cols != this.cols {
+        slab = this.items[0]
+      }
+    } else if cap {
+      slab = malloc(this.items[0], sizeof(T) * cap)
+      this.items = malloc(this.items, sizeof(T*) * rows)
+    }
+    if slab {
+      this.items[0] = slab
+      for var i = 1; i < rows; ++i {
+        this.items[i] = slab + (i * cols)
+      }
+    }
+    if cap {
+      this.rows = rows
+      this.cols = cols
+    } else {
+      this.rows = 0
+      this.cols = 0
+    }
+    this.capacity = cap
+  }
+
+
+  fn random(this, rows, cols): this {
+    this.resize(rows, cols)
+    for var row = 0; row < rows; ++row {
+      for var col = 0; col < cols; ++col {
+        this.items[row][col] = math.randomDouble()
+      }
+    }
+  }
+
+
+  fn clone(this) {
+    const result = Matrix(T){}
+    result.copyFrom(this)
+    return result
+  }
+
+
+  fn fromBuffer(this, cols, buffer): this {
+    assert cols >= 0
+    return this if !cols || buffer.length == 0
+    assert buffer.length % cols == 0
+    const rows = buffer.length / cols
+    this.resize(rows, cols)
+    var k = 0
+    for var i = 0; i < rows; ++i {
+      for var j = 0; j < cols; ++j {
+        this.items[i][j] = buffer.items[k++]
+      }
+    }
+  }
+
+
+  fn fromArrays(this, arrays): this {
+    const rows = arrays.length
+    const cols = arrays[0].length
+    for a in arrays {
+      assert a.length == cols
+    }
+    this.resize(rows, cols)
+    for var i = 0; i < rows; ++i {
+      for var j = 0; j < cols; ++j {
+        this.items[i][j] = arrays[i][j]
+      }
+    }
+  }
+
+
+  fn copyFrom(this, other): this {
+    if other.isEmpty() {
+      return this.dispose()
+    }
+    this.resize(other.rows, other.cols)
+    import mcopy from memory
+    mcopy(this.items[0], other.items[0], sizeof(T) * other.capacity)
+  }
+
+
+  fn identity(this, rows, cols): this {
+    this.resize(rows, cols)
+    for var row = 0; row < rows; ++row {
+      for var col = 0; col < cols; ++col {
+        if row == col {
+          this.items[row][col] = 1.0
+        } else {
+          this.items[row][col] = 0.0
+        }
+      }
+    }
+  }
+
+
+  fn addColumn(this, rows) {
+    import mfree, malloc from memory
+    if !this.rows {
+      return this.initialize(rows, 1)
+    }
+    assert this.rows == rows && this.cols > 0 && this.items
+    const oldSlab = this.items[0]
+    const newCols = this.cols + 1
+    const newSlab = malloc(T*{}, sizeof(T) * this.rows * newCols)
+    for var i = 0; i < this.rows; ++i {
+      this.items[i] = newSlab + (i * newCols)
+      for var j = 0; j < this.cols; ++j {
+        this.items[i][j] = *(oldSlab + i * this.cols + j)
+      }
+    }
+    ++this.cols
+    mfree(oldSlab)
+  }
+
+
+
+  fn sweep(this, k) {
+    assert k < this.rows && k < this.cols
+    var akk = this.items[k][k] as Double
+    return false if !akk
+    for var i = 0; i < this.rows; ++i {
+      continue if i == k
+      for var j = 0; j < this.cols; ++j {
+        continue if j == k
+        this.items[i][j] = this.items[i][j] - this.items[i][k] * this.items[k][j] / akk
+      }
+    }
+    for var i = 0; i < this.rows; ++i {
+      continue if i == k
+      this.items[k][i] = this.items[k][i] / akk
+      this.items[i][k] = -this.items[i][k] / akk
+    }
+    this.items[k][k] = 1.0 / akk
+    return true
+  }
+
+
+  fn unsweep(this, k) {
+    assert k < this.rows && k < this.cols
+    const pivot = this.items[k][k] as Double
+    return false if !pivot
+    for var i = k; i < this.rows; ++i {
+      for var j = k; j < this.cols; ++j {
+        if i == k {
+          if j == k {
+            this.items[k][k] = -1.0 / pivot
+          } else {
+            this.items[k][j] = -this.items[k][j] / pivot
+          }
+        } else if j == k {
+          this.items[i][k] = -this.items[i][k] / pivot
+        } else {
+          this.items[i][j] = this.items[i][j] - (this.items[i][k] * this.items[k][j] / pivot)
+        }
+      }
+    }
+    return true
+  }
+
+
+  fn invert(this) {
+    for var k = 0; k < this.cols; ++k {
+      return false if !this.sweep(k)
+    }
+    return true
+  }
+
+
+  fn hessenberg(this, U) {
+    assert this.isNotEmpty() && this.isSquare()
+    if U.isNotEmpty() {
+      U.resize(this.rows, this.cols)
+    }
+    auto v = List(Double){}
+    v.setLength(this.rows)
+    auto tmp = List(Double){}
+    tmp.setLength(this.rows)
+    const kend = this.cols - 1
+    for var k = 1; k < kend; ++k { // O(n-2)
+      if !calc_v(this, v, k) {
+        return false
+      }
+      calc_a(this, v, tmp, U, k)
+    }
+    return true
+
+    fn calc_v(mat, v, kk) {      
+      var xnormSquared = 0.0
+      const row = kk
+      const col = kk - 1
+      for var i = row; i < mat.rows; ++i {
+        const x = mat.items[i][col]
+        xnormSquared += x * x
+      }
+      return false if !xnormSquared
+      const xnorm = math.sqrt(xnormSquared)
+      const x1 = mat.items[row][col]
+      const sign = (1.0 if x1 < 0.0 else -1.0)
+      const alpha = sign * xnorm 
+      const u1 = x1 - alpha
+      v.items[row] = u1
+      for var i = row + 1; i < mat.rows; ++i {
+        v.items[i] = mat.items[i][col]
+      }
+      const unormSquared = 2.0 * (xnormSquared - alpha * x1)
+      return false if !unormSquared
+      const unorm = math.sqrt(unormSquared)
+      for var i = row; i < mat.rows; ++i {
+        v.items[i] = v.items[i] / unorm
+      }
+      //println("row=#{row}; col=#{col}; x1=#{x1}; alpha=#{alpha}; u1=#{u1}; v.items[k]=#{v.items[row]}")
+      //println("x1(#{kk}) = #{x1}; sign(#{kk}) = #{sign}; xnorm^2(#{kk}) = #{xnormSquared}; xnorm(#{kk}) = #{xnorm}; unorm^2 = #{unormSquared} \r\nv(#{kk}) = #{v}")
+      return true
+    }
+
+    fn calc_a(mat, v, tmp, U, k) {
+      // PA = A - 2vv^TA
+      for var col = 0; col < mat.cols; ++col {
+        var vta = 0.0
+        for var row = k; row < mat.rows; ++row {
+          const a = mat.items[row][col]
+          tmp.items[row] = a
+          vta += v.items[row] * a
+        }
+        for var row = k; row < mat.rows; ++row {
+          const vvta = v.items[row] * vta
+          mat.items[row][col] = tmp.items[row] - 2.0 * vvta
+        }
+      }
+      // AP = A - 2Avv^T
+      for var row = 0; row < mat.rows; ++row {
+        var av = 0.0
+        for var col = k; col < mat.cols; ++col {          
+          const a = mat.items[row][col]
+          tmp.items[col] = a
+          av += v.items[col] * a
+        }
+        for var col = k; col < mat.cols; ++col {
+          const avv = v.items[col] * av
+          mat.items[row][col] = tmp.items[col] - 2.0 * avv
+        }
+      }
+      //println("H(#{k})\r\n#{mat}")
+      if U.isNotEmpty() {
+        if k == 1 {
+          U.items[0][0] = 1.0
+          for var col = k; col < mat.cols; ++col {
+            for var row = k; row < mat.rows; ++row {
+              if col == row {
+                U.items[row][col] = 1.0 - 2.0 * v.items[row] * v.items[col]
+              } else {
+                U.items[row][col] = -2.0 * v.items[row] * v.items[col]
+              }
+            }
+          }
+        } else {
+          for var row = 0; row < U.rows; ++row {
+            var uvt = 0.0
+            for var col = k; col < U.cols; ++col {          
+              const a = U.items[row][col]
+              tmp.items[col] = a
+              uvt += v.items[col] * a
+            }
+            for var col = k; col < U.cols; ++col {
+              const uvvt = v.items[col] * uvt
+              U.items[row][col] = tmp.items[col] - 2.0 * uvvt
+            }
+          }
+        }
+      }
+    }
+  }
+
+
+  fn eigen(this) {
+    assert this.isNotEmpty() && this.isSquare()
+    auto Q = Matrix(Double){}
+    auto R = Matrix(Double){}
+    auto U = Matrix(Double){}
+    auto V = Matrix(Double){}
+    auto values = List(Double){}
+    auto vectors = Matrix(Double){}
+    var ok = true
+    println("A\r\n#{this}")
+    U.resize(this.rows, this.cols)    
+    this.hessenberg(U)
+    println("H\r\n#{this}")
+    println("U\r\n#{U}")
+    Q.resize(this.rows, this.cols)
+    V.identity(this.rows, this.cols)
+    for var m = this.rows; --m >= 1; {
+      var k = 0
+      for ; ; ++k {
+        const shift = this.wilkinsonsShift()
+        this.subtractScalarFromDiagonal(shift)
+        auto qr = this.qr()
+        if qr.isNotOk() {
+          println("invalid qr at m = #{m}; k = #{k}")
+          break
+        }
+        qr.copyQ(Q)
+        qr.copyR(R)
+        auto RQ = R.multiplyNoTranspose(Q)
+        RQ.addScalarToDiagonal(shift)
+        this.copyFrom(RQ)
+        auto VQ = V.multiplyNoTranspose(Q)
+        V.copyFrom(VQ)
+        break if fabs(this.items[m][m - 1]) < 1e-15 || k > 1000
+      }
+      println("m=#{m}; k=#{k}; λ = #{this.items[m][m]}")
+      //this.resize(this.rows - 1, this.cols - 1)
+    }
+    println("m=0; k = #{this.items[0][0]}")
+    println("A\r\n#{this}")
+    println("V\r\n#{V}")
+    auto UV = U.multiplyNoTranspose(V)
+    println("UV\r\n#{UV}")
+    return (values, vectors, ok)
+  }
+
+  fn wilkinsonsShift(this) {
+    /*  +---+---+
+        | a | b |
+        +---+---+
+        | b | c |
+        +---+---+
+    */
+    assert this.cols <= this.rows
+    const n = this.cols - 1
+    const c = this.items[n][n]
+    return c if n == 0
+    const b = this.items[n-1][n]
+    const a = this.items[n - 1][n - 1]
+    const sigma = (a - c) / 2.0
+    const prod = sigma * sigma + b * b
+    return c if !prod
+    const denom = fabs(sigma) + sqrt(prod)
+    return c if !denom
+    const sgn = (1.0 if sigma >= 0.0 else -1.0)
+    return c - sgn * b * b / denom
+  }
+
+
+  fn qr(this) {
+    const result = QR{ R = this }
+    return result if this.isEmpty()
+    assert this.rows >= this.cols
+    result.normalizers.setLength(this.rows)
+    auto v = List(Double){}
+    v.setLength(this.rows)
+    auto tmp = List(Double){}
+    tmp.setLength(this.rows)
+    const kend = this.cols - 1
+    for var k = 0; k < kend; ++k {      
+      if !calc_v(this, v, k) {
+        return result.dispose()
+      }
+      calc_a(this, v, tmp, k)
+      store_v(this, v, result.normalizers, k)
+    }
+    return result
+
+    fn calc_v(mat, v, k) {
+      var xnormSquared = 0.0
+      for var row = k; row < mat.rows; ++row {
+        const x = mat.items[row][k]
+        xnormSquared += x * x
+      }
+      return false if !xnormSquared
+      const xnorm = math.sqrt(xnormSquared)
+      const x1 = mat.items[k][k]
+      const sign = (1.0 if x1 < 0.0 else -1.0)
+      const alpha = sign * xnorm 
+      const u1 = x1 - alpha
+      v.items[k] = u1
+      for var row = k + 1; row < mat.rows; ++row {
+        v.items[row] = mat.items[row][k]
+      }
+      const unormSquared = 2.0 * (xnormSquared - alpha * x1)
+      return false if !unormSquared
+      const unorm = math.sqrt(unormSquared)
+      for var row = k; row < mat.rows; ++row {
+        v.items[row] = v.items[row] / unorm
+      }
+      //println("x1(#{k}) = #{x1}; sign(#{k}) = #{sign}; xnorm^2(#{k}) = #{xnormSquared}; xnorm(#{k}) = #{xnorm}; unorm^2 = #{unormSquared} \r\nv(#{k}) = #{v}")
+      return true
+    }
+
+    fn calc_a(mat, v, tmp, k) {
+      // HA = A - 2vv^TA
+      for var col = k; col < mat.cols; ++col {
+        var sum = 0.0
+        for var row = k; row < mat.rows; ++row {
+          const a = mat.items[row][col]
+          tmp.items[row] = a
+          sum += v.items[row] * a
+        }
+        for var row = k; row < mat.rows; ++row {
+          mat.items[row][col] = tmp.items[row] - 2.0 * v.items[row] * sum
+        }
+      }
+      //println("X(#{k})\r\n#{mat}")      
+    }
+
+    fn store_v(mat, v, tmp2, k) {
+      const v1 = v.items[k]
+      tmp2.items[k] = v1
+      for var i = k + 1; i < mat.rows; ++i {
+        mat.items[i][k] = v.items[i] / v1
+      }
+    }
+  }
+
+  fn bidiagonalize(this) {
+    assert this.isNotEmpty()
+    auto tmp = List(Double){}
+    auto v = List(Double){}
+    const U = Matrix(Double){}
+    const V = Matrix(Double){}
+    U.identity(this.rows, this.rows)
+    V.identity(this.cols, this.cols) 
+    v.setLength(max(this.rows, this.cols))
+    tmp.setLength(max(this.rows, this.cols))
+    println("A\r\n#{this}")
+    const rows = this.rows
+    const cols = this.cols
+    for var k = 0; k < rows; ++k {
+      if this.isTall() {
+        break if k == cols
+      }
+      if !calc_v_of_U(this, v, k) {
+        return (U, V, false)
+      }
+      calc_U(this, U, v, tmp, k)
+      if k + 1 < cols {
+        if !calc_v_of_V(this, v, k) {
+          return (U, V, false)
+        }
+        calc_V(this, V, v, tmp, k)
+      }
+    }
+    //auto UB = U.multiplyNoTranspose(this)
+    //auto UBV = UB.multiplyNoTranspose(V)
+    //println("UBV\r\n#{UBV}")
+    println("B\r\n#{this}")
+    //println("U\r\n#{U}")
+    //println("V\r\n#{V}")
+    return (U, V, true)
+
+    fn calc_v_of_U(mat, v, k) {
+      const row = k
+      const col = k   
+      var xnormSquared = 0.0
+      for var i = row; i < mat.rows; ++i {
+        const x = mat.items[i][col]
+        xnormSquared += x * x
+      }
+      assert xnormSquared with "\r\n#{mat}"
+      return false if !xnormSquared
+      const xnorm = math.sqrt(xnormSquared)
+      const x1 = mat.items[row][col]
+      const sign = (1.0 if x1 < 0.0 else -1.0)
+      const alpha = sign * xnorm 
+      const u1 = x1 - alpha
+      v.items[row] = u1
+      for var i = row + 1; i < mat.rows; ++i {
+        v.items[i] = mat.items[i][col]
+      }
+      const unormSquared = 2.0 * (xnormSquared - alpha * x1)
+      return false if !unormSquared
+      const unorm = math.sqrt(unormSquared)
+      for var i = row; i < mat.rows; ++i {
+        v.items[i] = v.items[i] / unorm
+      }
+      return true
+    }
+
+    fn calc_v_of_V(mat, v, k) {
+      const row = k
+      const col = k + 1
+      var xnormSquared = 0.0
+      for var i = col; i < mat.cols; ++i {
+        const x = mat.items[row][i]
+        xnormSquared += x * x
+      }
+      return false if !xnormSquared
+      const xnorm = math.sqrt(xnormSquared)
+      const x1 = mat.items[row][col]
+      const sign = (1.0 if x1 < 0.0 else -1.0)
+      const alpha = sign * xnorm 
+      const u1 = x1 - alpha
+      v.items[col] = u1
+      for var i = col + 1; i < mat.cols; ++i {
+        v.items[i] = mat.items[row][i]
+      }
+      const unormSquared = 2.0 * (xnormSquared - alpha * x1)
+      return false if !unormSquared
+      const unorm = math.sqrt(unormSquared)
+      for var i = col; i < mat.cols; ++i {
+        v.items[i] = v.items[i] / unorm
+      }
+      return true
+    }
+
+    fn calc_U(mat, U, v, tmp, k) {
+      // PA = A - 2v(v^TA)
+      for var col = 0; col < mat.cols; ++col {
+        var vta = 0.0
+        for var row = k; row < mat.rows; ++row {
+          const a = mat.items[row][col]
+          tmp.items[row] = a
+          vta += v.items[row] * a
+        }
+        for var row = k; row < mat.rows; ++row {
+          const vvta = v.items[row] * vta
+          mat.items[row][col] = tmp.items[row] - 2.0 * vvta
+        }
+      }
+      // U = UH
+      for var row = 0; row < U.rows; ++row {
+        var sum = 0.0
+        for var col = k; col < U.cols; ++col {
+          const u = U.items[row][col]
+          tmp.items[col] = u
+          sum += u * v.items[col]
+        }
+        for var col = k; col < U.cols; ++col {
+          U.items[row][col] = tmp.items[col] - 2 * v.items[col] * sum
+        }
+      }
+    }
+
+    fn calc_V(mat, V, v, tmp, k) {
+      // AP = A - 2Avv^T
+      for var row = 0; row < mat.rows; ++row {
+        var av = 0.0
+        for var col = k + 1; col < mat.cols; ++col {          
+          const a = mat.items[row][col]
+          tmp.items[col] = a
+          av += v.items[col] * a
+        }
+        for var col = k + 1; col < mat.cols; ++col {
+          const avv = v.items[col] * av
+          mat.items[row][col] = tmp.items[col] - 2.0 * avv
+        }
+      }
+      // V = HV
+      for var col = 0; col < V.cols; ++col {
+        var sum = 0.0
+        for var row = k + 1; row < V.rows; ++row {
+          const x = V.items[row][col]
+          tmp.items[row] = x
+          sum += x * v.items[row]
+        }
+        for var row = k + 1; row < V.rows; ++row {
+          V.items[row][col] = tmp.items[row] - 2 * v.items[row] * sum
+        }
+      }
+    }
+  }
+
+
+  fn svd(this) {
+    assert this.rows && this.rows >= this.cols
+    auto (U, V, uvok) = this.bidiagonalize()
+    assert uvok
+    const colend = this.cols - 1
+    for {
+      for var i = 0; i < colend; ++i {
+        const e = EPSILON * (fabs(this.items[i][i]) + fabs(this.items[i + 1][i + 1]))
+        if this.items[i][i + 1] <= e {
+          this.items[i][i + 1] = 0.0
+        }
+      }
+      var p = 0, z = 0, q = 0
+      for var i = 0; i < colend; ++i {
+        if this.items[i][i + 1] {
+          if q {
+            ++q
+          } else {
+            ++z
+          }
+        } else if z {
+          ++q
+        } else {
+          ++p
+        }
+      }
+      if q == this.cols {
+        assert 0
+      }
+      var zeroesend = this.cols - q - 1
+      var zeroes = 0
+      for ; zeroes < zeroesend; ++zeroes {
+        break if this.items[zeroes][zeroes] == 0.0
+      }
+      if zeroes < zeroesend {
+        println("p = #{p}; z = #{z}; q = #{q} zeroes = #{zeroes}; zeroesend = #{zeroesend}")
+      } else {
+        svdStep(this, U, V, p, q)
+      }
+      break
+    }
+
+    fn svdStep(B, Q, P, p, q) {
+      const mu = computeCornerEigen(B)
+      println("mu = #{mu}")
+      return mu
+    }
+
+    fn computeCornerEigen(B) {
+      const n = B.cols
+      const a = B.items[n - 2][n - 2]
+      const b = B.items[n - 2][n - 1]
+      const c = B.items[n - 1][n - 2]
+      const d = B.items[n - 1][n - 1]
+      const trace = a + d
+      const determinant = a * d - b * c
+      const firstEigen = trace / 2.0 + math.sqrt(trace * trace / 4.0 - determinant)
+      const secondEigen = trace / 2.0 - math.sqrt(trace * trace / 4.0 - determinant)
+      var eigen = 0.0
+      const absoluteCorner = fabs(d)
+      println("firstEigen = #{firstEigen}; secondEigen = #{secondEigen}; absoluteCorner = #{absoluteCorner}")
+      return secondEigen if fabs(firstEigen) - absoluteCorner >= fabs(secondEigen) - absoluteCorner
+      return firstEigen
+    }
+  }
+
+
+  fn subtractScalarFromDiagonal(this, scalar) {
+    for var i = 0; i < this.rows; ++i {
+      if i < this.cols {
+        this.items[i][i] -= scalar
+      }
+    }
+  }
+
+  fn addScalarToDiagonal(this, scalar) {
+    for var i = 0; i < this.rows; ++i {
+      if i < this.cols {
+        this.items[i][i] += scalar
+      }
+    }
+  }
+
+  fn subtract(this, other) {
+    // result ← this - other
+    const result = Matrix(T){}
+    return result if this.isEmpty()
+    result.resize(this.rows, this.cols)
+    for var row = 0; row < this.rows; ++row {
+      for var col = 0; col < this.cols; ++col {
+        if row < other.rows {
+          if col < other.cols {
+            result.items[row][col] = this.items[row][col] - other.items[row][col]
+          } else {
+            result.items[row][col] = this.items[row][col]
+          }
+        } else {
+          result.items[row][col] = this.items[row][col]
+        }
+      }
+    }
+    return result
+  }
+
+  fn multiply(this, other) {
+    const A = this
+    const B = other
+    assert A.isNotEmpty() && B.isNotEmpty() && A.rows == B.rows
+    const C = Matrix(Double){}
+    C.initialize(A.cols, B.cols)
+    for var i = 0; i < A.rows; ++i {
+      for var j = 0; j < A.cols; ++j {
+        for var k = 0; k < B.cols; ++k {
+          C.items[j][k] += A.items[i][j] * B.items[i][k]
+        }
+      }
+    }
+    /*for var arow = 0; arow < A.cols; ++arow { // Transposed rows of A.
+      for var acol = 0; acol < A.rows; ++acol { // Transposed columns of A.
+        for var bcol = 0; bcol < B.cols; ++bcol {
+          C.items[arow][bcol] += A.items[arow][acol] * B.items[acol][bcol]
+        }
+      }
+    }*/
+    return C
+  }
+
+  fn multiplyNoTranspose(this, other) {
+    const A = this
+    const B = other
+    assert A.isNotEmpty() && B.isNotEmpty() && A.cols == B.rows
+    const C = Matrix(Double){}
+    C.initialize(A.rows, B.cols)
+    for var acol = 0; acol < A.cols; ++acol {
+      for var bcol = 0; bcol < B.cols; ++bcol {
+        for var arow = 0; arow < A.rows; ++arow {
+          C.items[arow][bcol] += A.items[arow][acol] * B.items[acol][bcol]
+        }
+      }
+    }
+    return C
+  }
+
+  /*fn transpose(this) {
+    for var k = 1; k < this.cols && k < this.rows; ++k {
+      const row = k
+      const col = k
+      for var i = k; --i >= 0 {
+        const left = this.items[row][i]
+        const up = this.items[i][col]
+        this.items[row][i] = up
+        this.items[i][col] = left
+      }
+    }
+  }*/
+}
+
+
+struct QR {
+  const R = Matrix(Double)&{}
+  const normalizers = List(Double){}
+
+
+  fn dispose(this) {
+    delete this.normalizers
+  }
+
+
+  fn isOk(this) = this.normalizers.length > 0
+  fn isNotOk(this) = this.normalizers.length == 0
+
+
+  fn getR(this) {
+    const R = this.R.clone()
+    this.copyR(R)
+    return R
+  }
+
+
+  fn copyR(this, R) {
+    assert this.R.items != R.items
+    R.resize(this.R.rows, this.R.cols)
+    for var row = 0; row < R.rows; ++row {
+      if row < R.cols {
+        for var col = 0; col < this.R.cols; ++col {
+          if col < row {
+            R.items[row][col] = 0.0
+          } else {
+            R.items[row][col] = this.R.items[row][col]
+          }
+        }
+      } else for var col = 0; col < R.cols; ++col {
+        R.items[row][col] = 0.0
+      }
+    }
+    return R
+  }
+
+
+  fn getQTransposed(this) { 
+    const Q = Matrix(Double){}
+    this.copyQTranspose(Q)
+    return Q
+  }
+
+
+  fn copyQTranspose(this, Q) { 
+    assert this.normalizers.length && this.R.rows && this.R.rows >= this.R.cols
+    const R = this.R
+    Q.resize(R.rows, R.rows)
+    auto tmp = List(Double){}
+    tmp.setLength(R.rows)
+    auto v = List(Double){}
+    v.setLength(R.rows)
+    for var k = 0; k < R.cols; ++k {
+      this.recoverV(v, k)
+      this.doCopyQ(Q, v, tmp, k, k == 0, true)
+    }
+    return Q
+  }
+
+
+  fn getQ(this) { 
+    const Q = Matrix(Double){}
+    this.copyQ(Q)
+    return Q
+  }
+
+
+  fn copyQ(this, Q) { 
+    assert this.normalizers.length && this.R.rows && this.R.rows >= this.R.cols
+    const R = this.R
+    Q.resize(R.rows, R.rows)
+    auto tmp = List(Double){}
+    tmp.setLength(R.rows)
+    auto v = List(Double){}
+    v.setLength(R.rows)
+    const last = R.cols - 1
+    for var k = R.cols; --k >= 0; { 
+      this.recoverV(v, k)
+      this.doCopyQ(Q, v, tmp, k, k == last, false)
+    }
+    return Q
+  }
+
+  fn doCopyQ(this, Q, v, tmp, k, isFirst, isTranspose) {
+    const startCol = (0 if isTranspose else k) 
+    if isFirst {
+      for var row = 0; row < Q.rows; ++row {
+        for var col = 0; col < Q.rows; ++col {
+          if row < k {
+            if row == col {
+              Q.items[row][col] = 1.0
+            } else {
+              Q.items[row][col] = 0.0
+            }
+          } else if col < k {
+            Q.items[row][col] = 0.0
+          } else if row == col {
+            Q.items[row][col] = 1.0 - 2.0 * v.items[row] * v.items[col]
+          } else {
+            Q.items[row][col] = -2.0 * v.items[row] * v.items[col]
+          }
+        }
+      }
+      return
+    }
+    for var col = startCol; col < Q.cols; ++col {
+      var sum = 0.0
+      for var row = k; row < Q.rows; ++row {
+        const q = Q.items[row][col]
+        tmp.items[row] = q
+        sum += q * v.items[row]
+      }
+      for var row = k; row < Q.rows; ++row {
+        Q.items[row][col] = tmp.items[row] - 2.0 * v.items[row] * sum
+      }
+    }
+  }
+
+  fn recoverV(this, v, k) {
+    const v1 = this.normalizers.items[k]
+    v.items[k] = v1
+    for var i = k + 1; i < this.R.rows; ++i {
+      v.items[i] = this.R.items[i][k] * v1
+    }
+  }
+
+
+  fn multiply(this, other, inplace = false) {
+    // result = H_1 × ... × H_k × ... H_p × other
+    assert this.normalizers.length && this.R.rows == other.rows
+    const R = this.R
+    auto v = List(Double){}
+    v.setLength(R.rows)
+    auto tmp = List(Double){}
+    tmp.setLength(R.rows)
+    const result = (other if inplace else other.clone())
+    for var k = R.cols; --k >= 0; {
+      this.recoverV(v, k)
+      this.doMultiply(result, v, tmp, k, false)
+    }
+    return result
+  }
+
+
+  fn multiplyWithTranspose(this, other, inplace = false) {
+    // result = H_p × ... × H_k × ... H_1 × other
+    assert this.normalizers.length && this.R.rows == other.rows
+    const R = this.R
+    auto v = List(Double){}
+    v.setLength(R.rows)
+    auto tmp = List(Double){}
+    tmp.setLength(R.rows)
+    const result = (other if inplace else other.clone())// if !inplace else other)
+    for var k = 0; k < R.cols; ++k {
+      this.recoverV(v, k)
+      this.doMultiply(result, v, tmp, k, true)
+    }
+    return result
+  }
+
+
+  fn doMultiply(this, W, v, tmp, k, isMultiplyingWithTranspose) {
+    const startCol = (0 if isMultiplyingWithTranspose else k)
+    const R = this.R
+    for var wcol = k; wcol < W.cols; ++wcol {
+      var sum = 0.0
+      for var wrow = k; wrow < W.rows; ++wrow {
+        const w = W.items[wrow][wcol]
+        tmp.items[wrow] = w
+        sum += v.items[wrow] * w
+      }
+      for var wrow = k; wrow < W.rows; ++wrow {
+        W.items[wrow][wcol] = tmp.items[wrow] - 2.0 * v.items[wrow] * sum
+      }
+    }
+  }
+}

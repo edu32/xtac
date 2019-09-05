@@ -1,0 +1,194 @@
+fn run(allocator, ids) {
+  auto pass = Resolver{ function = allocator.function }
+  pass.run(allocator.defs, ids)
+}
+
+export Bundle from _bundle
+export  Block from _block
+
+//⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+abstract struct Move {
+}
+
+//  dst ⟵ src
+struct Transfer : Move {
+  const dst = UseRange*{}
+  const src = UseRange*{}
+}
+
+//  dst ⟵⟶ src
+struct Exchange : Move {
+  const dst = UseRange*{}
+  const src = UseRange*{}
+}
+
+//  dst ⟵ *
+struct Fill : Move {
+  const dst = UseRange*{}
+}
+
+//  * ⟵ src
+struct Spill : Move {
+  const src = UseRange*{}
+}
+
+//⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+struct LifeTime {
+  var start = UseRange*{}
+  var   end = UseRange*{}
+}
+
+//⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+struct Variable {
+  const lifetimes = List(LifeTime){}
+  const  interval = { first = -1, last = -1 }
+
+  fn dispose(this) {
+    delete this.lifetimes
+  }
+}
+
+
+//⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻⸻
+struct Resolver {
+  const  function = ssa.Function*{}
+  const    blocks = List(Block){}
+  const variables = List(Variable){}
+
+  fn dispose(this) {
+    delete this.blocks    with fn(x) = delete x
+    delete this.variables with fn(x) = delete x
+  }
+
+  fn run(this, defs, ids) {
+    this.setupBlocks(defs)
+    this.setupLifeTimes(defs)
+    this.resolveMoves(defs)
+    import Inserter from inserter
+    auto inserter = Inserter{ resolver = this, ids = ids }
+    inserter.run(defs)
+  }
+
+
+  fn setupBlocks(this, defs) {
+    each block in this.function.blocks() {
+      assert block.index == this.blocks.length
+      this.blocks.append(Block{ block = block, resolver = this })
+    }
+
+    for bb in this.blocks {
+      bb.setup(defs)
+    }
+
+    for bb in this.blocks {
+      switch bb.block.body.last {
+        case ssa.Yield {} // Do nothing.
+
+        case term: ssa.Jump {
+          const target = term.target()
+          assert target.index >= 0 && target.index < this.blocks.length
+          const targetBlock = this.blocks.items[target.index]
+          targetBlock.predecessors.append(&bb)
+          bb.successors.append(&targetBlock)
+        }
+
+        case term: ssa.JumpIf {
+          const iftrue = term.iftrue()
+          const ifalse = term.ifalse()
+          assert iftrue.index >= 0 && iftrue.index < this.blocks.length
+          assert ifalse.index >= 0 && ifalse.index < this.blocks.length
+          const iftrueBlock = this.blocks.items[iftrue.index]
+          const ifalseBlock = this.blocks.items[ifalse.index]
+          iftrueBlock.predecessors.append(&bb)
+          ifalseBlock.predecessors.append(&bb)
+          bb.successors.append(&iftrueBlock)
+          bb.successors.append(&ifalseBlock)
+        }
+
+        case ssa.Return {}  // Do nothng.
+
+        default assert with nameof(bb.block.body.last)
+      }
+    }
+  }
+
+
+  fn setupLifeTimes(this, defs) {
+    for def in defs {
+
+      const variable = this.createVariable(def)
+
+      continue if def.ranges.isEmpty()
+
+      var firstLifeTime = -1
+      var  lastLifeTime = -1
+
+      for var range = def.ranges.first; range; range = range.qnext {
+
+        const start = this.blocks.items[range.start.value.parent.index]
+        const   end = this.blocks.items[range.end.value.parent.index]
+
+        assert start.block.index <= end.block.index
+
+        const rangeStart = range.start
+        const   rangeEnd = range.end
+
+        for var i = start.block.index; i <= end.block.index; ++i {
+          const    current = this.blocks.items[i]
+          const   lifetime = variable.lifetimes.items[i]            
+          const blockStart = &defs.items[current.block.body.first.index]
+          const   blockEnd = &defs.items[current.block.body.last.index]
+
+          if rangeStart <= blockStart {
+            assert !lifetime.start
+            lifetime.start = range
+            current.liveins.append(range)
+          }
+          if rangeEnd >= blockEnd {
+            assert !lifetime.end
+            lifetime.end = range
+            current.liveouts.append(range)
+          }
+
+          if firstLifeTime < 0 {
+            firstLifeTime = i
+          }
+          lastLifeTime = i
+        }
+      }
+      assert firstLifeTime >= 0 && lastLifeTime >= 0
+      variable.interval.first = firstLifeTime
+      variable.interval.last = lastLifeTime
+    }
+  }
+
+
+  fn createVariable(this, def) {
+    const variable = this.variables.appendOne()
+    if def.ranges.first {
+      variable.lifetimes.setLength(this.blocks.length)
+    }
+    return variable
+  }
+
+
+  fn resolveMoves(this, defs) {
+    for def in defs {
+      continue if def.ranges.isEmpty()
+      for var   range = def.ranges.first; range; range = range.qnext {
+        if const next = range.qnext {
+          if range.slot != next.slot {
+            const block = this.blocks.items[next.start.value.parent.index]
+            block.appendMove(dst = next, src = range, pos = next.start)
+          }
+        }
+      }
+    }
+    for block in this.blocks {
+      block.ensureLiveIns()
+    }
+    for block in this.blocks {
+      block.ensureLiveOuts()
+    }
+  }
+}

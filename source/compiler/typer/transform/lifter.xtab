@@ -1,0 +1,270 @@
+fn run(context, symbol) {
+  const pass = Lifter{ typer = context.typer }
+  pass.run(symbol)
+  context.update(pass)
+}
+
+
+struct Lifter {
+  const        typer = Typer&{}
+  readonly generator = ast.Object*{}
+  readonly parameter = ast.Symbol*{}
+  var      available = List(ast.Symbol*){}  
+  var    sharedIndex = 1
+  var          total = 0
+  var         shared = 0
+
+  fn run(this, symbol) {
+    const function = symbol.instance as ast.Function*
+    this.parameter = function.parameters.items[0]
+    this.generator = function.generator
+    this.markExistingFields()
+    function.scope = this.lift(function.scope) as ast.Scope*
+    this.available.dispose()
+  }
+
+  fn markExistingFields(this) {
+    for item in this.generator.scope.symbols {
+      const symbol = item.value
+      if const field = symbol.instance is ast.Field {
+        field.sharedIndex = this.sharedIndex++
+      }
+    }
+  }
+
+  fn liftScope(this, node): ast.Scope* {
+    assert node.bindingStatus.isDone()
+    this.liftStatements(node)
+    return node
+  }
+
+  fn liftIf(this, node): ast.If* {
+    assert node.bindingStatus.isDone()
+    node.condition = this.lift(node.condition)
+    this.liftStatements(node)
+    return node
+  }
+
+  fn liftLoop(this, node): ast.Loop* {
+    assert node.bindingStatus.isDone()
+    node.condition = this.lift(node.condition)
+    this.liftStatements(node)
+    return node
+  }
+
+  fn liftStatements(this, scope): void {
+    const startOfScopeLocals = this.generator.scope.symbols.length
+    for i, statement in scope.statements {
+      scope.statements.items[i] = this.lift(statement)
+    }
+    for item in scope.symbols {
+      const symbol = item.value
+      if const local = symbol.instance is ast.Local {
+        if !symbol.replacedBy && local.name != this.typer.ids.kw_retval {
+          this.cberr(local.pos, local) with {
+            println("unused generator local: #{it.name}")
+          }
+        }
+      }
+    }
+    for var i = startOfScopeLocals; i < this.generator.scope.symbols.length; ++i {
+      const symbol = this.generator.scope.symbols.items[i].value
+      const  field = symbol.instance as ast.Field*
+      var    found = false
+      assert field.sharedIndex
+      for available in this.available {
+        const availableField = available.instance as ast.Field*
+        if field.sharedIndex == availableField.sharedIndex {
+          found = true
+          break
+        }
+      }
+      if !found {
+        this.available.append(symbol)
+      }
+    }
+  }
+
+  fn lift(this, node): ast.Node* {
+    return node if !node
+    switch node {
+      case ast.Scope return this.liftScope(node)
+      case ast.If    return this.liftIf(node)
+      case ast.Loop  return this.liftLoop(node)
+
+      case ast.Assert {}
+      case ast.Goto   {}
+      case ast.Label  {}
+      case ast.Yield  {}
+
+      case ast.IfExpr {
+        node.condition = this.lift(node.condition)
+           node.iftrue = this.lift(node.iftrue)
+           node.ifalse = this.lift(node.ifalse)
+      }
+
+      case ast.Destructure {
+        for i, child in node.children {
+          node.children.items[i] = this.lift(child)
+        }
+      }
+
+      case ast.Assignment {
+        node.lhs = this.lift(node.lhs)
+        node.rhs = this.lift(node.rhs)
+      }
+      case ast.Arithmetic {
+        node.lhs = this.lift(node.lhs)
+        node.rhs = this.lift(node.rhs)
+      }
+
+      case ast.BinaryCondition {
+        node.lhs = this.lift(node.lhs)
+        node.rhs = this.lift(node.rhs)
+      }
+      case ast.UnaryCondition {
+        node.rhs = this.lift(node.rhs)
+      }
+
+      case ast.Cast {
+        node.value = this.lift(node.value)
+      }
+      case ast.TypeOf{}
+      case ast.SizeOf {
+        node.value = this.lift(node.value)
+      }
+      case ast.UnaryOp {
+        node.value = this.lift(node.value)
+      }
+      case ast.UnaryAssignment {
+        node.value = this.lift(node.value)
+      }
+      case ast.Address {
+        node.value = this.lift(node.value)
+      }
+      case ast.Dereference {
+        node.value = this.lift(node.value)
+      }
+
+      case ast.Initializer {
+        for argument in node.arguments {
+          argument.value = this.lift(argument.value)
+        }
+      }
+      case ast.Call {
+        node.name = this.lift(node.name)
+        for argument in node.arguments {
+          argument.value = this.lift(argument.value)
+        }
+      }
+      case ast.Intrinsic {
+        for argument in node.arguments {
+          argument.value = this.lift(argument.value)
+        }
+      }
+      case ast.ArrayIndex {
+         node.base = this.lift(node.base)
+        node.index = this.lift(node.index)
+      }
+
+      case ast.Name {
+        this.liftSymbol(node.symbol)
+        return this.liftName(node)
+      }
+      case ast.MemberName {
+        node.base = this.lift(node.base)
+        this.liftSymbol(node.symbol)
+      }
+
+      case ast.Quoted      {}
+      case ast.QuotedUtf16 {}
+      case ast.Constant    {}
+      default assert with nameof(node)
+    }
+    return node
+  }
+
+
+  fn liftSymbol(this, symbol) {
+    return if !symbol.instance
+    switch symbol.instance {
+      case array: ast.Array {
+        for i, child in array.children {
+          array.children.items[i] = this.lift(child)
+        }
+      }
+      case object: ast.Object {
+        for item in object.scope.symbols {
+          if const field = item.value.instance is ast.Field {
+            field.value = this.lift(field.value)
+          }
+        }
+      }
+    }
+  }
+
+
+  fn liftName(this, node): ast.Node* {
+    const    pos = node.pos
+    const symbol = node.symbol
+    if const local = symbol.instance is ast.Local {
+      return node if local.name == this.typer.ids.kw_retval
+      var replacer = symbol.replacedBy
+      if !replacer {
+        replacer = this.replaceLocal(symbol)
+      }
+      assert replacer.instance.type == symbol.instance.type
+      // (*self).replacer
+      const ioself = node
+      ioself.retarget(this.parameter)
+      const deref = new ast.Dereference{ 
+          pos = pos,
+        value = ioself,
+         type = this.generator.type
+      }
+      const member = new ast.MemberName{
+           pos = pos,
+        symbol = replacer,
+          type = replacer.instance.type,
+          base = deref       
+      }
+      return member
+    }
+    return node
+  }
+
+
+  fn replaceLocal(this, localSymbol) {
+    const  local = localSymbol.instance as ast.Local*
+    var replacer = this.makeField(localSymbol)
+    const  field = replacer.instance as ast.Field*
+    if this.available.length {
+      const      available = this.available.removeLast()
+      const availableField = available.instance as ast.Field*
+         field.sharedIndex = availableField.sharedIndex
+      ++this.shared
+    } else {
+      field.sharedIndex = this.sharedIndex++
+    }
+    localSymbol.replacedBy = replacer
+    ++this.total
+    return replacer
+  }
+
+
+  fn makeField(this, localSymbol) {
+    const local = localSymbol.instance as ast.Local*
+    const  name = this.typer.random(localSymbol.name)
+    const field = new ast.Field{ pos = local.pos, name = name, type = local.type,
+      value = new ast.Constant{ pos = local.pos, type = local.type }
+    }
+    const (fieldSymbol, dup) = this.generator.scope.appendSymbol(name, this.typer.nullTemplate, field)
+    assert !dup
+    return fieldSymbol
+  }
+
+
+  fn cberr(this, pos, ctx, cb) {
+    this.typer.cberr(pos, ctx, cb)
+  }
+}

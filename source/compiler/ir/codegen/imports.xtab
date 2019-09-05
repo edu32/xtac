@@ -1,0 +1,263 @@
+/*
+
+    +――――――――――――――――――+
+    |                  |
+    | DllNameTable     | ⟶ Null terminated string
+    |                  |
+    +――――――――――――――――――+
+    |                  |
+    | ImportsNameTable | ⟶ IMAGE_THUNK_DATA{ function = HintsName[i] }
+    |                  |
+    +――――――――――――――――――+
+    |                  |
+    | AddressTable     | ⟶ IMAGE_THUNK_DATA{ }
+    |                  |
+    +――――――――――――――――――+
+    |                  |
+    | HintsName        | ⟶ { UInt16, [n × Char] }
+    |                  |
+    +――――――――――――――――――+
+    | Directory        | ⟶ IMAGE_IMPORT_DESCRIPTOR{}
+    +――――――――――――――――――+
+
+*/
+
+
+import DataSection from pe
+
+
+struct IMAGE_IMPORT_DESCRIPTOR {
+  var originalFirstThunk = 0u32       // RVA to original unbound IAT (PIMAGE_THUNK_DATA)
+  var      timeDateStamp = 0u32       // 0 if not bound,
+                                      // -1 if bound, and real date\time stamp
+                                      //     in IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT (new BIND)
+                                      // O.W. date/time stamp of DLL bound to (Old BIND)
+
+  var forwarderChain = 0u32           // -1 if no forwarders
+  var           name = 0u32
+  var     firstThunk = 0u32           // RVA to IAT (if bound this IAT has actual addresses)
+}
+
+
+union IMAGE_THUNK_DATA {
+  var forwarderString = 0u64  // PBYTE 
+  var        function = 0u64  // PDWORD
+  var         ordinal = 0u64
+  var   addressOfData = 0u64  // PIMAGE_IMPORT_BY_NAME
+}
+
+
+define IMAGE_ALIGNOF_IMAGE_THUNK_DATA 8
+
+struct Dll {
+  var      name = DllName{}
+  var functions = List(DllFunction){}
+
+  fn dispose(this) {
+    delete this.functions
+  }
+}
+
+
+struct DllName {
+  var offset = 0
+  var  value = Identifier*{}
+}
+
+
+struct DllFunction {
+  var              value = ssa.Extern*{}
+  var    nameTableOffset = 0
+  var addressTableOffset = 0
+}
+
+
+struct Part {
+  var offset = 0 // Offset into image.
+  var length = 0
+}
+
+
+struct Imports {
+  var    dlls = List(Dll){}
+  var    data = DataSection&{}
+  const parts = {
+    dllNameTable     = Part{},
+    importsNameTable = Part{},
+    addressTable     = Part{},
+    hintsTable       = Part{},
+    directory        = Part{}
+  }
+
+
+  fn dispose(this) {
+    delete this.dlls with fn(x) = delete x
+  }
+
+
+  fn build(this, offset, prog, ids) {
+    const offsetOfImports = this.data.offsetOfLastByte()
+    this.parts.dllNameTable.offset = this.data.offsetOfLastByte()
+    this.buildDllNameTable(prog)
+    this.buildImportsNameTable()
+    this.buildAddressTable()
+    this.buildHintsTable()
+    this.buildImportDirectoryTable()
+    this.buildMswsockTable(prog, ids)
+    const length = this.data.offsetOfLastByte() - offsetOfImports
+    return offset + length
+  }
+
+
+  fn buildDllNameTable(this, prog) {
+    for ext in prog.data.externs {
+      var dll = Dll*{}
+      for found in this.dlls {
+        if found.name.value == ext.cdllName {
+          dll = found
+          break
+        }
+      }
+      var append = true
+      if dll {
+        for found in dll.functions {
+          if found.value == ext {
+            append = false
+            break
+          }
+        }
+      } else {
+        dll = this.dlls.append(Dll{ name = DllName{ value = ext.cdllName }})
+        dll.name.offset = this.data.offsetOfLastByte()
+        this.data.buffer.appendNullTerminatedString(ext.cdllName.text, ext.cdllName.length)
+      }
+      if append {
+        dll.functions.append(DllFunction{ value = ext })
+      }
+    }
+    this.parts.dllNameTable.length = this.data.offsetOfLastByte() - this.parts.dllNameTable.offset
+  }
+
+
+  fn buildImportsNameTable(this) {    
+    this.parts.importsNameTable.offset = this.data.align(IMAGE_ALIGNOF_IMAGE_THUNK_DATA)
+    for dll in this.dlls {
+      for function in dll.functions {
+        function.nameTableOffset = this.data.offsetOfLastByte()
+        this.createThunkData()
+      }
+      this.createThunkData()  //  Null terminator.
+    }
+    this.parts.importsNameTable.length = this.data.offsetOfLastByte() - this.parts.importsNameTable.offset
+  }
+
+
+  fn buildAddressTable(this) {
+    this.parts.addressTable.offset = this.data.offsetOfLastByte()
+    for dll in this.dlls {
+      for function in dll.functions {
+        function.addressTableOffset = this.data.offsetOfLastByte()
+        function.value.offset       = function.addressTableOffset
+        const thunk = this.createThunkData()
+        thunk.function = function.value.cfunc as UInt64
+      }
+      this.createThunkData()  //  Null terminator.
+    }
+    this.parts.addressTable.length = this.data.offsetOfLastByte() - this.parts.addressTable.offset
+  }
+
+
+  fn buildHintsTable(this) {
+    const one = 1u16
+    this.parts.hintsTable.offset = this.data.offsetOfLastByte()
+    for dll in this.dlls {
+      for function in dll.functions {
+        const    ext = function.value
+        const offset = this.data.align(sizeof(UInt16))
+        this.data.buffer.append(&one, sizeof(UInt16)) // Some random hint.
+        this.data.buffer.appendNullTerminatedString(ext.name.text, ext.name.length)
+        const entry = this.thunkAt(function.nameTableOffset)
+        entry.function = offset
+      }
+      this.createThunkData()  //  Null terminator.
+    }
+    this.parts.hintsTable.length = this.data.offsetOfLastByte() - this.parts.hintsTable.offset
+  }
+
+  fn buildImportDirectoryTable(this) {
+    this.parts.directory.offset = this.data.align(sizeof(UInt32))
+    for dll in this.dlls {
+      const descriptor = this.createImportDescriptor()
+      descriptor.originalFirstThunk = dll.functions.items[0].nameTableOffset
+      descriptor.name               = dll.name.offset
+      descriptor.firstThunk         = dll.functions.items[0].addressTableOffset
+    }
+    this.createImportDescriptor() // Null terminator.
+    this.parts.directory.length = this.data.offsetOfLastByte() - this.parts.directory.offset
+  }
+
+  fn buildMswsockTable(this, prog, ids) {
+    var global = prog.data.mswsock
+    var    dll = Dll*{}
+
+    //  Find the __MSWSOCK_FUNCTION_TABLE__ global.
+    return if !global // Did not find the __MSWSOCK_FUNCTION_TABLE__ global.
+
+    // Find the mswsock.dll
+    for found in this.dlls {
+      if found.name.value == ids.kw_mswsock_dll {
+        dll = found
+        break
+      }
+    }
+    return if !dll // Did not find the mswsock.dll.
+
+    const st = global.type.isaStruct()
+    if !st {
+      println("building __MSWSOCK_FUNCTION_TABLE__: #{global.name}: #{global.type} is of the wrong type")
+      return // Expected {st} to be a struct/object.
+    }
+
+    //  Now make each extern function found in mswsock.dll point to a field in {st}.
+    for function in dll.functions {
+      const ext = function.value
+      var field = ssa.Field*{}
+      for found in st.fields {
+        if ext.name == found.name {
+          field = found
+          break
+        }
+      }
+      if !field {
+        println("building __MSWSOCK_FUNCTION_TABLE__: did not find a field in #{global.type} matching #{ext.name}#[%<green>]")
+        continue
+      }
+      ext.offset = global.offset + field.offset // Now all references to {ext} are routed to {global.field}.
+    }
+  }
+
+  fn createThunkData(this) {
+    const offset = this.data.buffer.length
+    this.data.buffer.append(Byte*{}, sizeof(IMAGE_THUNK_DATA))
+    return (this.data.buffer.bytes + offset) as IMAGE_THUNK_DATA*
+  }
+
+
+  fn createImportDescriptor(this) {
+    const offset = this.data.buffer.length
+    this.data.buffer.append(Byte*{}, sizeof(IMAGE_IMPORT_DESCRIPTOR))
+    return (this.data.buffer.bytes + offset) as IMAGE_IMPORT_DESCRIPTOR*
+  }
+
+
+  fn thunkAt(this, offset) {
+    const diff = offset - this.data.offset
+    return (this.data.buffer.bytes + diff) as IMAGE_THUNK_DATA*
+  }
+
+  fn offsetOfImportDirectory(this) = this.parts.directory.offset
+  fn sizeOfImportDirectory(this)   = this.parts.directory.length
+
+  fn offsetOfAddressTable(this) = this.parts.addressTable.offset
+  fn sizeOfAddressTable(this)   = this.parts.addressTable.length
+}

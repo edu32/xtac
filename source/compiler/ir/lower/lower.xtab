@@ -1,0 +1,703 @@
+fn run(ctx) {
+  import worker from typer
+
+  auto        ts = TypeStore{ ast = ctx.ast, sources = ctx.sources, ids = ctx.ids }
+  const provider = worker.BatchProvider{ root = ctx.ast.scope }
+
+  ctx.ssa = ts.initialize()
+
+  //-------------------------------------------------------------------------------------------------------
+  //  __statics_initializer__
+  if !ts.errors {
+    const    start = time.clock()
+    auto generator = provider.globals()
+    const  context = {
+      singleThread = true,
+         generator = generator,
+             count = 0
+    }
+
+    import Translator from translator
+    auto pass = Translator{ ts = &ts }
+    pass.translateStaticsInitializer(context)
+
+    const elapsed = time.elapsed(start)
+    println("#{'__statics_initializer__'}#[%<darkblue|cyan>]: {\r\n\
+      #{'purpose'}#[%wl12]: #{'creates the __statics_initializer__ function'}#[%<darkyellow>],\r\n\
+      #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+      #{'singleThread'}#[%wl12]: #{true}#[%<green>],\r\n\
+      #{'globals'}#[%wl12]: #{context.count}#[%<gray>],\r\n\
+      #{'memory'}#[%wl12]: #{memory.mformat()} }")
+  }
+
+  //-------------------------------------------------------------------------------------------------------
+  //  translator
+  if !ts.errors {
+    const    start = time.clock()
+    auto generator = provider.filesAndFunctions()
+    const  context = {
+               srw = atomic.ExclusiveLock{},
+         generator = generator,
+                ts = &ts,
+             files = 0,
+         functions = 0,
+            locals = { created = 0, shared = 0 },
+      singleThread = false,
+      update = synchronized fn(self, data) {
+        self.locals.created += data.localIndex
+         self.locals.shared += data.sharedLocals
+      }
+    }
+    threads.run(context) with {
+      auto batch = List(ast.Symbol*){}
+      for it.generator.fill(batch) {
+        for symbol in batch {
+          import translator
+          translator.run(it, symbol)
+        }
+      }
+    }
+    assert ctx.ssa.code.main
+
+    if !ts.errors {
+      import translator
+      translator.initializeEntry(ctx, ts)
+    }
+
+    const elapsed = time.elapsed(start)
+    println("#{'translator'}#[%<darkblue|cyan>]: {\r\n\
+      #{'purpose'}#[%wl12]: #{'creates (non-ssa) ir for each function'}#[%<darkyellow>],\r\n\
+      #{'time'}#[%wl12]: #{elapsed}#[%<green>%d8]s,\r\n\
+      #{'singleThread'}#[%wl12]: #{context.singleThread}#[%<green>],\r\n\
+      #{'files'}#[%wl12]: #{context.files}#[%<gray>],\r\n\
+      #{'functions'}#[%wl12]: #{context.functions}#[%,%<gray>],\r\n\
+      #{'locals'}#[%wl12]: { created: #{context.locals.created}#[%,%<gray>], \
+                              shared: #{context.locals.shared}#[%,%<gray>] (#{100.0 * context.locals.shared / context.locals.created}#[%d2%<gray>]%) },\r\n\
+      #{'memory'}#[%wl12]: #{memory.mformat()} }")
+  }
+
+  ts.compact()
+
+  var fidx = 0
+  for file in ctx.ssa.code.files {
+    file.index = fidx++
+  }
+  for function in ctx.ssa.code.functions {
+    function.index = fidx++
+  }
+
+  return ts.errors
+}
+
+
+struct TypeList(T) {
+  const  srw = atomic.RecursiveExclusiveLock{}
+  const dict = Dict(T*){}
+  const   ts = TypeStore&{}
+
+  fn dispose(this) {
+    delete this.dict
+  }
+
+
+  synchronized fn appendObject(this, hash) {
+    const idx = this.dict.indexOf(hash)
+    return this.dict.items[idx].value if idx >= 0
+    const instance = hash.instance as ast.Object*
+    const    value = new ssa.Struct{ name = hash.name, size = hash.size, alignment = hash.alignment,
+      fileId = this.fileOf(hash) }
+    value.type.setSymbol(value)
+    this.ts.ir.data.structs.append(value)
+    this.dict.append(hash, value)
+    this.ts.putFields(hash, value)
+    return value
+  }
+
+
+  synchronized fn appendStruct(this, hash) {
+    const idx = this.dict.indexOf(hash)
+    return this.dict.items[idx].value if idx >= 0
+    const instance = hash.instance as ast.Struct*
+    const    value = new ssa.Struct{ name = instance.dotName, size = hash.size, alignment = hash.alignment,
+      fileId = this.fileOf(hash)  }
+    value.type.setSymbol(value)
+    this.ts.ir.data.structs.append(value)
+    this.dict.append(hash, value)
+    this.ts.putFields(hash, value)
+    return value
+  }
+
+
+  synchronized fn appendUnion(this, hash) {
+    const idx = this.dict.indexOf(hash)
+    return this.dict.items[idx].value if idx >= 0
+    const instance = hash.instance as ast.Union*
+    const    value = new ssa.Struct{ name = instance.dotName, size = hash.size, alignment = hash.alignment,
+      isaUnion = true, fileId = this.fileOf(hash) }
+    value.type.setSymbol(value)
+    this.ts.ir.data.structs.append(value)
+    this.dict.append(hash, value)
+    this.ts.putFields(hash, value)
+    return value
+  }
+
+
+  synchronized fn appendArray(this, length, element) {
+    import char from std
+    fn toHex64(text, n) {
+      for var i = 0; i < 64; i += 8 {
+        n = n >>> i
+        const hex = char.encodeBase16(n & 0xFF)
+        *text++ = hex[0]
+        *text++ = hex[1]
+      }
+    }
+    fn toHex32(text, n) {
+      for var i = 0; i < 32; i += 8 {
+        n = n >>> i
+        const hex = char.encodeBase16(n & 0xFF)
+        *text++ = hex[0]
+        *text++ = hex[1]
+      }
+    }
+    //                       pointers
+    //                           |
+    //                    length |
+    //                       |   |
+    //       symbol/builtin  |   |
+    //                   v   v   v
+    const array = Int8[ 16 + 8 + 8 ]
+    if const symbol = element.symbol {
+      toHex64(array.items, symbol as UInt64)
+    } else {
+      toHex64(array.items, element.kind as UInt64)
+    }
+    toHex32(array.items + 16, length as UInt32)
+    toHex32(array.items + 24, element.ptrs as UInt32)
+
+    import hash64 from math
+    const hash = hash64(array.items, array.length, 0)
+    const  idx = this.dict.indexOf(hash)
+    if idx >= 0 {
+      const found = this.dict.items[idx].value
+      assert found.length == length with "found = #{found.type} wanted = [#{length} × #{element}]"
+      assert found.element == element
+      return found
+    }
+    const value = new ssa.Array{ length = length, element = element, size = length * element.size(),
+      alignment = element.alignment() }
+    value.type.setSymbol(value)
+    this.ts.ir.data.arrays.append(value)
+    this.dict.append(hash, value)
+    return value
+  }
+
+
+  synchronized fn appendExtern(this, hash) {
+    const idx = this.dict.indexOf(hash)
+    return this.dict.items[idx].value if idx >= 0
+    const instance = hash.instance as ast.Function*
+    const    value = new ssa.Extern{ pos = instance.pos, name = instance.name,
+       cfunc = instance.cfunc,   cdllName = instance.cdllName,
+        size = SIZE_OF_POINTER, alignment = SIZE_OF_POINTER,
+      fileId = this.fileOf(hash) }
+    value.type.setSymbol(value)
+    this.ts.ir.data.externs.append(value)
+    this.dict.append(hash, value)
+    return value
+  }
+
+
+  synchronized fn appendFile(this, hash) {
+    const idx = this.dict.indexOf(hash)
+    return this.dict.items[idx].value if idx >= 0
+    const instance = hash.instance as ast.File*
+    const    value = new ssa.Function{ pos = instance.pos, name = instance.dotName, isaFile = true,
+          frame = new ssa.StackFrame{ name = instance.dotName },
+           size = SIZE_OF_POINTER,
+      alignment = SIZE_OF_POINTER,
+         fileId = instance.id + 1
+    }
+    value.fnreturn = ssa.tyVoid
+    value.type.setSymbol(value)
+    value.frame.type.setSymbol(value.frame)
+    this.ts.ir.code.files.append(value)
+    this.dict.append(hash, value)
+    if instance.dotName == this.ts.ids.kw_main {
+      assert !this.ts.ir.code.main
+      this.ts.ir.code.main = value
+    }
+    return value
+  }
+
+
+  synchronized fn appendFunction(this, hash) {
+    const idx = this.dict.indexOf(hash)
+    return this.dict.items[idx].value if idx >= 0
+    const instance = hash.instance as ast.Function*
+    const    value = new ssa.Function{ pos = instance.pos, name = instance.dotName,
+          frame = new ssa.StackFrame{ name = instance.dotName },
+           size = SIZE_OF_POINTER,
+      alignment = SIZE_OF_POINTER,
+         fileId = this.fileOf(hash)
+    }
+    value.type.setSymbol(value)
+    value.frame.type.setSymbol(value.frame)
+    this.ts.ir.code.functions.append(value)
+    this.dict.append(hash, value)
+    return value
+  }
+
+
+  synchronized fn appendGlobal(this, hash, type) {
+    const idx = this.dict.indexOf(hash)
+    return this.dict.items[idx].value if idx >= 0
+    const instance = hash.instance as ast.Global*
+    const    value = new ssa.Global{ pos = instance.pos, name = instance.name, type = type,
+      fileId = this.fileOf(hash) }
+    this.ts.ir.data.globals.append(value)
+    this.dict.append(hash, value)
+    if hash.name == this.ts.ids.kw_mswsock_function_table {
+      assert !this.ts.ir.data.mswsock
+      this.ts.ir.data.mswsock = value
+    }
+    return value
+  }
+
+
+  synchronized fn appendUtf8(this, node) {
+    const idx = this.dict.indexOf(node.value.hash)
+    return this.dict.items[idx].value if idx >= 0
+
+    const    name = this.ts.ids.kw_string
+    const  length = node.value.length + 1
+    const element = ssa.tyChar
+    const   array = new ssa.Array{ name = name, length = length, element = element, size = length,
+      alignment = 1 }
+    array.string.utf8 = node.value
+    array.type.setSymbol(array)
+    this.ts.ir.data.strings.append(array)
+
+    const value = new ssa.Global{ pos = node.pos, name = name, type = array.type }
+    this.ts.ir.data.globals.append(value)
+
+    this.dict.append(node.value.hash, value)
+    return value
+  }
+
+
+  synchronized fn appendUtf16(this, node) {
+    const idx = this.dict.indexOf(node.value.hash)
+    return this.dict.items[idx].value if idx >= 0
+
+    const    name = this.ts.ids.kw_wstring 
+    const  length = node.value.length + 1
+    const element = ssa.tyWChar
+    const   array = new ssa.Array{ name = name, length = length, element = element, size = length,
+      alignment = 2 }
+    array.string.utf16 = node.value
+    array.type.setSymbol(array)
+    this.ts.ir.data.strings.append(array)
+
+    const value = new ssa.Global{ pos = node.pos, name = name, type = array.type }
+    this.ts.ir.data.globals.append(value)
+
+    this.dict.append(node.value.hash, value)
+    return value
+  }
+
+  fn fileOf(symbol) {
+    if const instance = symbol.instance {
+      switch instance {
+        case ast.File return instance.id + 1
+      }
+    }
+    for var scope = symbol.scope; scope; scope = scope.parent {
+      switch scope.owner {
+        case file: ast.File return file.id + 1
+      }
+    }
+    assert 0
+    return 0
+  }
+}
+
+struct TypeStore {
+  const          ids = Identifiers&{}
+  const      sources = List(Source)*{}
+  const          ast = ast.Folder*{}
+  readonly        ir = ssa.Program*{}
+
+  readonly   structs = TypeList(ssa.Struct){}
+  readonly    arrays = TypeList(ssa.Array){}
+  readonly   externs = TypeList(ssa.Extern){}
+  readonly   globals = TypeList(ssa.Global){}
+  readonly   strings = TypeList(ssa.Global){}
+
+  readonly functions = TypeList(ssa.Function){}
+  readonly     files = TypeList(ssa.Function){}
+
+  readonly    errors = 0
+
+
+  fn dispose(this) {
+    delete this.structs
+    delete this.arrays
+    delete this.externs
+
+    delete this.globals
+    delete this.strings
+
+    delete this.functions
+    delete this.files
+  }
+
+
+  fn initialize(this) {
+    this.ir = new ssa.Program{} // TODO: put program name
+    this.ir.initialize()
+
+      this.structs = TypeList(ssa.Struct){ ts = this }
+       this.arrays = TypeList(ssa.Array){ ts = this }
+      this.externs = TypeList(ssa.Extern){ ts = this }
+      this.globals = TypeList(ssa.Global){ ts = this }
+      this.strings = TypeList(ssa.Global){ ts = this }
+
+    this.functions = TypeList(ssa.Function){ ts = this }
+        this.files = TypeList(ssa.Function){ ts = this }
+
+    var    name = this.ids.get("entry")
+    const entry = new ssa.Function{ pos = this.ast.pos, name = name, isaFile = true,
+          frame = new ssa.StackFrame{ name = name },
+           size = SIZE_OF_POINTER,
+      alignment = SIZE_OF_POINTER,
+    }
+    entry.fnreturn = ssa.tyVoid
+    entry.type.setSymbol(entry)
+    entry.frame.type.setSymbol(entry.frame)
+    this.ir.code.files.append(entry)
+    this.ir.code.entry = entry
+
+             name = this.ids.get("__statics_initializer__")
+    const statics = new ssa.Function{ pos = this.ast.pos, name = name,
+            frame = new ssa.StackFrame{ name = name },
+             size = SIZE_OF_POINTER,
+        alignment = SIZE_OF_POINTER
+    }
+    statics.fnreturn = ssa.tyVoid
+    statics.type.setSymbol(statics)
+    statics.frame.type.setSymbol(statics.frame)
+    this.ir.code.functions.append(statics)
+    this.ir.code.statics = statics
+
+    return this.ir
+  }
+
+
+  fn compact(this) {
+    this.ir.data.structs.compact()
+    this.ir.data.arrays.compact()
+    this.ir.data.externs.compact()
+    this.ir.data.globals.compact()
+    this.ir.code.functions.compact()
+    this.ir.code.files.compact()
+  }
+
+
+  fn typeOf(this, type): ssa.Type {
+    if const ptr = type.isIndirect() {
+      return this.typeOf(ptr.pointee).address()
+    }
+    if const symbol = type.isaSymbol() {
+      return this.typeOfSymbol(symbol)
+    }
+    if const k = type.isaBuiltin() {
+      switch k {        
+        case ast.Kind.Void       return ssa.tyVoid
+        case ast.Kind.Bool       return ssa.tyBool
+        case ast.Kind.WChar      return ssa.tyWChar
+        case ast.Kind.UInt8      return ssa.tyUInt8
+        case ast.Kind.UInt16     return ssa.tyUInt16
+        case ast.Kind.UInt32     return ssa.tyUInt32
+        case ast.Kind.UInt64     return ssa.tyUInt64
+        case ast.Kind.Char       return ssa.tyChar
+        case ast.Kind.Int8       return ssa.tyInt8
+        case ast.Kind.Int16      return ssa.tyInt16
+        case ast.Kind.Int32      return ssa.tyInt32
+        case ast.Kind.Int64      return ssa.tyInt64
+        case ast.Kind.Float      return ssa.tyFloat
+        case ast.Kind.Double     return ssa.tyDouble
+        case ast.Kind.Floatx4    return ssa.tyFloatx4
+        case ast.Kind.Doublex2   return ssa.tyDoublex2
+        case ast.Kind.UInt8x16   return ssa.tyUInt8x16
+        case ast.Kind.UInt16x8   return ssa.tyUInt16x8
+        case ast.Kind.UInt32x4   return ssa.tyUInt32x4
+        case ast.Kind.UInt64x2   return ssa.tyUInt64x2
+        case ast.Kind.Int8x16    return ssa.tyInt8x16
+        case ast.Kind.Int16x8    return ssa.tyInt16x8
+        case ast.Kind.Int32x4    return ssa.tyInt32x4
+        case ast.Kind.Int64x2    return ssa.tyInt64x2
+        case ast.Kind.Floatx8    return ssa.tyFloatx8
+        case ast.Kind.Doublex4   return ssa.tyDoublex4
+        case ast.Kind.UInt8x32   return ssa.tyUInt8x32
+        case ast.Kind.UInt16x16  return ssa.tyUInt16x16
+        case ast.Kind.UInt32x8   return ssa.tyUInt32x8
+        case ast.Kind.UInt64x4   return ssa.tyUInt64x4
+        case ast.Kind.Int8x32    return ssa.tyInt8x32
+        case ast.Kind.Int16x16   return ssa.tyInt16x16
+        case ast.Kind.Int32x8    return ssa.tyInt32x8
+        case ast.Kind.Int64x4    return ssa.tyInt64x4
+        default assert with nameof(k)
+      }
+    }
+    assert with nameof(type.kind)
+    return ssa.Type{}
+  }
+
+
+  fn typeOfSymbol(this, symbol): ssa.Type {
+    if const instance = symbol.instance {
+      if symbol.layoutStatus.isNotDone() {
+        this.cberr(instance.pos, instance) with {
+          println("type needs layout\r\n\t\
+            → found: #{it.type}")
+        }
+        return ssa.tyUnknown
+      }
+      switch instance {
+        case ast.File       return this.typeOfFile(symbol)
+        case ast.Struct     return this.typeOfStruct(symbol)
+        case ast.Enum       return this.typeOf(instance.valueType)
+        case ast.Union      return this.typeOfUnion(symbol)
+        case ast.Function   return this.typeOfFunction(symbol)
+        
+        case ast.Array      return this.typeOfArray(symbol)
+        case ast.Object     return this.typeOfObject(symbol)
+        case ast.FixedArray return this.typeOfFixedArray(symbol)
+
+        default assert with nameof(instance)
+      }
+    } else if const template = symbol.template {
+      switch template {
+        case src.Function return ssa.tyVoid.address()
+        default this.cberr(template.pos, template) with {
+          println("uninstantiated #{nameof(it)} when lowering")
+        }
+      }
+    } else {
+      assert 0
+    }
+    return ssa.tyUnknown
+  }
+
+
+  fn typeOfFile(this, symbol): ssa.Type {
+    assert !symbol.replacedBy
+    return this.files.appendFile(symbol).type
+  }
+
+
+  fn typeOfStruct(this, symbol): ssa.Type {
+    var hash = symbol
+    var   st = ssa.Struct*{}
+    if const replacer = symbol.replacedBy {
+      assert replacer.layoutStatus.isDone()
+      hash = replacer
+      switch hash.instance {
+        case ast.Struct st = this.structs.appendStruct(hash)
+        case ast.Object st = this.structs.appendObject(hash)
+        default assert with nameof(hash.instance)
+      }
+    } else {
+      st = this.structs.appendStruct(hash)
+    }
+    if hash != symbol {
+      synchronize(this.structs)
+      this.updateReplacedFields(symbol, st)
+    }
+    return st.type
+  }
+
+
+  fn typeOfUnion(this, symbol): ssa.Type {
+    var hash = symbol
+    if const replacer = symbol.replacedBy {
+      assert replacer.layoutStatus.isDone()
+      hash = replacer
+    }
+    const st = this.structs.appendUnion(hash)
+    if hash != symbol {
+      synchronize(this.structs)
+      this.updateReplacedFields(symbol, st)
+    }
+    return st.type
+  }
+
+
+  fn typeOfObject(this, symbol): ssa.Type {
+    var hash = symbol
+    var   st = ssa.Struct*{}
+    if const replacer = symbol.replacedBy {
+      assert replacer.layoutStatus.isDone()
+      hash = replacer
+      switch hash.instance {
+        case ast.Struct st = this.structs.appendStruct(hash)
+        case ast.Object st = this.structs.appendObject(hash)
+        default assert with nameof(hash.instance)
+      }
+    } else {
+      st = this.structs.appendObject(hash)
+    }
+    if hash != symbol {
+      synchronize(this.structs)
+      this.updateReplacedFields(symbol, st)
+    }
+    return st.type
+  }
+
+
+  fn putFields(this, symbol, st): void {
+    const instance = symbol.instance
+    var      scope = ast.Scope*{}
+    switch instance {
+      case ast.Struct scope = instance.scope
+      case ast.Union  scope = instance.scope
+      case ast.Object scope = instance.scope
+      default assert with nameof(instance)
+    }
+    for nv in scope.symbols {
+      const      sym = nv.value
+      if const field = sym.instance is ast.Field {
+        const   type = this.typeOf(field.type)
+        const     ir = st.appendField(field.name, type, offset = sym.offset)
+            field.ir = ir
+      }
+    }
+    st.fields.compact()
+  }
+
+
+  fn updateReplacedFields(this, symbol, st): void {
+    const instance = symbol.instance
+    var      scope = ast.Scope*{}
+    switch instance {
+      case ast.Struct scope = instance.scope
+      case ast.Union  scope = instance.scope
+      case ast.Object scope = instance.scope
+      default assert with nameof(instance)
+    }
+    var i = 0
+    for nv in scope.symbols {
+      const    value = nv.value
+      if const field = value.instance is ast.Field {
+        assert i < st.fields.length with "#{i} < #{st.fields.length}; #{st.name}"
+        const ir = st.fields.items[i]
+        if field.ir {
+          assert field.ir == ir
+        } else {
+          const type = this.typeOf(field.type)
+            field.ir = ir
+          assert field.name == ir.name && ir.type == type && value.offset == ir.offset
+        }
+        ++i
+      }
+    }
+  }
+
+
+  fn typeOfArray(this, symbol) {
+    return this.getArrayOf(symbol).type
+  }
+
+
+  fn typeOfFixedArray(this, symbol) {
+    return this.getArrayOf(symbol).type
+  }
+
+
+  fn getArrayOf(this, symbol) {
+    var hash = symbol
+    if const replacer = symbol.replacedBy {
+      assert replacer.layoutStatus.isDone()
+      hash = replacer
+    }
+    const instance = hash.instance
+    switch instance {
+      case ast.Array
+        return this.arrays.appendArray(instance.children.length, this.typeOf(instance.element()))
+      case ast.FixedArray
+        return this.arrays.appendArray(instance.length, this.typeOf(instance.element))
+    }
+    assert 0
+    return null
+  }
+
+
+  fn typeOfFunction(this, symbol) {
+    var hash = symbol
+    if const replacer = symbol.replacedBy {
+      assert replacer.layoutStatus.isDone()
+      hash = replacer
+    }
+    const instance = symbol.instance as ast.Function*
+    if instance.keyword == Tok.Extern {
+      return this.externs.appendExtern(hash).type
+    }
+    return this.functions.appendFunction(hash).type
+  }
+
+
+  fn stringOf(this, node) {
+    return this.strings.appendUtf8(node)
+  }
+
+
+  fn utf16Of(this, node) {
+    return this.strings.appendUtf16(node)
+  }
+
+
+  fn globalOf(this, node, type) {
+    return this.globals.appendGlobal(node, type)
+  }
+
+
+  fn fieldOf(this, symbol) {
+    const field = symbol.instance as ast.Field*
+    if !field.ir {
+      this.typeOf(symbol.scope.owner.type)
+      assert field.ir
+    }
+    return field.ir as ssa.Field*
+  }
+
+
+  fn err(this, pos, msg) {    
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.error(source, pos.range, "translator", msg)
+    ++this.errors
+  }
+
+
+  fn info(this, pos, msg) {    
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.info(source, pos.range, "translator", msg)
+  }
+
+
+  fn cberr(this, pos, ctx, cb) {    
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.errorWithCallBack(source, pos.range, "translator", ctx, cb)
+    ++this.errors
+  }
+
+
+  fn cbinfo(this, pos, ctx, cb) {    
+    assert pos.file >= 0
+    const source = this.sources.items[pos.file]
+    diagnostics.infoWithCallBack(source, pos.range, "translator", ctx, cb)
+  }
+}

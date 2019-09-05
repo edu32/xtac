@@ -1,0 +1,2297 @@
+import Constant from make
+import   Locals from make
+import     Make from make
+import     sema from compiler.typer
+
+
+fn run(context, symbol) {
+  auto pass = Translator{ ts = context.ts }
+  switch symbol.instance {
+    case ast.File {
+      atomic.increment(&context.files)
+      pass.translateFile(symbol)
+    }
+    case ast.Function {
+      atomic.increment(&context.functions)
+      pass.translateFunction(symbol)
+    }
+    default assert with nameof(symbol.instance)
+  }
+  context.update(pass.make)
+}
+
+
+fn initializeEntry(context, ts) {
+  auto pass = Translator{ ts = ts }
+  pass.translateEntry(context)
+}
+
+
+struct Translator {
+  const      ts = TypeStore*{}
+  const nulldst = ssa.Value*{}
+  readonly make = Make{}
+
+
+  fn dispose(this) {
+    delete this.make
+  }
+
+  fn translateStaticsInitializer(this, context) {
+    /*  Translation 🡓
+          ƒ() → Void {
+            ...
+            return void
+          }
+    */
+    const function = this.ts.ir.code.statics
+    auto    locals = Locals{}
+         this.make = Make{ ctx = this, function = function }
+
+    this.make.openFunction(ast.Scope*{}, locals)
+
+    auto batch = List(ast.Symbol*){}
+    for context.generator.fill(batch) {
+      for symbol in batch {
+        ++context.count
+        this.translateGlobal(symbol)
+      }
+    }
+
+    this.make.closeFunction(ast.Scope*{}, locals)
+  }
+
+
+  fn translateGlobal(this, symbol): void {
+    const node = symbol.instance as ast.Global*
+    const type = this.ts.typeOf(node.type)
+
+    if node.ir {
+      this.ts.cberr(node.pos, symbol) with {
+        const node = it.instance as ast.Global*
+        const   ir = node.ir as ssa.Value*
+        println("are your globals recursing?\r\n\t\
+          → found: #{node.name}: #{node.type}\r\n\t\
+          →   ssa: #{nameof(ir)} #{ir.type}")
+      }
+      return
+    }
+
+    const global = this.ts.globalOf(symbol, type)
+         node.ir = global
+
+    if type.isLoadable() {
+      const rhs = this.translate(this.nulldst, node.value)
+      if !rhs {
+        return
+      }
+
+      assert global.type == rhs.type
+
+      if const constant = rhs is Constant {
+        //  constant embedded directly into data section
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        global.initializer = ssa.Constant{ value = constant.value, type = constant.type }
+        this.make.freeConstant(constant)
+        return
+      }
+
+      //  global initialized in __statics_initializer__
+      //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+      //  data[global] ⟵ rhs
+      const elem = this.make.globalAt(node.pos, global)
+      this.make.store(node.pos, elem, rhs)
+      return
+    }
+
+    // global initialized in __statics_initializer__
+    //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+    //  data[global] ⟵ rhs
+    const elem = this.make.globalAt(node.pos, global)
+    this.translate(elem, node.value)
+  }
+
+
+  fn translateEntry(this, context) {
+    /*  Translation 🡓
+          ƒ() → Void {
+            for file in code.files {
+              call code[file] with ()
+            }
+            return void
+          }
+    */
+    const  entry = context.ssa.code.entry
+    auto  locals = Locals{}
+       this.make = Make{ ctx = this, function = entry }
+
+    this.make.openFunction(ast.Scope*{}, locals)
+
+    const arguments = List(ssa.Value*){}
+    
+    this.make.call(entry.pos, this.make.functionAt(entry.pos, context.ssa.code.statics), arguments,
+        ssa.tyVoid, this.nulldst)
+
+    for file in context.ssa.code.files {
+      continue if file == context.ssa.code.main || file == entry
+      this.make.call(entry.pos, this.make.fileAt(entry.pos, file), arguments, ssa.tyVoid, this.nulldst)
+    }
+
+
+    this.make.call(entry.pos, this.make.fileAt(entry.pos, context.ssa.code.main), arguments, ssa.tyVoid,
+      this.nulldst)
+
+    this.make.closeFunction(ast.Scope*{}, locals)
+  }
+
+
+  fn translateFile(this, symbol) {
+    /*  Translation 🡓
+          ƒ() → Void {
+            ...
+            return void
+          }
+    */
+    assert symbol.layoutStatus.isDone()
+    const instance = symbol.instance as ast.File*
+    const     type = this.ts.typeOf(instance.type)
+    const     file = type.isaFile()
+    assert file
+    this.translateFunctionScope(instance.scope, List(ast.Symbol*)*{}, file, ssa.tyVoid)
+  }
+
+
+  fn translateFunction(this, symbol) {
+    /*  Translation 🡓
+          ƒ() → T {
+            ...
+            return retval:T
+          }
+    */
+    assert symbol.layoutStatus.isDone() && !symbol.replacedBy
+
+    const instance = symbol.instance as ast.Function*
+    const    found = this.ts.typeOf(instance.type)
+    const fnreturn = this.ts.typeOf(instance.fnreturn)
+
+    if fnreturn.isUnknown() {
+      this.ts.cberr(instance.pos, instance.fnreturn) with {
+        println("could not translate fnreturn\r\n\t\
+          → fnreturn: #{it}")
+      }
+    }
+
+    else if const function = found.isaFunction() {
+      this.translateFunctionScope(instance.scope, &instance.parameters, function, fnreturn)
+    }
+
+    else if const function = found.isanExtern() {
+      this.translateExternScope(instance, function, fnreturn)  
+    }
+
+    else this.ts.cberr(instance.pos, found) with {
+      println("expected a function or extern for a function symbol\r\n\t\
+        → found: #{it}")
+    }
+  }
+
+
+  fn translateFunctionScope(this, scope, astParameters, function, fnreturn) {
+    /*  ƒ( parameters ) → fnreturn {
+        entry:
+          ...parameters...
+        exit:
+          ...
+        }
+    */
+    function.fnreturn = fnreturn
+
+    auto  locals = Locals{}
+
+    this.make = Make{ ctx = this, function = function, astFunction = scope.owner is ast.Function }
+
+    this.make.openFunction(scope, locals)
+
+    if astParameters && astParameters.length {
+      for i, param in astParameters {
+        const   parameter = param.instance as ast.Parameter*
+        const isaReference = parameter.type.isaReference()
+        const         type = this.ts.typeOf(parameter.type)        
+        if i > 3 || parameter.addressIsTaken {
+          parameter.ir = this.make.stackParameter(parameter.pos, parameter.name, i, type)
+        } else {
+          parameter.ir = this.make.parameter(parameter.pos, parameter.name, i, type)
+        }
+      }
+    }
+    
+    //println("@@#{function.type}")
+
+    this.translateNodes(scope)
+
+    this.make.closeFunction(scope, locals)
+
+    function.parameters.compact()
+  }
+
+
+  fn translateExternScope(this, instance, function, fnreturn) {
+    function.fnreturn = fnreturn
+    for i, param in instance.parameters {
+      const parameter = param.instance as ast.Parameter*
+      const      type = this.ts.typeOf(parameter.type)
+      function.parameters.append(type)
+    }
+    function.parameters.compact()
+    //println("#{function.type}")
+  }
+
+
+  fn translateNodes(this, scope): void {    
+    this.createScopeLocals(scope.symbols)
+    for statement in scope.statements {
+      this.translate(ssa.Value*{}, statement)
+    }
+  }
+
+
+  fn createScopeLocals(this, symbols) {
+    if const astFunction = this.make.astFunction {
+      if astFunction.generator {
+        return this.createGeneratorScopeLocals(symbols)
+      }
+    }
+    for item in symbols {
+      const      symbol = item.value
+      if const instance = symbol.instance is ast.Local {
+        assert !instance.ir
+        assert !symbol.replacedBy
+        if instance.name == this.ts.ids.kw_retval {
+          assert this.make.retval
+          instance.ir = this.make.retval
+        } else if instance.requiresStackFrameSlot() {
+          instance.ir = this.make.local(instance.pos, instance.name, this.ts.typeOf(instance.type))
+        } else if instance.isUsedInReturn {
+          assert this.make.retval
+          instance.ir = this.make.retval
+        }
+      }
+    }
+  }
+
+
+  fn createGeneratorScopeLocals(this, symbols) {    
+    for item in symbols {
+      const      symbol = item.value
+      if const instance = symbol.instance is ast.Local {
+        if symbol.replacedBy {
+          assert instance.name != this.ts.ids.kw_retval
+          continue
+        }
+        assert instance.name == this.ts.ids.kw_retval
+        assert this.make.retval
+      }
+    }
+  }
+
+
+  fn translate(this, dst, node): ssa.Value* {
+    return null if !node
+    assert dst !is ssa.Local
+    switch node {
+      case ast.Scope        return this.translateScope(dst, node)
+      case ast.If           return this.translateIf(dst, node)
+      case ast.Loop         return this.translateLoop(dst, node)
+
+      case ast.Assert       return this.translateAssert(dst, node)
+      case ast.Goto         return this.translateGoto(dst, node)
+      case ast.Label        return this.translateLabel(dst, node)
+      case ast.Yield        return this.translateYield(dst, node)
+
+      case ast.IfExpr       return this.translateIfExpr(dst, node, ssa.Block*{})
+
+      case ast.Destructure      return this.translateDestructure(dst, node)
+      case ast.Assignment       return this.translateAssignment(dst, node)
+      case ast.Arithmetic       return this.translateArithmetic(dst, node)
+
+      case ast.BinaryCondition  return this.translateBinaryCondition(dst, node)
+      case ast.UnaryCondition   return this.translateUnaryCondition(dst, node)
+
+      case ast.Cast             return this.translateCast(dst, node)
+      case ast.TypeOf           return this.translateTypeOf(dst, node)
+      case ast.SizeOf           return this.translateSizeOf(dst, node)
+      case ast.UnaryOp          return this.translateUnaryOp(dst, node)
+      case ast.UnaryAssignment  return this.translateUnaryAssignment(dst, node)
+      case ast.Address          return this.translateAddress(dst, node)
+      case ast.Dereference      return this.translateDereference(dst, node)
+
+      case ast.Initializer  return this.translateInitializer(dst, node)
+      case ast.Call         return this.translateCall(dst, node)
+      case ast.Intrinsic    return this.translateIntrinsic(dst, node)
+      case ast.ArrayIndex   return this.translateArrayIndex(dst, node)
+
+      case ast.Name            return this.translateName(dst, node)
+      case ast.MemberName      return this.translateMemberName(dst, node)
+
+      case ast.Quoted       return this.translateQuoted(dst, node)
+      case ast.QuotedUtf16  return this.translateQuotedUtf16(dst, node)
+      case ast.Constant     return this.translateConstant(dst, node)
+    }
+    assert with nameof(node)
+    return null
+  }
+
+
+  fn translateScope(this, dst, node): ssa.Value* {
+    this.e_unexpected_dst(node.pos, dst) if dst
+    auto locals = Locals{}
+    this.make.openScope(node, locals)
+    this.translateNodes(node)
+    this.make.closeScope(node, locals)
+    if dst {
+      this.ts.err(dst.pos, "unexpected dst for statement")
+    }
+    return null
+  }
+
+
+  fn translateIf(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          if !condition goto ifalse
+          iftrue: {
+            ...
+          }
+          ifalse: {
+            ...
+          }
+    */
+    this.e_unexpected_dst(node.pos, dst) if dst
+    auto locals = Locals{}
+    this.make.openScope(node, locals)
+    const iftrue = this.make.block(node.pos)
+    const ifalse = this.make.block(this.make.exitPos(node.pos))
+    this.ifalse(node.condition, next = iftrue, target = ifalse)
+    this.make.current(iftrue)
+    this.translateNodes(node)
+    this.make.current(ifalse)
+    this.make.closeScope(node, locals)
+    return null
+  }
+
+
+  fn translateLoop(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          loop: {
+            if !condition goto ifalse
+            iftrue: {
+              ...
+            }
+            ifalse: {
+              ...
+            }
+          }
+    */
+    this.e_unexpected_dst(node.pos, dst) if dst
+    auto locals = Locals{}
+    this.make.openScope(node, locals)
+    const iftrue = this.make.block(node.pos)
+    const ifalse = this.make.block(this.make.exitPos(node.pos))
+    this.ifalse(node.condition, next = iftrue, target = ifalse)
+    this.make.current(iftrue)
+    this.translateNodes(node)
+    this.make.current(ifalse)
+    this.make.closeScope(node, locals)
+    return null
+  }
+
+
+  fn translateAssert(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          · int3
+    */
+    this.e_unexpected_dst(node.pos, dst) if dst
+    this.make.assert_(node.pos)
+    return null
+  }
+
+  fn translateGoto(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          · jmp {target}
+    */
+    this.e_unexpected_dst(node.pos, dst) if dst
+    if const target = this.make.labelOf(node.target) {
+      this.make.jump(node.pos, target)
+      this.make.current(this.make.block(node.pos))
+    } else this.ts.cberr(node.pos, node.target) with {
+      println("label.#{it.id} not found as a target")
+    }
+    return null
+  }
+
+
+  fn translateLabel(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          label:
+    */
+    this.e_unexpected_dst(node.pos, dst) if dst
+    if const label = this.make.labelOf(node) {
+      this.make.current(label)
+    } else this.ts.cberr(node.pos, node) with {
+      println("label.#{it.id} not found")
+    }
+    return null
+  }
+
+
+  fn translateYield(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          · jmp {epilogue}
+    */
+    this.e_unexpected_dst(node.pos, dst) if dst
+    this.make.yield_(node.pos)
+    if !node.isFollowedByALabel {
+      this.make.current(this.make.block(node.pos))
+    }
+    return null
+  }
+
+
+  fn translateIfExpr(this, dst, node, exit): ssa.Value* {
+    const type = this.ts.typeOf(node.type)
+
+    const  ownsDst = dst == null
+    const ownsExit = exit == null
+
+    if node.type.isVoid() {
+      if dst {
+        this.e_unexpected_dst(node.pos, dst)
+        dst = null
+      }
+    } else if !dst {
+      dst = this.make.temp(node.pos, type)
+    }
+
+    if ownsExit {
+      exit = this.make.block(this.make.exitPos(node.pos))
+    }
+
+    /*  Translation 🡓
+          if !condition goto ifalse
+        iftrue:
+          dst:T ⟵ eval( iftrue )
+          goto exit
+        ifalse:
+          dst:T ⟵ eval( ifalse )
+        exit:
+    */
+
+    const  iftrue = this.make.block(node.iftrue.pos)
+    const exitPos = this.make.exitPos(iftrue.pos)
+    const  ifalse = this.make.block(node.ifalse.pos if node.ifalse else *&exitPos)
+    var hasIfalse = false
+    this.ifalse(node.condition, next = iftrue, target = ifalse)
+    this.make.current(iftrue)
+    this.translate(dst, node.iftrue)
+    this.make.jump(exitPos, exit)
+    this.make.current(ifalse)
+
+    if node.ifalse {
+      switch node.ifalse {
+        case ifexpr: ast.IfExpr { this.translateIfExpr(dst, ifexpr, exit) hasIfalse = true }
+        default                 this.translate(dst, node.ifalse)
+      }
+    } else if dst && !ownsDst {
+      this.make.store(exitPos, dst, this.make.zeroOf(exitPos, type))
+    }
+
+    if ownsExit {
+      this.make.current(exit)
+    } else if !hasIfalse {
+      this.make.jump(exitPos, exit)
+      this.make.current(this.make.block(exitPos))
+    }
+
+    return dst
+  }
+
+
+  fn translateDestructure(this, dst, node): ssa.Value* {
+    if dst {
+      this.e_unexpected_dst(node.pos, dst)
+    } else for child in node.children {
+      this.translate(this.nulldst, child)
+    }
+    return dst
+  }
+
+
+  fn translateAssignment(this, dst, node): ssa.Value* {
+    if node.op == Tok.Assign {
+      return this.translateDefinition(node.pos, dst, node.lhs, node.rhs)
+    }
+    return this.translateCompoundAssignment(dst, node)
+  }
+
+
+  fn translateDefinition(this, pos, dst, lhsNode, rhsNode): ssa.Value* {
+    if const lhsName = lhsNode is ast.Name {
+      if const instance = lhsName.symbol.instance {
+        switch instance {
+          case ast.Local     return this.translateAssignmentToLocal(pos, dst, lhsName, rhsNode)
+          case ast.Parameter return this.translateAssignmentToParameter(pos, dst, lhsName, rhsNode)
+          case ast.Global    return this.translateAssignmentToGlobal(pos, dst, lhsName, rhsNode)
+          default this.ts.cberr(pos, lhsName) with {
+            println("bad lhs symbol of assignment\r\n\t\
+              → found: #{nameof(it.symbol.instance)}: #{it.symbol.name}; #{it.type}")
+          }
+        }
+      } else this.ts.cberr(pos, lhsName) with {
+        println("uninstantiated lhs symbol of assignment\r\n\t\
+            → found: #{it.symbol.name}: #{it.type}")
+      }
+      return null
+    }
+    /*  Translation 🡓
+          lhs ⟵ rhs
+          dst ⟵ lhs
+          dst
+    */
+    if var lhs = this.translate(this.nulldst, lhsNode) {
+      if   lhs = this.translate(lhs, rhsNode) {
+        return this.make.store(pos, dst, lhs)
+      }
+    }
+    return null
+  }
+
+
+  fn translateAssignmentToLocal(this, pos, dst, lhsName, rhsNode): ssa.Value* {
+    //  lhs ⟵ rhs
+    //  dst ⟵ lhs
+    //  dst
+    const                 symbol = lhsName.symbol
+    const                  local = symbol.instance as ast.Local*
+    const requiresStackFrameSlot = local.requiresStackFrameSlot()
+
+    assert !symbol.replacedBy
+
+    if var lhs = local.ir as ssa.Value* {
+      switch lhs {
+        case ssa.Local {
+          if const result = this.translate(this.make.localAt(lhsName.pos, lhs), rhsNode) {
+            return this.make.store(pos, dst, result)
+          }
+        }
+        case ssa.RetVal {
+          if this.make.function.fnreturn.isVoid() || this.make.function.fnreturn.isLoadable() {
+            if const result = this.translate(lhs as ssa.Value*, rhsNode) {
+              return this.make.store(pos, dst, result)
+            }
+          }
+          const      elem = this.make.dereference(lhsName.pos, this.nulldst, lhs)
+          if const result = this.translate(elem, rhsNode) {
+            return this.make.store(pos, dst, elem)
+          }
+        }
+        default if const result = this.translate(lhs, rhsNode) {
+          return this.make.store(pos, dst, result)
+        }
+      }
+    }
+
+    else if requiresStackFrameSlot {
+      this.ts.cberr(pos, local) with {
+        println("local requiring stackframe slot not initialized")
+      }
+    }
+
+    else if const rhs = this.translate(this.nulldst, rhsNode) {
+      local.ir = this.make.load(pos, rhs, local.name)
+      return this.make.store(pos, dst, local.ir as ssa.Value*)
+    }
+
+    return null
+  }
+
+
+  fn translateAssignmentToParameter(this, pos, dst, lhsName, rhsNode): ssa.Value* {
+    //  parameter ⟵ rhs
+    //        dst ⟵ parameter
+    const    symbol = lhsName.symbol
+    const     param = symbol.instance as ast.Parameter*
+    const parameter = param.ir is ssa.Parameter
+
+    assert parameter
+
+    var lhs = parameter as ssa.Value*
+    if parameter.isaStackParameter() {
+      //  elem:T frame[parameter]
+      //  elem ⟵ rhs
+      //   dst ⟵ elem
+      lhs = this.make.parameterAt(pos, parameter)
+    } 
+
+    if lhs = this.translate(lhs, rhsNode) {
+      return this.make.store(pos, dst, lhs)
+    }
+
+    return null
+  }
+
+
+  fn translateAssignmentToGlobal(this, pos, dst, lhsName, rhsNode): ssa.Value* {
+    const   symbol = lhsName.symbol
+    const instance = symbol.instance as ast.Global*
+
+    if !instance.ir {
+      this.e_uninitialized(pos, symbol)
+      return null
+    }
+
+    //  elem:T data[global]
+    //  elem:T ⟵ rhs
+    //     dst ⟵ elem
+    const global = instance.ir as ssa.Global*
+    const   elem = this.make.globalAt(pos, global)
+    if const lhs = this.translate(elem, rhsNode) {
+      return this.make.store(pos, dst, lhs)
+    }
+    return null
+  }
+
+
+  fn translateCompoundAssignment(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          · tmp ⟵ lhs op rhs
+          · lhs ⟵ tmp
+          · dst ⟵ lhs
+    */
+    var   lhs = this.translate(this.nulldst, node.lhs)
+    const rhs = this.translate(this.nulldst, node.rhs)
+    return null if !lhs || !rhs
+    switch node.op {
+      case Tok.OrAssign     lhs = this.make.or(node.pos, lhs, lhs, rhs)
+      case Tok.XOrAssign    lhs =  this.make.xor(node.pos, lhs, lhs, rhs)
+      case Tok.AndAssign    lhs =  this.make.and(node.pos, lhs, lhs, rhs)
+
+      case Tok.LeftShiftAssign           lhs =  this.make.leftShift(node.pos, lhs, lhs, rhs)
+      case Tok.RightShiftAssign          lhs =  this.make.rightShift(node.pos, lhs, lhs, rhs)
+      case Tok.UnsignedRightShiftAssign  lhs =  this.make.unsignedRightShift(node.pos, lhs, lhs, rhs)
+
+      case Tok.PlusAssign       lhs =  this.make.add(node.pos, lhs, lhs, rhs)
+      case Tok.MinusAssign      lhs =  this.make.subtract(node.pos, lhs, lhs, rhs)
+
+      case Tok.RemainderAssign  lhs =  this.make.remainder(node.pos, lhs, lhs, rhs)
+      case Tok.DivideAssign     lhs =  this.make.divide(node.pos, lhs, lhs, rhs)
+      case Tok.MultiplyAssign   lhs =  this.make.multiply(node.pos, lhs, lhs, rhs)
+      default this.ts.cberr(node.pos, node) with {
+        println("unknown compound assignment operator\r\n\t\
+          → #{it.lhs.type} #{it.op.value()}#[%<darkred|white>] #{it.rhs.type}")
+      }
+    }
+    return this.make.store(node.pos, dst, lhs)
+  }
+
+
+  fn translateArithmetic(this, dst, node): ssa.Value* {
+    /*  Translation 🡓
+          · dst ⟵ lhs op rhs
+    */
+    const lhs = this.translate(this.nulldst, node.lhs)
+    const rhs = this.translate(this.nulldst, node.rhs)
+    return null if !lhs || !rhs
+    switch node.op {      
+      case Tok.Or     return this.make.or(node.pos, dst, lhs, rhs)
+      case Tok.XOr    return this.make.xor(node.pos, dst, lhs, rhs)
+      case Tok.And    return this.make.and(node.pos, dst, lhs, rhs)
+
+      case Tok.LeftShift           return this.make.leftShift(node.pos, dst, lhs, rhs)
+      case Tok.RightShift          return this.make.rightShift(node.pos, dst, lhs, rhs)
+      case Tok.UnsignedRightShift  return this.make.unsignedRightShift(node.pos, dst, lhs, rhs)
+
+      case Tok.Plus       return this.make.add(node.pos, dst, lhs, rhs)
+      case Tok.Minus      return this.make.subtract(node.pos, dst, lhs, rhs)
+
+      case Tok.Remainder  return this.make.remainder(node.pos, dst, lhs, rhs)
+      case Tok.Divide     return this.make.divide(node.pos, dst, lhs, rhs)
+      case Tok.Multiply   return this.make.multiply(node.pos, dst, lhs, rhs)
+      default this.ts.cberr(node.pos, node) with {
+        println("unknown arithmetic operator\r\n\t\
+          → #{it.lhs.type} #{it.op.value()}#[%<darkred|white>] #{it.rhs.type}")
+      }
+    }
+    return null
+  }
+
+
+  fn translateBinaryCondition(this, dst, node): ssa.Value* {
+    return this.translateCondition(dst, node)
+  }
+
+
+  fn translateUnaryCondition(this, dst, node): ssa.Value* {
+    return this.translateCondition(dst, node)
+  }
+
+
+  fn translateCast(this, dst, node): ssa.Value* {
+    if const src = this.translate(this.nulldst, node.value) {
+      return this.finishCast(node.pos, dst, src, node.type, node.kind, node.value.type)
+    }
+    return null
+  }
+
+
+  fn finishCast(this, pos, dst, src, destinationType, c, sourceType) {
+    import CastKind as Cast from ast
+
+    const type = this.ts.typeOf(destinationType)
+
+    switch c {
+      case Cast.NoCast {
+        assert destinationType == sourceType
+        return this.make.store(pos, dst, src)
+      }
+
+      case Cast.Numeric {
+        if src.type == type {
+          return this.make.store(pos, dst, src)
+        }
+        return this.finishNumericCast(pos, dst, src, type, destinationType.isBool())
+      }
+
+      case Cast.Object {
+        if type.isCallable() {
+          if src.type == type {
+            return this.make.store(pos, dst, src)
+          }
+          return this.make.bitCast(pos, dst, src, type)
+        }
+        assert type.isNotLoadable() with "#{type}"
+        return this.finishObjectCast(pos, dst, src, destinationType, sourceType)
+      }
+      
+      case Cast.BitCast {
+        //  Bit cast:
+        //    · Double to U/Int64 or
+        //    · Float to U/Int32  or
+        //    · U/Int64 to Double or
+        //    · U/Int32 to Float
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        //  dst:T ⟵ src to T
+        return this.make.bitCast(pos, dst, src, type)
+      }
+      
+      case Cast.Ref2Ptr, Cast.Ref2Ref,
+           Cast.Ptr2Ref, Cast.Ptr2Ptr {
+        //  Bit cast:
+        //    · T* to U*
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        //  dst:U* ⟵ src to U*
+        if type == src.type {
+          return this.make.store(pos, dst, src)
+        }
+        return this.make.bitCast(pos, dst, src, type)
+      }
+      
+      case Cast.Ref2Obj { // T& as T
+        //  Sequence with bit cast:
+        //    · src:T*             ; Translate {source}.
+        //    · tmp:T ⟵ *src      ; Dereference of {src}.
+        //    · dst:U ⟵ tmp as U  ; BitCast {tmp} into {dst}.
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        const  deref = this.make.dereference(pos, this.nulldst, src)
+        if deref.type == type {
+          return this.make.store(pos, dst, deref)
+        }
+        return this.make.bitCast(pos, dst, deref, type)
+      }
+      
+      case Cast.Obj2Ref { // T as T&
+        //  Sequence:
+        //    · src:T             ; Translate {source}.
+        //    · tmp:T* ⟵ &src   ; Take the address of {src}.
+        //    ·  dst:U ⟵ tmp as U ; Cast {tmp} into {dst}.
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        const  tmp = this.make.addressOf(pos, dst, src)
+        if type == tmp.type {
+          return this.make.store(pos, dst, tmp)
+        }
+        return this.make.bitCast(pos, dst, tmp, type)
+      }
+      
+      case Cast.Ref2Int, Cast.Ptr2Int {
+        if destinationType.isBool() {
+          //  Boolean cast:
+          //    · T* to Bool
+          //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+          //  dst:UInt8 ⟵ if src != 0
+          const condition = this.make.cmpzero(pos, ssa.Condition.NotEqual, src)
+          return this.make.store(pos, dst, condition)
+        }
+        //  Bit cast:
+        //    · T* to U/Int64
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        //  dst:U/Int64 ⟵ src to U/Int64
+        return this.make.bitCast(pos, dst, src, type)
+      }
+      
+      case Cast.Int2Ref, Cast.Int2Ptr {
+        //  Bit cast:
+        //    · U/Int64 to T*
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        //  dst:T* ⟵ src to T*
+        return this.make.bitCast(pos, dst, src, type)
+      }
+
+      default this.ts.cberr(pos, c) with {
+        println("unknown cast kind\r\n\t\
+          → found: #{nameof(it)}#[%<red|white>]")
+      }
+    }
+
+    return null
+  }
+
+
+  fn finishNumericCast(this, pos, dst, src, type, destinationTypeIsBool): ssa.Value* { 
+    if type.isaReal() {
+      if src.type.isaReal() {
+        //  Numeric cast:
+        //    · Float to Double or
+        //    · Double to Float
+        //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+        //  dst: T ⟵ src as T
+        return this.make.numericCast(pos, dst, src, type)
+      }
+      //  Numeric cast:
+      //    · U/Int32/64 to Double or Float
+      //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+      //  dst: T ⟵ src as T
+      assert src.type.isIntegral() && src.type.size() >= sizeof(Int32)
+      return this.make.numericCast(pos, dst, src, type)
+    }
+
+    if destinationTypeIsBool {
+      //  Boolean cast:
+      //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+      //  dst ⟵ if src != 0
+      const condition = this.make.cmpzero(pos, ssa.Condition.NotEqual, src)
+      return this.make.store(pos, dst, condition)
+    }
+
+    if src.type.isaReal() {
+      //  Numeric cast:
+      //    · Double or Float to U/Int32/64
+      //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+      //  dst: T ⟵ src as T
+      assert type.isIntegral() && type.size() >= sizeof(Int32)
+      return this.make.numericCast(pos, dst, src, type)
+    }
+
+    if type.isNotIntegral() || src.type.isNotIntegral() {
+      this.ts.cberr(pos, { destination = type, source = src.type }) with {
+        println("numeric cast not implemented\r\n\t\
+          → found: #{it.source} as #{it.destination}")
+      }
+      return null
+    }
+
+    const     destinationSize = type.size()
+    const          sourceSize = src.type.size()
+    const destinationIsSigned = type.isSigned()
+    const      sourceIsSigned = src.type.isSigned()
+    if destinationSize <= sourceSize {
+      //  Narrowing cast:
+      //    · From a large to integer to a smaller one or
+      //    · Same size
+      return this.make.narrowingCast(pos, dst, src, type)
+    }
+    if destinationIsSigned {
+      //  Sign extend:
+      //    · From a smaller signed/unsigned integer to a larger signed integer
+      return this.make.signExtend(pos, dst, src, type)
+    }
+    //  Zero extend:
+    //    · From a smaller signed/unsigned integer to a larger unsigned integer
+    return this.make.zeroExtend(pos, dst, src, type)
+  }
+
+
+  fn finishObjectCast(this, pos, dst, src, destinationType, sourceType) {
+    if !dst {
+      this.ts.cberr(pos, { dst = destinationType, src = sourceType }) with {
+        println("'finishObjectCast': no dst for unloadable cast\r\n\t\
+          → found: #{it.src} as #{it.dst}")
+      }
+      return null
+    }
+    const symbol = sourceType.isaSymbol()
+    if !symbol || !symbol.instance {
+      this.ts.cberr(pos, { dst = destinationType, src = sourceType }) with {
+        println("'finishObjectCast': no source symbol for unloadable cast\r\n\t\
+          → found: #{it.src} as #{it.dst}")
+      }
+      return null
+    }
+    switch symbol.instance {
+      case ast.Array      return this.translateArrayCast(pos, dst, src, destinationType, sourceType)
+      case ast.Object     return this.translateObjectCast(pos, dst, src, destinationType, sourceType)
+      case ast.FixedArray return this.translateFixedArrayCast(pos, dst, src, destinationType, sourceType)
+      case ast.Struct     return this.translateStructOrUnionCast(pos, dst, src, destinationType, sourceType)
+      case ast.Union      return this.translateStructOrUnionCast(pos, dst, src, destinationType, sourceType)
+      default {
+        this.ts.cberr(pos, sourceType) with {
+          println("'finishObjectCast': bad unloadable cast\r\n\t\
+            → expected: symbol\r\n\t\
+            →    found: #{it}")
+        }
+        return null
+      }
+    }
+    return null
+  }
+
+
+  fn translateArrayCast(this, pos, dst, src, destinationType, sourceType) {
+    const          errors = this.ts.errors
+    const          symbol = sourceType.isaSymbol()
+    const     sourceArray = symbol.instance as ast.Array*
+    const   sourceElement = sourceArray.element()
+
+    if const  destinationArray = destinationType.isanArray() {
+      const destinationElement = destinationArray.element()
+      assert sourceArray.children.length == destinationArray.children.length
+      if const c = sema.cast(destinationElement, sourceElement, isImplicit = false) {
+        for var i = 0; i < sourceArray.children.length; ++i {
+          const lhs = this.make.elementAt(pos, dst, this.make.int(pos, i))
+          const rhs = this.make.elementAt(pos, src, this.make.int(pos, i))
+          this.finishCast(pos, lhs, rhs, destinationElement, c, sourceElement)
+        }
+      } else this.ts.cberr(pos, { destination = destinationType, source = sourceType }) with {
+        println("bad array-to-array cast\r\n\t\
+          → found: #{it.source} as #{it.destination}")
+      }
+    }
+
+    else if const destinationArray = destinationType.isaFixedArray() {
+      const     destinationElement = destinationArray.element
+      assert sourceArray.children.length == destinationArray.length
+      if const c = sema.cast(destinationElement, sourceElement, isImplicit = false) {
+        for var i = 0; i < sourceArray.children.length; ++i {
+          const lhs = this.make.elementAt(pos, dst, this.make.int(pos, i))
+          const rhs = this.make.elementAt(pos, src, this.make.int(pos, i))
+          this.finishCast(pos, lhs, rhs, destinationElement, c, sourceElement)
+        }
+      } else this.ts.cberr(pos, { destination = destinationType, source = sourceType }) with {
+        println("bad array-to-fixed-array cast\r\n\t\
+          → found: #{it.source} as #{it.destination}")
+      }
+    } 
+
+    else this.ts.cberr(pos, { destination = destinationType, source = sourceType }) with {
+      println("casting from array #{it.source} to #{it.destination}")
+    }
+    return null
+  }
+
+
+  fn translateFixedArrayCast(this, pos, dst, src, destinationType, sourceType) {
+    const          errors = this.ts.errors
+    const          symbol = sourceType.isaSymbol()
+    const     sourceArray = symbol.instance as ast.FixedArray*
+    const   sourceElement = sourceArray.element
+
+    if const  destinationArray = destinationType.isanArray() {
+      const destinationElement = destinationArray.element()
+      assert sourceArray.length == destinationArray.children.length
+      if const c = sema.cast(destinationElement, sourceElement, isImplicit = false) {
+        for var i = 0; i < sourceArray.length; ++i {
+          const lhs = this.make.elementAt(pos, dst, this.make.int(pos, i))
+          const rhs = this.make.elementAt(pos, src, this.make.int(pos, i))
+          this.finishCast(pos, lhs, rhs, destinationElement, c, sourceElement)
+        }
+      } else this.ts.cberr(pos, { destination = destinationType, source = sourceType }) with {
+        println("bad array-to-array cast\r\n\t\
+          → found: #{it.source} as #{it.destination}")
+      }
+    }
+
+    else if const destinationArray = destinationType.isaFixedArray() {
+      const     destinationElement = destinationArray.element
+      assert sourceArray.length == destinationArray.length
+      if const c = sema.cast(destinationElement, sourceElement, isImplicit = false) {
+        for var i = 0; i < sourceArray.length; ++i {
+          const lhs = this.make.elementAt(pos, dst, this.make.int(pos, i))
+          const rhs = this.make.elementAt(pos, src, this.make.int(pos, i))
+          this.finishCast(pos, lhs, rhs, destinationElement, c, sourceElement)
+        }
+      } else this.ts.cberr(pos, { destination = destinationType, source = sourceType }) with {
+        println("bad array-to-fixed-array cast\r\n\t\
+          → found: #{it.source} as #{it.destination}")
+      }
+    } 
+
+    else this.ts.cberr(pos, { destination = destinationType, source = sourceType }) with {
+      println("casting from array #{it.source} to #{it.destination}")
+    }
+    return null
+  }
+
+
+  fn translateObjectCast(this, pos, dst, src, destinationType, sourceType) {
+    const          errors = this.ts.errors
+    const          symbol = sourceType.isaSymbol()
+    const    sourceObject = symbol.instance as ast.Object*
+      
+    assert destinationType != sourceType
+
+    if const destinationObject = destinationType.isanObject() {
+      if sourceObject.scope.symbols.length != destinationObject.scope.symbols.length {
+        this.ts.cberr(pos, { sourceObject = sourceObject, destinationObject = destinationObject }) with {
+          println("object cast expects equal number of fields on source and destination\r\n\t\
+            → found: source = #{it.sourceObject.scope.symbols.length}; \
+                     destination = #{it.destinationObject.scope.symbols.length}")
+        }
+        return null
+      }
+      for i, nv in sourceObject.scope.symbols {
+        const srcSymbol = nv.value
+        const dstSymbol = destinationObject.scope.symbols.items[i].value
+
+        const dstField = dstSymbol.instance is ast.Field
+        const srcField = srcSymbol.instance is ast.Field
+
+        if !dstField || !srcField {
+          this.ts.cberr(pos, null) with {
+            println("object cast expects fields only")
+          }
+          continue
+        }
+
+        if const     c = sema.cast(dstField.type, srcField.type, isImplicit = false) {
+          const  dstIr = this.ts.fieldOf(dstSymbol)
+          const  srcIr = this.ts.fieldOf(srcSymbol)
+          const    lhs = this.make.fieldAt(srcField.pos, dst, dstIr)
+          const    rhs = this.make.fieldAt(srcField.pos, src, srcIr)
+          this.finishCast(pos, lhs, rhs, dstField.type, c, srcField.type)
+        } else this.ts.cberr(srcField.pos, { dst = dstField.type, src = srcField.type }) with {
+          println("bad object field cast\r\n\t\
+            → found: #{it.src} as #{it.dst}")
+        }
+      }
+      return dst if errors == this.ts.errors
+        else null
+    }
+
+    this.ts.cberr(pos, { destination = destinationType, source = sourceType }) with {
+      println("casting from object #{it.source} to #{it.destination}")
+    }
+    return null
+  }
+
+
+  fn translateStructOrUnionCast(this, pos, dst, src, destinationType, sourceType) {
+    assert 0
+    return null
+  }
+
+
+  fn translateTypeOf(this, dst, node): ssa.Value* {
+    assert 0
+    return null
+  }
+
+
+  fn translateSizeOf(this, dst, node): ssa.Value* {
+    const type = this.ts.typeOf(node.value.type)
+    const  src = this.make.int(node.pos, type.size())
+    return this.make.store(node.pos, dst, src)
+  }
+
+
+  fn translateUnaryOp(this, dst, node): ssa.Value* {
+    if const value = this.translate(this.nulldst, node.value) {
+      switch node.op {
+        case Tok.Minus return this.make.negate(node.pos, dst, value)
+        case Tok.Tilde return this.make.bitwiseNot(node.pos, dst, value)
+        default this.ts.cberr(node.pos, node) with {
+          println("unknown unary operator\r\n\t\
+            → found: #{it.op.value()}#[%<red|white>] #{it.type}")
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn translateUnaryAssignment(this, dst, node): ssa.Value* {
+    if const value = this.translate(this.nulldst, node.value) {
+      switch node.op {
+        case Tok.MinusMinus {
+          return this.make.postDecrement(node.pos, dst, value) if node.isPostFix
+            else this.make.preDecrement(node.pos, dst, value)
+        }
+        case Tok.PlusPlus {
+          return this.make.postIncrement(node.pos, dst, value) if node.isPostFix
+            else this.make.preIncrement(node.pos, dst, value)
+        }
+        default this.ts.cberr(node.pos, node) with {
+          println("unknown unary assignment operator\r\n\t\
+            → found: #{it.op.value()}#[%<red|white>] #{it.type}")
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn translateAddress(this, dst, node): ssa.Value* {
+    if const value = this.translate(this.nulldst, node.value) {
+      return this.make.addressOf(node.pos, dst, value)
+    }
+    return null
+  }
+
+
+  fn translateDereference(this, dst, node): ssa.Value* {
+    if const value = this.translate(this.nulldst, node.value) {
+      return this.make.dereference(node.pos, dst, value)
+    }
+    return null
+  }
+
+
+  fn translateInitializer(this, dst, node): ssa.Value* {
+    if !dst {
+      this.ts.cberr(node.pos, node) with {
+        println("unused initializer\r\n\t\
+          → found: #{it.type}")
+      }
+      return null
+    }
+    const errors = this.ts.errors
+    for argument in node.arguments {
+      this.ts.typeOf(argument.type)
+      var lhs = ssa.Value*{}
+      for path in argument.path {
+        const field = this.ts.fieldOf(path)
+        if !lhs {
+          lhs = this.make.fieldAt(argument.pos, dst, field)
+        } else {
+          lhs = this.make.fieldAt(argument.pos, lhs, field)
+        }
+      }
+      const field = this.ts.fieldOf(argument.field)
+      if !lhs {
+        lhs = this.make.fieldAt(argument.pos, dst, field)
+      } else {
+        lhs = this.make.fieldAt(argument.pos, lhs, field)
+      }
+      if argument.value {
+        this.translate(lhs, argument.value)
+      } else {
+        this.translate(lhs, (argument.field.instance as ast.Field*).value)
+      }
+    }
+    return dst if errors == this.ts.errors
+      else null
+  }
+
+
+  fn translateCall(this, dst, node): ssa.Value* {
+    //  Translation for unloadable T 🡓
+    //    elem:T frame[local]
+    //    dstrax:T* ⟵ &elem
+    //       elem:T ⟵ call callee with arg1, ..., argn and dstrax
+    //     result:T ⟵ *dstrax
+    const   errors = this.ts.errors
+    auto arguments = List(ssa.Value*){}
+    for i, argument in node.arguments {
+      /*if this.make.function.name.textIs("compiler.ir.codegen.emit.Emitter._movs") {
+        this.ts.cbinfo(argument.pos, { i = i, arg = argument }) with {
+          println("@@i = #{it.i}; arg.name = #{it.arg.name}; arg.value = #{nameof(it.arg.value)}")
+        }
+      }*/
+      if const value = this.translate(this.nulldst, argument.value) {
+        arguments.append(this.make.loadIfConstant(value))
+      }
+    }
+    return null if errors != this.ts.errors
+
+    assert arguments.length == node.arguments.length
+    
+    for i, argument in node.arguments {
+      const value = arguments.items[i]
+      arguments.items[i] = this.make.argument(argument.pos, i, value)
+    }
+
+    const type = this.ts.typeOf(node.type)
+    var dstrax = ssa.Value*{}
+    var   elem = ssa.Value*{}
+    if node.type.isNotVoid() && node.type.isNotLoadable() {
+      if dst {
+        assert dst.type == type
+        elem = dst
+      } else {
+        elem = this.make.temp(node.pos, type)
+      }
+      dstrax = this.make.addressOf(node.pos, this.nulldst, elem)
+      dstrax.name = this.ts.ids.kw_dstrax
+    }
+
+    const callee = this.translate(this.nulldst, node.name)
+    return null if errors != this.ts.errors
+
+    assert callee
+
+    const call = this.make.call(node.pos, callee, arguments, type, dstrax)
+    if dstrax {
+      return this.make.dereference(node.pos, this.nulldst, dstrax)
+    }
+    return this.make.store(node.pos, dst, call)
+  }
+
+
+  fn translateIntrinsic(this, dst, node): ssa.Value* {
+    const  ids = this.ts.ids
+    const type = this.ts.typeOf(node.type)
+
+
+    switch node.keyword {
+      case ids.kw_atomic_subtract {
+        const lhs = this.translate(this.nulldst, node.arguments.items[0].value)
+        const rhs = this.translate(this.nulldst, node.arguments.items[1].value)
+        return null if !lhs || !rhs
+        if type.isaPointer() {
+          //  size:Int64 ⟵ sizeof( T )
+          //   tmp:Int64 ⟵ rhs × size
+          //   neg:Int64 ⟵ -tmp
+          //  lock xadd lhs, neg
+          //  dst ⟵ neg
+          const size = this.make.int64(node.pos, type.pointee().size())
+          const  tmp = this.make.multiply(node.pos, this.nulldst, rhs, size)
+          const  neg = this.make.negate(node.pos, this.nulldst, tmp)
+          return this.make.xadd(node.pos, dst, lhs, neg)
+        }
+        //  tmp ⟵ -rhs
+        //  lock xadd lhs, tmp
+        //  dst ⟵ tmp
+        const tmp = this.make.negate(node.pos, this.nulldst, rhs)
+        return this.make.xadd(node.pos, dst, lhs, tmp)
+      }
+      case ids.kw_atomic_add {
+        const lhs = this.translate(this.nulldst, node.arguments.items[0].value)
+        const rhs = this.translate(this.nulldst, node.arguments.items[1].value)
+        return null if !lhs || !rhs
+        if type.isaPointer() {
+          //  size:Int64 ⟵ sizeof( T )
+          //   tmp:Int64 ⟵ rhs × size
+          //  lock xadd lhs, tmp
+          //  dst ⟵ tmp
+          const size = this.make.int64(node.pos, type.pointee().size())
+          const  tmp = this.make.multiply(node.pos, this.nulldst, rhs, size)
+          return this.make.xadd(node.pos, dst, lhs, tmp)
+        }
+        //  tmp ⟵ rhs
+        //  lock xadd lhs, tmp
+        //  dst ⟵ tmp
+        const tmp = this.make.load(node.pos, rhs)
+        return this.make.xadd(node.pos, dst, lhs, tmp)
+      }
+      case ids.kw_atomic_decrement {
+        const lhs = this.translate(this.nulldst, node.arguments.items[0].value)
+        return null if !lhs
+        if type.isaPointer() {
+          //  size:Int64 ⟵ sizeof( T )
+          //   neg:Int64 ⟵ -size
+          //  lock xadd lhs, neg
+          //  dst ⟵ neg
+          const size = this.make.int64(node.pos, type.pointee().size())
+          const  neg = this.make.negate(node.pos, this.nulldst, size)
+          return this.make.xadd(node.pos, dst, lhs, neg)
+        }
+        //  tmp:T ⟵ 1
+        //  neg:T ⟵ -tmp
+        //  lock xadd lhs, neg
+        //  dst ⟵ neg
+        const immediate = Immediate{ i64 = 1 }
+        const       tmp = this.make.constant(node.pos, immediate, lhs.type)
+        const       neg = this.make.negate(node.pos, this.nulldst, tmp)
+        return this.make.xadd(node.pos, dst, lhs, neg)
+      }
+      case ids.kw_atomic_increment {
+        const elem = this.translate(this.nulldst, node.arguments.items[0].value)
+        return null if !elem
+        if type.isaPointer() {
+          //  size:Int64 ⟵ sizeof( T )
+          //  lock xadd elem, size
+          //  dst ⟵ size
+          const size = this.make.int64(node.pos, type.pointee().size())
+          return this.make.xadd(node.pos, dst, elem, size)
+        }
+        //  tmp ⟵ 1
+        //  lock xadd elem, tmp
+        //  dst ⟵ tmp
+        const immediate = Immediate{ i64 = 1 }
+        const       tmp = this.make.constant(node.pos, immediate, elem.type)
+        return this.make.xadd(node.pos, dst, elem, tmp)
+      }
+      case ids.kw_atomic_pause {
+        // pause
+        const pause = this.make.pause(node.pos)
+        return dst as ssa.Value* if dst
+          else pause
+      }
+      case ids.kw_atomic_cmpxchg {
+        const      elem = this.translate(this.nulldst, node.arguments.items[0].value)
+        var   comparand = this.translate(this.nulldst, node.arguments.items[1].value)
+        const  exchange = this.translate(this.nulldst, node.arguments.items[2].value)
+        return null if !elem || !comparand || !exchange
+        /*  rax ⟵ comparand
+            if [elem] == rax {
+              [elem] ⟵ exchange
+                  ZF ⟵ 1
+            } else {
+              rax ⟵ [elem]
+               ZF ⟵ 0
+            }
+            return ZF
+        */
+        //comparand = this.make.load(comparand.pos, comparand)
+        return this.make.cmpxchg(node.pos, dst, elem, ssa.Condition.Equal, comparand, exchange)
+      }
+      case ids.kw_rotate_left {
+        const value = this.translate(this.nulldst, node.arguments.items[0].value)
+        const times = this.translate(this.nulldst, node.arguments.items[1].value)
+        if value && times {
+          return this.make.rotateLeft(node.pos, dst, value, times)
+        }
+      }
+      case ids.kw_rotate_right {
+        const value = this.translate(this.nulldst, node.arguments.items[0].value)
+        const times = this.translate(this.nulldst, node.arguments.items[1].value)
+        if value && times {
+          return this.make.rotateRight(node.pos, dst, value, times)
+        }
+      }
+      case ids.kw_round_up {
+        if const value = this.translate(this.nulldst, node.arguments.items[0].value) {
+          return this.make.roundUp(node.pos, dst, value)
+        }
+      }
+      case ids.kw_round_down {
+        if const value = this.translate(this.nulldst, node.arguments.items[0].value) {
+          return this.make.roundDown(node.pos, dst, value)
+        }
+      }
+      case ids.kw_truncate {
+        if const value = this.translate(this.nulldst, node.arguments.items[0].value) {
+          return this.make.truncate(node.pos, dst, value)
+        }
+      }
+    }
+    return null
+  }
+
+
+  fn translateArrayIndex(this, dst, node): ssa.Value* {
+    //  elem[index]:T
+    //  dst ⟵ elem
+    if const base = this.translate(this.nulldst, node.base) {
+      if const index = this.translate(this.nulldst, node.index) {
+        if const elem = this.make.elementAt(node.pos, base, index) {
+          return this.make.store(node.pos, dst, elem)
+        }
+      }
+    }
+    return null
+  }
+
+
+  struct Member {
+    enum Kind { Node, Symbol }
+    var node = null
+    var kind = Kind{}
+    fn isaSymbol(this) = this.node as ast.Symbol* if this.kind == Kind.Symbol
+    fn isaNode(this)   = this.node as ast.Node*   if this.kind == Kind.Node
+  }
+
+
+  fn translateName(this, dst, node): ssa.Value* {
+    const member = Member{ node = node.symbol, kind = Member.Kind.Symbol }
+    const   elem = ssa.Value*{}
+    return this.appendMember(node.pos, 0, member, dst, elem, isLast = true)
+  }
+
+
+  fn translateMemberName(this, dst, node): ssa.Value* {
+    auto flattened = List(Member){}
+
+    flatten(node, flattened)
+
+    var elem = ssa.Value*{}
+
+    for i, member in flattened {
+      elem = this.appendMember(node.pos, i, member, dst, elem, isLast = i + 1 == flattened.length)
+      return null if !elem
+    }
+
+    return elem
+
+    fn flatten(node, list): void {
+      switch node {
+        case ast.Name {
+          list.append(Member{ node = node.symbol, kind = Member.Kind.Symbol })
+        }
+        case ast.MemberName {
+          flatten(node.base, list)
+          list.append(Member{ node = node.symbol, kind = Member.Kind.Symbol })
+        }
+        default {
+          list.append(Member{ node = node, kind = Member.Kind.Node })
+        }
+      }
+    }
+  }
+
+
+  fn appendMember(this, pos, i, member, dst, elem, isLast): ssa.Value* {
+    if const symbol = member.isaSymbol() {
+      return this.appendMemberSymbol(pos, i, dst, elem, isLast, symbol)
+    } 
+
+    if const node = member.isaNode() {
+      return this.appendMemberNode(pos, i, dst, elem, isLast, node)
+    }
+
+    assert 0
+    return null
+  }
+
+
+  fn appendMemberSymbol(this, pos, i, dst, base, isLast, symbol): ssa.Value* {
+    if !symbol.instance {
+      this.ts.cberr(pos, symbol) with {
+        println("template symbol in a name\r\n\t\
+          → found: #{it.name}; #{it.type()}")
+      }
+      return null
+    }
+
+    const  isFirst = i == 0
+    const instance = symbol.instance
+
+    assert base || isFirst
+
+    switch instance {
+      case ast.Define {
+        if base || !isLast {
+          this.ts.cberr(pos, instance) with {
+            println("path to constant 'define' not expected")
+          }
+          return null
+        }
+
+        return this.translate(dst, instance.value)
+      }
+
+      case ast.Local {
+        if symbol.replacedBy {
+          if base || !isLast || !isFirst || !this.make.astFunction || !this.make.astFunction.generator ||
+             instance.name != this.ts.ids.kw_retval {
+            this.ts.cberr(pos, instance) with {
+              println("replaced local found")
+            }
+          }
+          assert this.make.retval
+          return this.make.retval
+        }
+        if !instance.ir {
+          this.ts.cberr(pos, instance) with {
+            println("ir of local not initialized\r\n\t\
+              → #{it.name}: #{it.type}")
+          }
+        } else if isFirst {
+          if const  ir = instance.ir is ssa.Local {
+            const elem = this.make.localAt(pos, ir)
+            if isLast {
+              return this.make.store(pos, dst, elem)
+            }
+            return elem
+          }
+          if const ir = instance.ir is ssa.RetVal {
+            if this.make.function.fnreturn.isNotVoid() && this.make.function.fnreturn.isNotLoadable() {
+              const elem = this.make.dereference(pos, this.nulldst, ir)
+              if isLast {
+                return this.make.store(pos, dst, elem)
+              }
+              return elem
+            }
+          }
+          if isLast {
+            return this.make.store(pos, dst, instance.ir as ssa.Value*)
+          }
+          this.e_badIndex(pos, i, symbol)
+          //this.e_uninitialized(pos, symbol)
+        } else {
+          this.e_badIndex(pos, i, symbol)
+        }
+      }
+
+      case ast.Parameter {
+        const parameter = instance.ir is ssa.Parameter
+        if !parameter {
+          this.ts.cberr(pos, { instance = instance, function = this.make.function }) with {
+            println("#{it.instance.name}: #{it.instance.type}; #{it.instance.ir == null};")
+            println("#{it.function.name}; #{it.function.parameters.length}")
+          }
+        } else {
+          assert !symbol.replacedBy
+          assert i == 0
+          var elem = parameter as ssa.Value*
+          if parameter.isaStackParameter() {
+            elem = this.make.parameterAt(pos, parameter)
+          }
+          if isLast {
+            return this.make.store(pos, dst, elem)
+          }
+          if !parameter.isaStackParameter() {
+            this.ts.cberr(pos, parameter) with {
+              println("#{it.name}: #{it.type}")
+            }
+            assert 0
+          }
+          assert parameter.isaStackParameter()
+          return elem
+        }
+      }
+
+      case ast.Field {
+        const field = instance.ir is ssa.Field
+        assert field && !symbol.replacedBy && i > 0
+        const elem = this.make.fieldAt(pos, base, field)
+        if isLast {
+          return this.make.store(pos, dst, elem)
+        }
+        return elem
+      }
+
+      case ast.Global {
+        const global = instance.ir is ssa.Global
+        assert global && !symbol.replacedBy && isFirst
+        const elem = this.make.globalAt(pos, global)
+        if isLast {
+          return this.make.store(pos, dst, elem)
+        }
+        return elem
+      }
+
+      case ast.Array {
+        if !isFirst || !isLast {
+          this.e_badIndex(pos, i, symbol)
+        } else {
+          return this.translateArrayName(pos, dst, symbol)
+        }
+      }
+
+      case ast.Object {
+        if !isFirst || !isLast {
+          this.e_badIndex(pos, i, symbol)
+        } else {
+          return this.translateObjectName(pos, dst, symbol)
+        }
+      }
+
+      case ast.FixedArray {
+        if !isFirst || !isLast {
+          this.e_badIndex(pos, i, symbol)
+        } else {
+          return this.translateFixedArrayName(pos, dst, symbol)
+        }
+      }
+
+      case ast.Function {
+        if !isFirst || !isLast {
+          this.e_badIndex(pos, i, symbol)
+        } else {
+          return this.translateFunctionName(pos, dst, symbol)
+        }
+      }
+
+      default this.ts.cberr(pos, symbol) with {
+        println("expected a variable in name\r\n\t\
+          → found: #{nameof(it.instance)}: #{it.name}; #{it.type()}")
+      }
+    }
+
+    return null
+  }
+
+
+  fn appendMemberNode(this, pos, i, dst, base, isLast, node): ssa.Value* {
+    //  elem[index]
+    //  dst ⟵ elem
+    const isFirst = i == 0
+
+    assert !base && isFirst && !isLast
+
+    if const elem = this.translate(this.nulldst, node) {
+      if elem.isMemory() {
+        return elem
+      }
+      this.ts.cberr(pos, elem) with {
+        println("expected a memory location\r\n\t\
+          → found: #{nameof(it)}: #{it.type}\
+          →  name: #{it.name}")
+      }
+    }
+
+    return null
+  }
+
+
+  fn translateArrayName(this, pos, dst, symbol): ssa.Value* {
+    //  elem:[n × T]  array
+    //  dst ⟵ elem
+    const   errors = this.ts.errors
+    const instance = symbol.instance as ast.Array*
+    const     type = this.ts.typeOf(instance.type)
+    if !dst {
+      //  HACK! sometimes [n × T] is in a cast and we don't have {dst}. So create one!
+      dst = this.make.local(pos, this.ts.ids.random("array"), type)
+      dst = this.make.localAt(pos, dst as ssa.Local*)
+      this.ts.cbinfo(pos, instance) with {
+        println("unused named array\r\n\t
+          → found: #{it.type}")
+      }
+      /*this.ts.cberr(pos, instance) with {
+        println("unused named array\r\n\t\
+          → found: #{it.type}")
+      }
+      assert
+      return null*/
+    }
+    assert dst.type == type
+    for i, item in instance.children {
+      const lhs = this.make.elementAt(pos, dst, this.make.int(pos, i))
+      this.translate(lhs, item)
+    }
+    return dst if errors == this.ts.errors
+      else null
+  }
+
+
+  fn translateObjectName(this, pos, dst, symbol): ssa.Value* {
+    const   errors = this.ts.errors
+    const instance = symbol.instance as ast.Object*
+    if !dst {
+      this.ts.cberr(pos, instance) with {
+        println("unused named object\r\n\t\
+          → found: #{it.type}")
+      }
+      return null
+    }
+    const type = this.ts.typeOf(instance.type)
+    const dstStruct = dst.type.isaStruct()
+    const srcStruct = type.isaStruct()
+
+    assert dstStruct && srcStruct
+    assert dstStruct.fields.length == srcStruct.fields.length
+    assert dstStruct.fields.length == instance.scope.symbols.length
+
+    for i, item in instance.scope.symbols {
+      const dstField = dstStruct.fields.items[i]
+      const srcField = item.value.instance as ast.Field*
+      const     elem = this.make.fieldAt(pos, dst, dstField)
+      this.translate(elem, srcField.value)
+    }
+    return dst if errors == this.ts.errors
+      else null
+  }
+
+
+  fn translateFixedArrayName(this, pos, dst, symbol): ssa.Value* {
+    // dst
+    const instance = symbol.instance as ast.FixedArray*
+    if !dst {
+      this.ts.cberr(pos, instance) with {
+        println("unused named fixed array\r\n\t\
+          → found: #{it.type}")
+      }
+      return null
+    }
+    const type = this.ts.typeOf(instance.type)
+    assert dst.type == type
+    return dst
+  }
+
+
+  fn translateFunctionName(this, pos, dst, symbol): ssa.Value* {
+    //  elem:Function code[function]
+    //  elem:Extern   data[extern]
+    const   errors = this.ts.errors
+    const instance = symbol.instance as ast.Function*
+    const     type = this.ts.typeOf(instance.type)
+    const callable = type.isCallable()
+    if !callable {
+      this.ts.cberr(pos, type) with {
+        println("type is not callable\r\n\t\
+          → found: #{it}")
+      }
+      return null
+    }
+    var src = ssa.Value*{}
+    switch callable {
+      case ssa.Function src = this.make.functionAt(pos, callable)
+      case ssa.Extern   src = this.make.externAt(pos, callable)
+      default assert with nameof(callable)
+    } 
+    return this.make.store(pos, dst, src) if errors == this.ts.errors
+      else null
+  }
+
+
+  fn translateQuoted(this, dst, node): ssa.Value* {
+    //  elem:[n × Char]   ; global
+    //           1stCharacter ⟵ elem[0]
+    //  addressOf1stCharacter ⟵ & 1stCharacter
+    //               dst.text ⟵ addressOf1stCharacter
+    //             dst.length ⟵ n
+    if !dst {
+      this.ts.cberr(node.pos, node) with {
+        println("no dst for quoted #{it.type}")
+      }
+      assert 0
+      return null
+    }
+
+    const   type = this.ts.typeOf(node.type)
+    const global = this.ts.stringOf(node)
+
+    const st = type.isaStruct()
+    assert st && dst.type == type && st.fields.length == 2
+
+    const   text = st.fields.items[0]
+    const length = st.fields.items[1]
+
+    const 1stCharacter = this.make.elementOfQuoted(node.pos, global, this.make.int(node.pos, 0))
+    assert 1stCharacter.type == ssa.tyChar
+
+    const addressOfFirstCharacter = this.make.addressOf(node.pos, this.nulldst, 1stCharacter)
+    assert addressOfFirstCharacter.type == text.type with "#{addressOfFirstCharacter.type} == #{text.type}"
+
+    assert length.type == ssa.tyInt32
+
+    this.make.store(
+        pos = node.pos,
+        dst = this.make.fieldAt(node.pos, dst, text),
+        src = addressOfFirstCharacter
+      )
+
+    this.make.store(
+        pos = node.pos,
+        dst = this.make.fieldAt(node.pos, dst, length),
+        src = this.make.int(node.pos, node.value.length)
+      )
+
+    return dst
+  }
+
+
+  fn translateQuotedUtf16(this, dst, node): ssa.Value* {
+    //  dst: wstring ⟵ src: [ length × WChar ]
+    //  ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+    //    dst.text ⟵ & src[0]
+    //  dst.length ⟵ length
+    if !dst {
+      this.ts.cberr(node.pos, node) with {
+        println("no dst for quoted #{it.type}")
+      }
+      return null
+    }
+
+    const   type = this.ts.typeOf(node.type)
+    const global = this.ts.utf16Of(node) 
+
+    const st = type.isaStruct()
+    assert st && dst.type == type && st.fields.length == 2
+
+    const   text = st.fields.items[0]
+    const length = st.fields.items[1]
+
+    const 1stCharacter = this.make.elementOfQuoted(node.pos, global, this.make.int(node.pos, 0))
+    assert 1stCharacter.type == ssa.tyWChar
+
+    const addressOfFirstCharacter = this.make.addressOf(node.pos, this.nulldst, 1stCharacter)
+    assert addressOfFirstCharacter.type == text.type
+
+    assert length.type == ssa.tyInt32
+
+    this.make.store(
+        pos = node.pos,
+        dst = this.make.fieldAt(node.pos, dst, text),
+        src = addressOfFirstCharacter
+      )
+
+    this.make.store(
+        pos = node.pos,
+        dst = this.make.fieldAt(node.pos, dst, length),
+        src = this.make.int(node.pos, node.value.length)
+      )
+
+    return dst
+  }
+
+
+  fn translateConstant(this, dst, node): ssa.Value* {
+    // dst ⟵ val
+    const type = this.ts.typeOf(node.type)
+    const  val = this.make.constant(node.pos, node.value, type)
+    if !dst && type.isNotLoadable() {
+      this.ts.cberr(node.pos, node) with {
+        println("no dst for constant #{it.type}")
+      }
+    }
+    return this.make.store(node.pos, dst, val)
+  }
+
+
+  fn translateCondition(this, dst, node): ssa.Value* {
+    switch node {
+      case ast.BinaryCondition {
+        switch node.op {
+          case Tok.OrOr {
+            /*    dst ⟵ if lhs
+                  if dst goto ifeither
+                ifnotlhs:
+                  dst ⟵ if rhs
+                ifeither:
+            */
+            assert this.isaCondition(node.lhs) && this.isaCondition(node.rhs)
+            dst = this.translateCondition(dst, node.lhs)
+            const  ifnotlhs = this.make.block(node.pos)
+            const  ifeither = this.make.block(node.pos)
+            const condition = this.make.cmpzero(node.lhs.pos, ssa.Condition.NotEqual, dst)
+            this.make.jumpif(node.pos, condition, iftrue = ifeither, ifalse = ifnotlhs)
+            this.make.current(ifnotlhs)
+            dst = this.translateCondition(dst, node.rhs)
+            this.make.current(ifeither)
+            return dst
+          }
+          case Tok.AndAnd {
+            /*    
+                  dst ⟵ if lhs
+                  if !dst goto ifnotboth
+                iflhs:
+                  dst ⟵ if rhs
+                ifnotboth:
+            */
+            assert this.isaCondition(node.lhs) && this.isaCondition(node.rhs)
+            dst = this.translateCondition(dst, node.lhs)
+            const     iflhs = this.make.block(node.pos)
+            const ifnotboth = this.make.block(node.pos)
+            const condition = this.make.cmpzero(node.lhs.pos, ssa.Condition.Equal, dst)
+            this.make.jumpif(node.pos, condition, iftrue = ifnotboth, ifalse = iflhs)
+            this.make.current(iflhs)
+            dst = this.translateCondition(dst, node.rhs)
+            this.make.current(ifnotboth)
+            return dst
+          }
+          default { // Equal ... GreaterOrEqual
+            /*    dst ⟵ if condition
+            */
+            const lhs = this.translate(this.nulldst, node.lhs)
+            const rhs = this.translate(this.nulldst, node.rhs)
+            if lhs && rhs {
+              if const op = this.conditionOf(node.pos, node.op, lhs.type, reverse = false) {
+                const condition = this.make.cmp(node.pos, lhs, op, rhs)
+                return this.make.store(node.pos, dst, condition)
+              }
+            }
+          }
+        }
+      }
+      case ast.UnaryCondition {
+        /* dst ⟵ if condition */
+        if const val = this.translate(this.nulldst, node.rhs) {
+          if const op = this.conditionOf(node.pos, node.op, val.type, reverse = false) {
+            /*if const cmpxchg = val is ssa.CompareExchange {
+              cmpxchg.op = op
+              return this.make.store(node.pos, dst, cmpxchg)
+            }*/
+            const condition = this.make.cmpzero(node.pos, op, val)
+            return this.make.store(node.pos, dst, condition)
+          }
+        }
+      }
+      case ast.Intrinsic {
+        if node.keyword == this.ts.ids.kw_atomic_cmpxchg {
+          /*  rax ⟵ comparand
+              if [elem] == rax {
+                [elem] ⟵ exchange
+                    ZF ⟵ true
+              } else {
+                rax ⟵ [elem]
+                 ZF ⟵ false
+              }
+              dst ⟵ ZF
+          */
+          assert node.arguments.length == 3
+          const      elem = this.translate(this.nulldst, node.arguments.items[0].value)
+          var   comparand = this.translate(this.nulldst, node.arguments.items[1].value)
+          const  exchange = this.translate(this.nulldst, node.arguments.items[2].value)
+          if elem && comparand && exchange {
+            //comparand = this.make.load(comparand.pos, comparand)
+            const condition = this.make.cmpxchg(node.pos, this.nulldst, elem, ssa.Condition.Equal, comparand, exchange)
+            return this.make.store(node.pos, dst, condition)
+          }
+        } else this.ts.cberr(node.pos, node) with {
+          println("intrinsic is not a condition\r\n\t\
+            → node: #{it.keyword}")
+        }
+      }
+      default this.ts.cberr(node.pos, node) with {
+        println("not a condition\r\n\t\
+          → node: #{nameof(it)}")
+      }
+    }
+    return null
+  }
+
+
+  /*    if x goto target
+      next:
+        ...
+      target:
+  */
+  fn iftrue(this, node, next, target): void {
+    switch node {
+      case ast.BinaryCondition {
+        switch node.op {
+          case Tok.OrOr {
+            //  · if ( lhs || rhs ) goto target
+
+            /*    if lhs goto target
+                ifnotlhs:
+                  if rhs goto target
+                next:
+                  ...
+                target:
+            */
+            assert this.isaCondition(node.lhs) && this.isaCondition(node.rhs)
+            const ifnotlhs = this.make.block(node.pos)
+            this.iftrue(node.lhs, next = ifnotlhs, target = target)
+            this.make.current(ifnotlhs)
+            this.iftrue(node.rhs, next, target)
+          }
+          case Tok.AndAnd {
+            /*    if lhs && rhs goto target
+                next:
+                  ...
+                target:
+            */
+            /*    if !lhs goto next
+                iflhs:
+                  if rhs goto target
+                next:
+                  ...
+                target:
+            */
+            assert this.isaCondition(node.lhs) && this.isaCondition(node.rhs)
+            const iflhs = this.make.block(node.pos)
+            this.ifalse(node.lhs, next = iflhs, target = next)
+            this.make.current(iflhs)
+            this.iftrue(node.rhs, next, target)
+          }
+          default { // Equal ... GreaterOrEqual
+            /*    if condition goto target
+                next:
+                  ...
+                target
+            */
+            const lhs = this.translate(this.nulldst, node.lhs)
+            const rhs = this.translate(this.nulldst, node.rhs)
+            if lhs && rhs {
+              if const op = this.conditionOf(node.pos, node.op, lhs.type, reverse = false) {
+                const condition = this.make.cmp(node.pos, lhs, op, rhs)
+                this.make.jumpif(node.pos, condition, iftrue = target, ifalse = next)
+              }
+            }
+          }
+        }
+      }
+      case ast.UnaryCondition {
+        if const val = this.translate(this.nulldst, node.rhs) {
+          if const op = this.conditionOf(node.pos, node.op, val.type, reverse = false) {
+            /*if const cmpxchg = val is ssa.CompareExchange {
+              cmpxchg.op = op
+              this.make.jumpif(node.pos, cmpxchg, iftrue = target, ifalse = next)
+            }*/
+            const condition = this.make.cmpzero(node.pos, op, val)
+            this.make.jumpif(node.pos, condition, iftrue = target, ifalse = next)
+          }
+        }
+      }
+      case ast.Intrinsic {
+        if node.keyword == this.ts.ids.kw_atomic_cmpxchg {
+          /*  rax ⟵ comparand
+              if [elem] == rax {
+                [elem] ⟵ exchange
+                    ZF ⟵ true
+              } else {
+                rax ⟵ [elem]
+                 ZF ⟵ false
+              }
+          */
+          assert node.arguments.length == 3
+          const      elem = this.translate(this.nulldst, node.arguments.items[0].value)
+          var   comparand = this.translate(this.nulldst, node.arguments.items[1].value)
+          const  exchange = this.translate(this.nulldst, node.arguments.items[2].value)
+          if elem && comparand && exchange {
+            //comparand = this.make.load(comparand.pos, comparand)
+            const condition = this.make.cmpxchg(node.pos, this.nulldst, elem, ssa.Condition.Equal, comparand, exchange)
+            this.make.jumpif(node.pos, condition, iftrue = target, ifalse = next)
+          }
+        } else this.ts.cberr(node.pos, node) with {
+          println("intrinsic is not a condition\r\n\t\
+            → node: #{it.keyword}")
+        }
+      }
+      default this.ts.cberr(node.pos, node) with {
+        println("not a condition\r\n\t\
+          → node: #{nameof(it)}")
+      }
+    }
+  }
+
+  /*    if !x goto target
+      next:
+        ...
+      target:
+  */
+  fn ifalse(this, node, next, target): void {
+    switch node {
+      case ast.BinaryCondition {
+        switch node.op {
+          case Tok.OrOr {
+            /*    · goto target if !( lhs || rhs ) else goto next
+                Can be rewritten as 🡓
+                  · goto next if ( lhs || rhs ) else goto target
+                Which can be rewritten as 🡓
+                  · goto   next if lhs else
+                    goto   next if rhs else
+                    goto target
+                Which can be rewritten as 🡓
+                  · goto   next if lhs else
+                    goto target if !rhs else
+                    goto   next
+            */
+            /*    if lhs goto next
+                ifnotlhs:
+                  if !rhs goto target
+                next:
+                  ...
+                target:
+            */
+            assert this.isaCondition(node.lhs) && this.isaCondition(node.rhs)
+            const ifnotlhs = this.make.block(node.pos)
+            this.iftrue(node.lhs, next = ifnotlhs, target = next)
+            this.make.current(ifnotlhs)
+            this.ifalse(node.rhs, next, target)
+          }
+          case Tok.AndAnd {
+            /*    · goto target if !( lhs && rhs ) else goto next
+                Can be rewritten as 🡓
+                  · goto next if ( lhs && rhs ) else goto target
+                Which can be rewritten as 🡓
+                  · goto target if !lhs else
+                    goto target if !rhs else
+                    goto next
+            */
+
+            /*    if !lhs goto target
+                iflhs:
+                  if !rhs goto target
+                next:
+                  ...
+                target:
+            */
+            assert this.isaCondition(node.lhs) && this.isaCondition(node.rhs)
+            const iflhs = this.make.block(node.pos)
+            this.ifalse(node.lhs, next = iflhs, target = target)
+            this.make.current(iflhs)
+            this.ifalse(node.rhs, next, target)
+          }
+          default { // Equal ... GreaterOrEqual
+            /*    if condition goto target
+                next:
+                  ...
+                target
+            */
+            const lhs = this.translate(this.nulldst, node.lhs)
+            const rhs = this.translate(this.nulldst, node.rhs)
+            if lhs && rhs {
+              if const op = this.conditionOf(node.pos, node.op, lhs.type, reverse = true) {
+                const condition = this.make.cmp(node.pos, lhs, op, rhs)
+                this.make.jumpif(node.pos, condition, iftrue = target, ifalse = next)
+              }
+            }
+          }
+        }
+      }
+      case ast.UnaryCondition {
+        if const  val = this.translate(this.nulldst, node.rhs) {
+          if const op = this.conditionOf(node.pos, node.op, val.type, reverse = true) {
+            /*if const cmpxchg = val is ssa.CompareExchange {
+              cmpxchg.op = op
+              this.make.jumpif(node.pos, cmpxchg, iftrue = target, ifalse = next)
+            }*/
+            const condition = this.make.cmpzero(node.pos, op, val)
+            this.make.jumpif(node.pos, condition, iftrue = target, ifalse = next)
+          }
+        }
+      }
+      case ast.Intrinsic {
+        if node.keyword == this.ts.ids.kw_atomic_cmpxchg {
+          /*  rax ⟵ comparand
+              if [elem] == rax {
+                [elem] ⟵ exchange
+                    ZF ⟵ true
+              } else {
+                rax ⟵ [elem]
+                 ZF ⟵ false
+              }
+          */
+          assert node.arguments.length == 3
+          const      elem = this.translate(this.nulldst, node.arguments.items[0].value)
+          var   comparand = this.translate(this.nulldst, node.arguments.items[1].value)
+          const  exchange = this.translate(this.nulldst, node.arguments.items[2].value)
+          if elem && comparand && exchange {
+            //comparand = this.make.load(comparand.pos, comparand)
+            const condition = this.make.cmpxchg(node.pos, this.nulldst, elem, ssa.Condition.NotEqual, comparand, exchange)
+            this.make.jumpif(node.pos, condition, iftrue = target, ifalse = next)
+          }
+        } else this.ts.cberr(node.pos, node) with {
+          println("intrinsic is not a condition\r\n\t\
+            → node: #{it.keyword}")
+        }
+      }
+      default this.ts.cberr(node.pos, node) with {
+        println("not a condition\r\n\t\
+          → node: #{nameof(it)}")
+      }
+    }
+  }
+
+
+  fn conditionOf(this, pos, op, type, reverse) {
+    switch op {
+      // !!x
+      // Translates to
+      //    x != 0 when not reversing
+      case Tok.LogicalIs
+        return ssa.Condition.Equal if reverse
+          else ssa.Condition.NotEqual
+
+      case Tok.LogicalNot
+      // !x
+      //    x == 0
+        return ssa.Condition.NotEqual if reverse
+          else ssa.Condition.Equal
+
+      case Tok.Equal
+        return ssa.Condition.NotEqual if reverse
+          else ssa.Condition.Equal
+
+      case Tok.NotEqual
+        return ssa.Condition.Equal if reverse
+          else ssa.Condition.NotEqual
+
+      case Tok.Less {
+        if reverse {
+          return ssa.Condition.GreaterOrEqual if type.isaPointerOrSigned()
+            else ssa.Condition.AboveOrEqual
+        }
+        return ssa.Condition.Less if type.isaPointerOrSigned()
+          else ssa.Condition.Below
+      }
+
+      case Tok.LessOrEqual {
+        if reverse {
+          return ssa.Condition.Greater if type.isaPointerOrSigned()
+            else ssa.Condition.Above
+        }
+        return ssa.Condition.LessOrEqual if type.isaPointerOrSigned()
+          else ssa.Condition.BelowOrEqual
+      }
+
+      case Tok.Greater {
+        if reverse {
+          return ssa.Condition.LessOrEqual if type.isaPointerOrSigned()
+            else ssa.Condition.BelowOrEqual
+        }
+        return ssa.Condition.Greater if type.isaPointerOrSigned()
+          else ssa.Condition.Above
+      }
+
+      case Tok.GreaterOrEqual {
+        if reverse {
+          return ssa.Condition.Less if type.isaPointerOrSigned()
+            else ssa.Condition.Below
+        }
+        return ssa.Condition.GreaterOrEqual if type.isaPointerOrSigned()
+          else ssa.Condition.AboveOrEqual
+      }
+    }
+    this.ts.cberr(pos, { op = op, type = type }) with {
+      println("no machine condition exists for operation\r\n\t\
+        →   op: #{it.op.value()}\r\n\t\
+        → type: #{it.type }")
+    }
+    return ssa.Condition.None
+  }
+
+
+  fn isaCondition(this, node) {
+    switch node {
+      case ast.BinaryCondition return true
+      case ast.UnaryCondition  return true
+      case ast.Intrinsic       return node.keyword == this.ts.ids.kw_atomic_cmpxchg
+    }
+    return false
+  }
+
+
+  fn isNotACondition(this, node) = !this.isaCondition(node)
+
+
+  fn e_badIndex(this, pos, i, symbol) {
+    this.ts.cberr(pos, { i = i, symbol = symbol }) with {
+      println("bad member name index for #{it.symbol.name}#[%<green>]\r\n\t\
+        → found: #{it.i}")
+    }
+  }
+
+
+  fn e_uninitialized(this, pos, symbol) {
+    this.ts.cberr(pos, symbol) with {
+      println("uninitialized #{nameof(it.instance)}\r\n\t\
+        → found: #{it.name}: #{it.instance.type}")
+    }
+    assert with this.make.function.name
+  }
+
+  fn e_unexpected_dst(this, pos, dst) {
+    this.ts.cberr(pos, dst) with {
+      println("unexpected destination\r\n\t\
+        → found: '#{it.name}': #{it.type}")
+    }
+  }
+
+  fn e_no_dst(this, pos, node) {    
+    this.ts.cberr(node.pos, node) with {
+      println("expected destination for #{nameof(it)}: #{it.type}")
+    }
+  }
+}

@@ -1,0 +1,175 @@
+Generator object
+{
+  · overlapped    ⟵ os.OVERLAPPED{}
+  · iocallback    ⟵ fn (self: Generator*, bytesTransferred: Int32, hResult: Int32) {}
+  · iotransferred ⟵ 0i32
+  · ioresult      ⟵ 0i32
+  · ioawaiter     ⟵ null
+  · ioawaited     ⟵ null
+  · next          ⟵ fn (self: Generator*): T& {}
+  · dispose       ⟵ fn (self: Generator*): Generator* {}
+  · getioreturn   ⟵ fn (self: Generator*): T& {}
+  · ioreturn      ⟵ ( ..., Bool )
+  · ioresume      ⟵ 0i32
+  · iostopped     ⟵ false
+  · exitReason    ⟵ 0u8
+  · autoDelete    ⟵ false
+  ...parameters..
+  ...locals...
+}
+
+fn f( ...parameters... ): Generator* {
+  const local ⟵ malloc( Generator*{}, sizeof( Generator ) )
+  (*local){ iocallback, next, dispose, getioreturn, ...parameters... }
+  retval ⟵ local
+}
+
+obj.iocallback = fn ( self: Generator*, bytesTransferred: Int32, hResult: Int32 ): void {
+  self.iotransferred ⟵ bytesTransferred if !self.iotransferred
+  self.ioresult      ⟵ hResult          if !self.ioresult
+  self.next()
+}
+
+obj.dispose = fn( self.Generator* ): self {
+  if self.ioresume {
+    self.stopped ⟵ true
+    self.next()
+  }
+  retval ⟵ self
+}
+
+obj.getioreturn = fn ( self.Generator* ): ( ..., Bool )& {
+  retval ⟵ *&self.ioreturn
+}
+
+obj.next = fn ( self.Generator* ): ( ..., Bool )& {
+  if !self.ioresume {
+    goto autoDelete if self.iostopped
+  } else if self.ioresume == label.??? {
+    goto ???
+  }
+
+  ...statements...
+
+//----begin yield---
+      self.ioresume ⟵ label.id
+      self.ioreturn ⟵ ( value, false )
+             retval ⟵ *&self.ioreturn
+      if self.ioawaiter {
+            const local ⟵ self.awaiter as Generator*
+        local.ioawaited ⟵ self
+        local.next()
+      }
+      yield
+    label:
+      if self.iostopped {
+        self.exitReason ⟵ ExitReason.Return
+        goto exitInParent
+      }
+//----end yield---
+
+//----begin return---
+      self.ioresume ⟵ label.id
+      self.ioreturn ⟵ ( value, true )
+      if self.awaiter {
+          const local ⟵ self.awaiter as Generator*
+        local.awaited ⟵ self
+        local.next()
+      }
+      retval ⟵ *&self.ioreturn
+      yield
+    label:
+      self.exitReason ⟵ ExitReason.Return
+      goto exitInParent
+//----end return---
+
+//----begin await---
+      self.iotransferred ⟵ 0
+           self.ioresult ⟵ 0
+           self.ioresume ⟵ label.id
+            self.awaited ⟵ awaited
+         awaited.awaiter ⟵ self
+      awaited.next()
+      yield
+    label:
+      if self.iostopped {
+        self.exitReason ⟵ ExitReason.Return
+        goto exitInParent
+      }
+      awaitedResult ⟵ awaited.getioreturn()
+//----end await---
+
+//----begin yield from---
+      block: {
+        var list ⟵ bind( template.rhs )
+      loopEntry: if true {
+        self.ioresume ⟵ label.id
+        self.ioreturn ⟵ list.next()
+               retval ⟵ *&self.ioreturn
+        if self.ioawaiter {
+              const local ⟵ self.awaiter as Generator*
+          local.ioawaited ⟵ self
+          local.next()
+        }
+        yield
+      label:
+        if self.iostopped {
+          self.exitReason ⟵ ExitReason.Return
+          goto loopExit
+        }
+        if self.ioreturn.done {
+          self.exitReason ⟵ ExitReason.Break if self.ioreturn.done
+        }
+      loopExit:
+        ...deferreds...
+        if self.exitReason == ExitReason.Flow || self.exitReason == ExitReason.Continue {
+          self.exitReason ⟵ ExitReason.Flow
+          goto loopEntry
+        }
+        self.exitReason ⟵ ExitReason.Flow if exitReason == ExitReason.Break
+      blockExit:
+        ...deferreds...
+        goto exitInParent if exitReason
+      }
+//----end yield from---
+
+  ...statements...
+
+  self.ioresume ⟵ 0
+  exit:
+    ...deferreds...
+    self.ioreturn ⟵ ( ...null..., true )
+           retval ⟵ *&self.ioreturn
+    if self.iostopped {    ; Got here via dispose() or (at worst) call after disposal.
+      self.ioresume ⟵ 0
+      goto autoDelete
+    }
+    self.iostopped ⟵ true
+    if self.ioresume {     ; Got here via a goto.
+      self.ioresume ⟵ 0
+      if self.awaiter {
+            const local ⟵ self.awaiter as Generator*
+          local.awaited ⟵ self
+        local.next()
+      }
+      yield
+    }
+    if self.awaiter {     ; Got here naturally.
+        const local ⟵ self.awaiter as Generator*
+      local.awaited ⟵ self
+      local.next()
+      yield
+    }
+  autoDelete:
+    ( self = mfree( self ) ) if self.autoDelete
+    return retval
+} // fn
+
+
+Lambda object
+{
+  "()" ⟶ fn (self) {
+
+  }
+  ...captured locals...
+}

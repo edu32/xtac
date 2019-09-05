@@ -1,0 +1,164 @@
+import Block from _block
+
+struct Bundle {
+  readonly moves = List(Move*){}
+  const      pos = Definition*{}
+  const   parent = Block*{}
+
+
+  fn dispose(this) {
+    delete this.moves with fn(x) = delete x
+  }
+
+
+  fn isTop(this)    = this.pos == this.parent.span.top
+  fn isBottom(this) = this.pos == this.parent.span.bottom
+
+
+  fn findWriteTo(this, slot): Move* {
+    for move in this.moves {
+      switch move {
+        case Transfer return move if move.dst.slot == slot
+        case Fill     return move if move.dst.slot == slot
+      }
+    }
+    return null
+  }
+
+
+  fn findTransferOrFill(this, dst, src): Move* {
+    for move in this.moves {
+      switch move {
+        case Transfer return move if move.dst.slot == dst.slot && move.src.slot == src.slot
+        case Fill     return move if move.dst.slot == dst.slot
+      }
+    }
+    return null
+  }
+
+
+  fn findTransferOrSpill(this, dst, src): Move* {
+    for move in this.moves {
+      switch move {
+        case Transfer return move if move.dst.slot == dst.slot && move.src.slot == src.slot
+        case Spill    return move if move.src.slot == src.slot
+      }
+    }
+    return null
+  }
+
+
+  fn findFillOf(this, dst) {
+    for move in this.moves {
+      switch move {
+        case Fill
+          return move if move.dst.owner == dst.owner && move.dst.slot == dst.slot
+      }
+    }
+    return null
+  }
+
+
+  fn findSpillOf(this, def) {
+    for move in this.moves {
+      switch move {
+        case Spill return move if move.src.owner == def
+      }
+    }
+    return null
+  }
+
+
+  fn findMoveClobberedBy(this, dst): Move* {
+    const def = dst.owner
+    for move in this.moves {
+      switch move {
+        case Transfer return move if move.dst.slot == dst.slot && move.dst.owner != def
+        case Fill     return move if move.dst.slot == dst.slot && move.dst.owner != def
+      }
+    }
+    return null
+  }
+
+
+  fn deleteWritesTo(this, dst) {
+    for var i = 0; i < this.moves.length; ++i {
+      const move = this.moves.items[i]
+      switch move {
+        case Transfer {
+          if move.dst.slot == dst.slot {
+            this.moves.removeAt(i)
+            delete move
+            --i
+          }
+        }
+        case Fill {
+          if move.dst.slot == dst.slot {
+            this.moves.removeAt(i)
+            delete move
+            --i
+          }
+        }
+      }
+    }
+  }
+
+
+  fn deleteReadsFrom(this, src) {
+    for var i = 0; i < this.moves.length; ++i {
+      const move = this.moves.items[i]
+      switch move {
+        case Transfer {
+          if move.src.slot == src.slot {
+            this.moves.removeAt(i)
+            delete move
+            --i
+          }
+        }
+        case Spill {
+          if move.src.slot == src.slot {
+            this.moves.removeAt(i)
+            delete move
+            --i
+          }
+        }
+      }
+    }
+  }
+
+
+  fn deleteMovesOf(this, def) {
+    for var i = 0; i < this.moves.length; ++i {
+      const move = this.moves.items[i]
+      switch move {
+        case Transfer {
+          if move.dst.owner == def {
+            this.moves.removeAt(i)
+            delete move
+            --i
+          }
+        }
+        case Fill {
+          if move.dst.owner == def {
+            this.moves.removeAt(i)
+            delete move
+            --i
+          }
+        }
+        case Spill {
+          if move.src.owner == def {
+            this.moves.removeAt(i)
+            delete move
+            --i
+          }
+        }
+        default assert 0
+      }
+    }
+  }
+
+
+  fn insertAfter(this, move, index)  = this.moves.insert(index + 1, move)
+  fn insertBefore(this, move, index) = this.moves.insert(index, move)
+  fn append(this, move)              = this.moves.append(move)
+}

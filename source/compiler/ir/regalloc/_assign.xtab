@@ -1,0 +1,475 @@
+fn run(allocator) {
+  auto assigner = Assigner{ function = allocator.function, defs = allocator.defs }
+  assigner.assign()  
+  /*for def in allocator.defs {
+    assigner.assign(&def)
+  }*/
+}
+
+
+struct Assigner {
+  const function = ssa.Function*{}
+  const     defs = List(Definition)&{}
+
+
+  fn assign(this) {
+    each value in this.function.flatten() {
+      if value.index >= 0 {
+        const def = &this.defs.items[value.index]
+        if def.ranges.first {
+          this.assignOutput(def)
+        }
+        this.assignInputs(def)
+      } else switch value {
+        case ssa.Store { // spill: [stackmem] ⟵ reg
+          this.assignOperandOfSpillOrFill(value.operands.items[0])
+          assert value.operands.items[1].reg.isaRegister()
+        }
+        case ssa.Fill { // fill: reg ⟵ [stackmem]
+          assert value.operands.items[0].reg.isaRegister()
+          this.assignOperandOfSpillOrFill(value.operands.items[1])
+        }
+        case ssa.Assign { // transfer: reg ⟵ reg
+          assert value.operands.items[0].reg.isaRegister()
+          assert value.operands.items[1].reg.isaRegister()
+        }
+        case ssa.Exchange { // exchange: reg ⟵⟶ reg
+          assert value.operands.items[0].reg.isaRegister()
+          assert value.operands.items[1].reg.isaRegister()
+        }
+        case ssa.ElementAt {
+          assert value.operands.length == 2
+          assert value.operands.items[0].isaNode() is ssa.StackFrame
+          assert value.operands.items[1].isaNode() is ssa.Local
+        }
+        case ssa.Local {
+          assert value.isaSpill
+        }
+        default assert with nameof(value)
+      }
+    }
+  }
+
+  /*fn assign(this, def) {
+    if def.ranges.first {
+      this.assignOutput(def)
+    }
+    this.assignInputs(def)
+  }*/
+
+
+  fn assignOutput(this, def) {
+    const value = def.value
+    var   range = def.ranges.first
+    const   phi = value is ssa.Phi
+
+    assert value.reg.isNotValid()
+
+    for ; range; range = range.qnext {
+      if phi {
+        break if range.start <= def && range.end >= def
+      } else {
+        break if range.start == def
+      }
+    }
+
+    assert range with nameof(value)
+
+    if const slot = range.slot {
+      const   reg = slot.reg
+      value.reg = reg
+      assert reg.regKind() == range.regKind() with "#{range.owner.value.type} #{nameof(reg.regKind())} == #{nameof(range.regKind())}"
+    } else {
+      assert value is ssa.Call && value.type.isNotLoadable()   
+    }
+  }
+
+
+  fn assignInputs(this, def) {    
+    if const phi = def.value is ssa.Phi {
+      for i, operand in def.value.operands {
+        assert operand.reg.isNotValid()
+        if const value = operand.isaValue() {
+          const  input = this.defs.items[value.index]
+          assert input.ranges.first
+          this.assignPhiOperand(def, operand, input, i)
+        } else if operand.isanImmediate() {
+          this.assignImmediateOperand(operand)
+        } else {
+          assert 0
+        }
+      }
+    } else for operand in def.value.operands {
+      continue if operand.reg.isValid()
+      if operand.isanImmediate() {
+        this.assignImmediateOperand(operand)
+      } else if operand.isMemory() {
+        this.computeAddress(def, operand)  
+      } else if const value = operand.isaValue() {
+        const input = this.defs.items[value.index]
+        if input.ranges.isNotEmpty() {
+          this.assignValueOperand(def, operand, input)
+        }
+      } else if operand.isaBlock() {
+        assert def.value is ssa.Jump || def.value is ssa.JumpIf
+        operand.reg.setRip(0)
+      }
+    }
+  }
+
+
+  fn assignImmediateOperand(this, operand) {
+    const immediate = operand.value.immediate
+    if immediate.isHuge() {
+      //  Do nothing.
+    } else {
+      operand.reg.setImmediate(immediate.value.u64)
+    }
+  }
+
+
+  fn assignValueOperand(this, def, operand, input) {
+    const   range = findInputOf(def.inputs, input.value)
+    if const slot = range.slot {
+      const   reg = slot.reg
+      operand.reg = slot.reg
+      assert reg.regKind() == range.regKind()
+    } else { // Spilled
+      assert range.isSpillable()
+      this.assignSpill(operand, def.spill)
+    }
+  }
+
+
+  fn assignPhiOperand(this, def, operand, input, index) {
+    const   range = findInputOfPhi(input, def.value)
+    if const slot = range.slot {
+      const   reg = slot.reg
+      operand.reg = reg
+      assert reg.regKind() == range.regKind()
+    } else { // Spilled
+      assert range.isSpillable()
+      this.assignSpill(operand, def.spill)
+    }
+  }
+
+
+  fn assignSpill(this, operand, spill) {
+    //  [rsp - offsetof( spill )]
+    assert spill
+    assert spill.isaSpill
+    assert spill.localIndex < this.function.frame.locals.length
+    const frame = this.function.frame
+    const  cell = frame.locals.items[spill.localIndex]
+    operand.reg.setSpill(cell.offset)
+  }
+
+
+  fn assignOperandOfSpillOrFill(this, operand) {
+    if const elem = operand.isMemory() {
+      assert elem.operands.length == 2
+      assert elem.operands.items[0].isaNode() is ssa.StackFrame
+      assert elem.operands.items[1].isaNode() is ssa.Local
+      if const spill = elem.operands.items[1].value.node as ssa.Local* {
+        this.assignSpill(operand, spill)
+      } else {
+        assert 0
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn computeAddress(this, def, operand) {
+    const    elem = operand.value.node as ssa.ElementAt*
+    const address = Address{ frame = this.function.frame, defs = this.defs, def = def }
+
+    address.setBase(elem.operands.items[0])
+
+    for var i = 1; i < elem.operands.length; ++i {
+      const index = elem.operands.items[i]
+      assert index.isNotMemory()
+      address.addIndex(i, index)
+    }
+
+    assert address.type == elem.type
+
+    switch address.memkind {
+      case ssa.kRipMask {
+        //  [ rip + offset ]
+        assert address.index.isNotValid()
+        operand.reg.setRip(address.disp)
+      }
+      case ssa.kRspMask {
+        assert address.index.isNotValid()
+        switch address.stackind {
+          case ssa.kLocalMask operand.reg.setLocal(address.disp)
+          case ssa.kParamMask operand.reg.setParameter(address.disp)
+          case ssa.kArgMask   operand.reg.setArgument(address.disp)
+          case ssa.kSpillMask operand.reg.setSpill(address.disp)
+          default assert 0
+        }
+      }
+      case ssa.kHeapMask {
+        assert address.base.isaGpr()
+        if address.index.isNotValid() {
+          operand.reg.setBaseOnly(address.base.name(), address.disp)
+        } else {
+          operand.reg.setBaseAndIndex(address.base.name(), address.index.name(), address.scale, address.disp)
+        }
+      }
+      default assert 0
+    }
+  }
+}
+
+
+struct Address {
+  const    frame = ssa.StackFrame*{}
+  const      def = Definition*{}
+  const     defs = List(Definition)&{}
+  const     base = Register{}
+  const    index = Register{}
+  readonly scale = Scale{}
+  readonly  type = ssa.Type{}
+  readonly     disp = 0
+  readonly  memkind = 0u8
+  readonly stackind = 0u8
+
+
+  fn setBase(this, operand) {
+    if const node = operand.isaNode() {
+      switch node {
+        case ssa.Program     this.memkind = ssa.kRipMask
+        case ssa.DataSection this.memkind = ssa.kRipMask
+        case ssa.CodeSection this.memkind = ssa.kRipMask
+        case ssa.StackFrame  this.memkind = ssa.kRspMask
+        default {
+          if const value = node.isaValue() {
+            this.base = this.getRegisterOf(value)
+            this.type = value.type
+            this.memkind = ssa.kHeapMask
+            assert this.type.isaPointerOrArray()
+          } else {
+            assert with nameof(node)
+          }
+        }
+      }
+    } else if const immediate = operand.isanImmediate() {
+      const function = this.def.value.parent.parent
+      println("null address base @ #{function.name}: pos.#{this.def.value.index}")
+      this.base.setGpr(name = 0, preference = 7, isVolatile = true)
+      this.type = immediate.type
+      this.memkind = ssa.kHeapMask
+    } else {
+      assert 0
+    }
+    this.scale = Scale.Unknown
+  }
+
+
+  fn addIndex(this, i, operand) {
+    if const immediate = operand.isanImmediate() {
+      if immediate.type.isSigned() {
+        this.addSignedImmediateIndex(operand)
+      } else {
+        this.addUnsignedImmediateIndex(operand)
+      }
+    } else if const node = operand.isaNode() {
+      switch node {
+        case ssa.Field      this.addFieldIndex(operand)
+        case ssa.Global     this.addDataSectionIndex(i, node)
+        case ssa.Extern     this.addDataSectionIndex(i, node)
+        case ssa.Function   this.addCodeSectionIndex(i, node)
+        case ssa.Block      this.addCodeSectionIndex(i, node)
+        case ssa.Local      this.addLocalIndex(i, node)
+        case ssa.Argument   this.addArgumentIndex(i, node)
+        case ssa.Parameter {
+          if this.memkind == ssa.kRspMask {
+            this.addParameterIndex(i, node)
+          } else if this.memkind == ssa.kHeapMask {
+            this.addRegisterIndex(operand)
+          } else {
+            assert 0
+          }
+        }
+        default {
+          assert this.memkind == ssa.kHeapMask
+          if const value = node.isaValue() {
+            this.addRegisterIndex(operand)
+          } else {
+            assert with nameof(node)
+          }
+        }
+      }
+    } else {
+      assert 0
+    }
+  }
+
+
+  fn addSignedImmediateIndex(this, operand):void {
+    //  base[ immediate ]
+    //  Translates to
+    //    [ base + immediate × sizeof(T) ]
+    const immediate = operand.value.immediate
+    var       value = 0i64
+    switch immediate.type.kind {
+      case ssa.Kind.Int8  value = immediate.value.i8
+      case ssa.Kind.Int16 value = immediate.value.i16
+      case ssa.Kind.Int32 value = immediate.value.i32
+      case ssa.Kind.Int64 value = immediate.value.i64
+      default assert with nameof(immediate.type.kind)
+    }
+    if this.type.isaPointer() {
+      this.type = this.type.pointee()
+    } else if const array = this.type.isanArray() {
+      this.type = array.element
+    } else {
+      assert 0
+    }
+    this.disp += value * this.type.size()
+  }
+
+
+  fn addUnsignedImmediateIndex(this, operand):void {
+    //  base[ immediate ]
+    //  Translates to
+    //    [ base + immediate × sizeof(T) ]
+    const immediate = operand.value.immediate
+    var       value = 0u64
+    switch immediate.type.kind {
+      case ssa.Kind.UInt8  value = immediate.value.u8
+      case ssa.Kind.UInt16 value = immediate.value.u16
+      case ssa.Kind.UInt32 value = immediate.value.u32
+      case ssa.Kind.UInt64 value = immediate.value.u64
+      default assert with nameof(immediate.type.kind)
+    }
+    if this.type.isaPointer() {
+      this.type = this.type.pointee()
+    } else if const array = this.type.isanArray() {
+      this.type = array.element
+    } else {
+      assert 0
+    }
+    this.disp += value * this.type.size()
+  }
+
+  fn addDataSectionIndex(this, i, node):void {
+    assert i == 1 && this.base.isNotValid() && this.index.isNotValid() && this.memkind == ssa.kRipMask
+    this.type = node.type
+  }
+
+  fn addCodeSectionIndex(this, i, node):void {
+    assert i == 1 && this.base.isNotValid() && this.index.isNotValid() && this.memkind == ssa.kRipMask
+    this.type = node.type
+  }
+
+  fn addLocalIndex(this, i, local):void {
+    //  stack[ local ]
+    //  Translates to
+    //    [ rsp + offsetof( local ) ]
+    assert i == 1 && this.base.isNotValid() && this.index.isNotValid() && this.memkind == ssa.kRspMask
+    assert local.localIndex < this.frame.locals.length
+    const cell = this.frame.locals.items[local.localIndex]
+    this.type = local.type
+    this.disp += cell.offset
+    if local.isaSpill {
+      this.stackind = ssa.kSpillMask
+    } else {
+      this.stackind = ssa.kLocalMask
+    }
+  }
+
+  fn addParameterIndex(this, i, parameter):void {
+    //  stack[ parameter ]
+    //  Translates to
+    //    [ rsp - offsetof( parameter ) ]
+    assert i == 1 && this.base.isNotValid() && this.index.isNotValid() && this.memkind == ssa.kRspMask
+    assert parameter.parameterIndex < this.frame.parameters.length
+    const cell = this.frame.parameters.items[parameter.parameterIndex]
+    this.type = parameter.type
+    this.disp += cell.offset
+    this.stackind = ssa.kParamMask
+  }
+
+  fn addArgumentIndex(this, i, argument):void {
+    //  stack[ argument ]
+    //  Translates to
+    //    [ rsp - offsetof( argument ) ]
+    assert i == 1 && this.base.isNotValid() && this.index.isNotValid() && this.memkind == ssa.kRspMask
+    assert argument.argumentIndex < this.frame.arguments.length
+    const cell = this.frame.arguments.items[argument.argumentIndex]
+    this.type = argument.type
+    this.disp += cell.offset
+    this.stackind = ssa.kArgMask
+  }
+
+  fn addFieldIndex(this, operand):void {
+    //  base[ field ]
+    //  Translates to
+    //    [ base + offsetof( field ) ]
+    const field = operand.value.node as ssa.Field*
+    this.type = field.type
+    this.disp += field.offset
+  }
+
+  fn addRegisterIndex(this, operand):void {
+    assert this.index.isNotValid() && this.memkind == ssa.kHeapMask && this.scale == Scale.Unknown
+    this.index = this.getRegisterOf(operand.value.node as ssa.Value*)
+    if this.type.isaPointer() {
+      //  base:T*
+      //  base[ index ]
+      //  Translates to
+      //    [ base + index × scale + displacement ]
+      this.type = this.type.pointee()
+    } else if const array = this.type.isanArray() {
+      //  base:T[]
+      //  base[ index ]
+      //  Translates to
+      //    [ base + index × scale + displacement ]
+      this.type = array.element
+    } else {
+      assert 0
+    }
+    switch this.type.size() {
+      case 2  this.scale = Scale.2Bytes
+      case 4  this.scale = Scale.4Bytes
+      case 8  this.scale = Scale.8Bytes
+      default this.scale = Scale.1Byte
+    }
+  }
+
+  fn getRegisterOf(this, value) {    
+    const  input = this.defs.items[value.index]
+    assert input.ranges.first
+    const range = findInputOf(this.def.inputs, input.value)
+    assert range.slot && range.slot.reg.isaGpr()
+    return range.slot.reg
+  }
+}
+
+
+fn findInputOfPhi(input, value) {
+  const inputValue = input.value
+  for var range = input.ranges.last; range; range = range.qprev {
+    switch range.start.value {
+      case assign: ssa.Assign {
+        return range if assign.operands.items[ssa.op1].value.node == value &&
+                        assign.operands.items[ssa.op2].value.node == inputValue
+      }
+    }
+  }
+  assert 0
+  return null
+}
+
+
+fn findInputOf(inputs, value) {
+  for range in inputs {
+    return range if range.owner.value == value
+  }  
+  assert 0
+  return null
+}

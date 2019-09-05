@@ -1,0 +1,149 @@
+define NULL_HASH 0x7FFF_FFFF_FFFF_FFFFu64
+
+struct Item(T) {
+  var hash    = 0u64
+  var next    = -1
+  var bucket  = -1
+  var value   = T{}
+}
+
+struct Dict(T) {
+  readonly items    = Item(T)*{}
+  readonly length   = 0
+  readonly capacity = 0
+
+  fn dispose(this): this {
+    import mfree from memory
+    this.items = mfree(this.items)
+    this.length = 0
+    this.capacity = 0
+  }
+
+  fn disposeWith(this, disposer) {
+    if !disposer {
+      disposer = disposer{  this.items[0].value }
+    }
+    for var i = 0; i < this.length; ++i {
+      disposer(this.items[i].value)
+    }
+    this.dispose()
+  }
+
+  fn clear(this): this {
+    this.length = 0
+  }
+
+  fn clearWith(this, disposer) {
+    if !disposer {
+      disposer = disposer{ this.items[0].value }
+    }
+    for var i = 0; i < this.length; ++i {
+      disposer(this.items[i].value)
+    }
+    return this.clear()
+  }
+
+  fn isEmpty(this) = this.length == 0
+  fn isNotEmpty(this) = this.length > 0
+
+  fn first(this) {
+    assert this.length > 0
+    return this.items[0].value
+  }
+
+  fn last(this) {
+    assert this.length > 0
+    return this.items[this.length - 1].value
+  }
+
+  fn [](this, index) {
+    assert index >= 0 && index <= this.length with "Index #{index} out of bounds: 0 - #{this.length}"
+    return this.items[index].value
+  }
+
+  fn iterator(this) {
+    return {
+      pos  = this.items,
+      end  = this.items + this.length,
+      next = fn(self) {
+        assert self.pos <= self.end
+        if self.pos < self.end {
+          const item = self.pos
+          ++self.pos
+          return (item.value, false)
+        }
+        return (T{}, true)
+      }
+    }
+  }
+
+  fn reserve(this, length): this {
+    import malloc from memory
+    if this.length == this.capacity {
+      const cap = nextPrime(this.capacity)
+      this.items = malloc(this.items, cap * sizeof(Item(T)))
+      for var i = 0; i < cap; ++i {
+        this.items[i].next = -1
+        this.items[i].bucket = -1
+      }
+      for this.capacity = 0; this.capacity < this.length; ++this.capacity {
+        const bucket = this.items[this.capacity].hash % UInt64(cap)
+        this.items[this.capacity].next = this.items[bucket].bucket
+        this.items[bucket].bucket = this.capacity
+      }
+      this.capacity = cap
+      /*for var i = 0; i < this.capacity; ++i {
+        println("i = #{i}; i.next = #{this.items[i].next}; i.bucket = #{this.items[i].bucket}")
+      }*/
+    } else {
+      assert this.length < this.capacity
+    }
+  }
+
+  fn append(this, hash_, value) {
+    this.reserve(1)
+    const hash = UInt64(hash_)
+    const bucket = hash % UInt64(this.capacity)
+    for var i = this.items[bucket].bucket; i >= 0; i = this.items[i].next {
+      if this.items[i].hash == hash {
+        assert with "dict collision: #{this.items[i].hash} == #{hash}; i = #{i}; this.length = #{this.length}"
+      }
+    }
+    this.items[this.length].value = value
+    this.items[this.length].next = this.items[bucket].bucket
+    this.items[this.length].hash = hash
+    this.items[bucket].bucket = this.length
+    return this.items[this.length++].value
+
+  }
+
+  fn indexOf(this, hash_) {
+    return -1 if !this.capacity
+    const hash = UInt64(hash_)
+    const bucket = hash % UInt64(this.capacity)
+    for var i = this.items[bucket].bucket; i >= 0; i = this.items[i].next {
+      return i if this.items[i].hash == hash
+    }
+    return -1
+  }
+
+  fn contains(this, hash) {
+    return this.indexOf(hash) >= 0
+  }
+
+  fn nextPrime(n) {
+    for var i = 0; i < primes.length; ++i {
+      return primes[i] if primes[i] > n
+    }
+    assert 0
+    return 0
+  }
+}
+
+static primes = [
+  3, 7, 11, 17, 23, 29, 37, 47, 59, 71, 89, 107, 131, 163, 197, 239, 293, 353, 431, 521, 631, 761, 919,
+  1103, 1327, 1597, 1931, 2333, 2801, 3371, 4049, 4861, 5839, 7013, 8419, 10103, 12143, 14591,
+  17519, 21023, 25229, 30293, 36353, 43627, 52361, 62851, 75431, 90523, 108631, 130363, 156437,
+  187751, 225307, 270371, 324449, 389357, 467237, 560689, 672827, 807403, 968897, 1162687, 1395263,
+  1674319, 2009191, 2411033, 2893249, 3471899, 4166287, 4999559, 5999471, 7199369
+]
